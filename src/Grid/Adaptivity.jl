@@ -75,9 +75,8 @@ Detects holes and clusters, applies the conservative remap for every event on th
 changes the particle set, and rebuilds the neighbour lists. `max_order` is the scheme's maximum
 consistency order (new particles start there, and `exclude_reduced_order` compares against it).
 Requires valid neighbour lists and volumes (`update_volumes!`). `mass_residual` is the change of the interior
-content `Σ V U` (boundary particles excluded) over the call, which should be at round-off level; with a
-`volume_estimator` the ghosts' content changes with their re-estimated volumes, so `total_mass` (which includes
-them) does not stay exact on grids with walls. Merges and insertions involve interior
+content `Σ V U` (boundary particles excluded, which carry no volume) over the call, which should be at
+round-off level. Merges and insertions involve interior
 particles only (no insertion between an interior particle and a ghost). On a grid whose buffers
 `reserve!` froze, a `CapacityError` is thrown before the grid is changed: the particle buffers and the neighbour
 slots the new particle set needs (`_slots_after_events`) are checked before the first remap.
@@ -210,8 +209,8 @@ steps use, and the states stay the remap's up to that small correction. Keeping 
 (`U_i ← V_i^remap U_i / V_i^est`) would also be exact, but the remap's volumes (integrals of the Shepard partition)
 and an estimator's differ by several percent per particle near an event, which that would put into the states.
 `hg` is the host grid of the event work (`pg` itself on the host, its host copy for a device grid).
-Only the interior content is restored: the estimator also changes the volumes of ghost particles near an event, and
-their content change stays with them (it used to be moved onto the interior, i.e. across the wall).
+Ghost particles carry no volume, so the interior content is the whole content (up to 0.7.9 the ghosts had volumes
+and their content change was moved onto the interior, i.e. across the wall).
 """
 function _reestimate_volumes!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, est::VolumeEstimator,
                               changed::Dict{Int, Tuple{State{M, T}, State{M, T}}}) where {D, M, T}

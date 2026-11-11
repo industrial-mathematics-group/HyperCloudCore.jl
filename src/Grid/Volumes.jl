@@ -24,11 +24,14 @@ export VolumeEstimator, ShepardVolumes, MLSVolumes, update_volumes!, interior_ma
 #                    boxes (below). Costs a serial lattice sweep (3–20 time steps when re-estimated
 #                    every step).
 #
-# Bounded boxes: the ghost particles outside Ω get volumes too, and the final renormalisation to
-# Σ V = |Ω| runs over all particles, ghosts included (MLS clamps negative ghost volumes to zero
-# first). Σ V f is therefore first order (Shepard; MLS P = 2) or second order (MLS P = 0, 1), and the
-# discrete mass Σ V U includes the (boundary-condition driven) ghost content. Measured orders of
-# Σ V f against ∫_Ω f (1-D, R = 2.5Δx, N = 40…320, docs/src/particle_grids/volumes.md).
+# Bounded regions: only the interior particles carry volume, Σ_interior V = |Ω| exactly, and the ghost particles
+# outside Ω get none (V = 0), so Σ V U is the content of the region. Up to 0.9 the ghosts got volumes as well and
+# the renormalisation ran over all particles, so the interior volumes summed to less than |Ω| by the ghosts'
+# share (4 % in 1-D at h = 1/160, 30-40 % on a 2-D box at N = 20) and the quadrature over the interior was off
+# by that much. Shepard's interior quadrature is first order on a box (a particle on the wall gets a whole cell,
+# 2e-3 in 1-D and 2e-4 in 2-D at N = 40); MLS forms its partition from the interior particles only, so its
+# reproduction holds up to the wall (orders 2 in 1-D, the lattice's midpoint rule, and 3-4 in 2-D). Measured
+# against ∫_Ω f (R = 2.5Δx, docs/src/particle_grids/volumes.md).
 
 abstract type VolumeEstimator end
 
@@ -37,17 +40,21 @@ abstract type VolumeEstimator end
 
 Kernel-density volumes `V_i ∝ 1 / S_i`, `S_i = w(0) + Σ_j w_ij`, followed by `sweeps`
 partition-of-unity smoothing sweeps `V_i ← Σ_j (w_ij / S_j) V_j` (which preserve Σ V exactly),
-and a final renormalisation to `Σ V = |Ω|`. Requires a kernel that is finite at zero distance
-(`ExponentialWeightFunction`; `InverseWeightFunction` is not suitable).
+and a final renormalisation so that the interior volumes sum to `|Ω|` (ghost particles get no volume).
+Requires a kernel that is finite at zero distance (`ExponentialWeightFunction`; `InverseWeightFunction` is
+not suitable).
 
-Exact (`V_i = Δx^D`) on a uniform periodic lattice. On a bounded box the quadrature `Σ V_i f(x_i)` is first
-order, since the ghost particles get volumes too and the renormalisation runs over all particles. On a jittered
+Exact (`V_i = Δx^D`) on a uniform periodic lattice. On a bounded box the quadrature `Σ V_i f(x_i)` over the
+interior is first order (a particle on the wall gets a whole cell: 2e-3 in 1-D, 2e-4 in 2-D at N = 40). On a jittered
 periodic cloud it does not converge reliably (error about 2e-3 for N = 40…320 at 30 % jitter). On a cloud
 whose spacing varies smoothly (a moving grid) `S_i` is a
 lattice sum over a fixed number of neighbours, which is not proportional to the local density, so
 `Σ V_i f(x_i)` has a bias that depends on the local stretch and does **not** shrink with the resolution
 (−2e-3 for a smooth profile on a grid stretched by ±50 %, at every N); use [`MLSVolumes`](@ref) where the
 discrete mass of a moving grid matters, at a higher cost per update.
+
+(Up to 0.9 the ghosts got volumes too and the renormalisation ran over all particles, so the interior volumes
+summed to less than `|Ω|` by the ghosts' share: 4 % in 1-D at h = 1/160, 30-40 % on a 2-D box at N = 20.)
 """
 struct ShepardVolumes <: VolumeEstimator
     sweeps::Int
@@ -63,9 +70,9 @@ lattice is not stored). `P = 0` is the background-integrated Shepard partition.
 
 The shape functions reproduce polynomials of degree `P`, and on periodic clouds the quadrature `Σ V_i f(x_i)`
 converges at about order `P + 1` for `P ≥ 1`, also on jittered and moving clouds (the discrete mass of a moving
-grid converges; `P = 0` is first order on jittered clouds). On a bounded box the ghost particles take part in the
-renormalisation, and their negative volumes are clamped to zero first: measured order 2 for `P = 0, 1` and 1 for
-`P = 2`. The lattice sweep
+grid converges; `P = 0` is first order on jittered clouds). On a bounded region the partition is formed by the
+interior particles only (ghosts get no volume), so the reproduction holds up to the wall: measured orders 2 in
+1-D (the lattice's midpoint rule) and 3–4 in 2-D, interior volumes summing to `|Ω|` exactly. The lattice sweep
 is a serial host loop: as the re-estimation of a moving grid it costs about 3 (1-D) to 20 (2-D) explicit time
 steps of a low-order scheme. On a device grid it runs on a host copy (only the volumes are copied back).
 """
@@ -101,7 +108,8 @@ domain_volume(pg::ParticleGrid) = domain_volume(pg.geometry)
 """
     total_mass(pg) -> State{M, T}
 
-Discrete conserved content `Σ_i V_i U_i` over all particles of the current cloud.
+Discrete conserved content `Σ_i V_i U_i` over all particles of the current cloud. Ghost particles carry no
+volume, so this is the content of the region (see also [`interior_mass`](@ref), which skips them explicitly).
 """
 function total_mass(pg::ParticleGrid{D, M, T}) where {D, M, T}
     N = pg.meta.N
@@ -109,8 +117,13 @@ function total_mass(pg::ParticleGrid{D, M, T}) where {D, M, T}
     return mapreduce((v, u) -> v * u, +, view(pg.core.volumes, 1:N), view(pg.rhos, 1:N); init = zero(State{M, T}))
 end
 
-# `Σ V_i U_i` over the interior particles (boundary/ghost particles excluded): the content of the domain, which the
-# adaptivity keeps exact. A reduction like `total_mass`, so it works on device grids as well.
+"""
+    interior_mass(pg) -> State{M, T}
+
+`Σ V_i U_i` over the interior particles (boundary/ghost particles excluded): the content of the domain, which the
+adaptivity keeps exact. Equal to [`total_mass`](@ref) as long as the ghost volumes are zero (every estimator sets
+them so). A reduction like `total_mass`, so it works on device grids as well.
+"""
 function interior_mass(pg::ParticleGrid{D, M, T}) where {D, M, T}
     N = pg.meta.N
     N == 0 && return zero(State{M, T})
@@ -195,7 +208,8 @@ function update_volumes!(pg::ParticleGrid{D, M, T}, est::ShepardVolumes) where {
     if !isfinite(w0) || w0 > T(1e8) * wf(pg.meta.dx[1]^2)
         # Singular kernel (e.g. InverseWeightFunction): the Shepard partition degenerates to a delta.
         @warn "ShepardVolumes needs a kernel that is bounded at zero distance; using uniform volumes |Ω|/N." maxlog = 1
-        fill!(view(V, 1:N), domain_volume(pg) / N)
+        fill!(view(V, 1:N), one(T))
+        _renormalise_volumes!(pg)                       # |Ω| / N_interior inside, zero for the ghosts
         return nothing
     end
 
@@ -229,11 +243,16 @@ end
     return nothing
 end
 
-# Clamps negative volumes to zero and rescales to Σ V = |Ω| (broadcasts and a reduction: runs on a device grid).
+# Zeroes the ghost volumes, clamps negative ones and rescales the interior volumes to Σ V = |Ω| (broadcasts and a
+# reduction: runs on a device grid).
 function _renormalise_volumes!(pg::ParticleGrid{D, M, T}) where {D, M, T}
-    V = view(pg.core.volumes, 1:pg.meta.N)
-    V .= max.(V, zero(T))
-    V .*= domain_volume(pg) / sum(V)
+    N   = pg.meta.N
+    V   = view(pg.core.volumes, 1:N)
+    isb = view(pg.core.is_boundary, 1:N)
+    V  .= ifelse.(isb, zero(T), max.(V, zero(T)))
+    V_int = sum(V)
+    V_int > zero(T) || return nothing
+    V .*= domain_volume(pg) / V_int
     return nothing
 end
 
@@ -263,10 +282,16 @@ function update_volumes!(pg::ParticleGrid{D, M, T}, est::MLSVolumes{P}) where {D
     idx  = Int[]
     dvec = Space{D, T}[]
 
+    isb  = pg.core.is_boundary
     for I in CartesianIndices(nq)
         y = Space{D, T}(ntuple(d -> geom.mins[d] + (I[d] - T(0.5)) * h[d], Val(D)))
         geom.is_interior(y) || continue
         n = _collect_near!(pg, y, R_sq, idx, dvec)
+        # The partition of unity over Ω is formed by the interior particles only: a ghost's shape function would
+        # take a share of Ω that no interior particle integrates (the ghosts summed to 4 % of |Ω| in 1-D at h = 1/160),
+        # and its negative parts had to be clamped. Without them the quadrature is exact for degree-P polynomials up to
+        # the wall (one-sided reproduction), and the ghost volumes are zero.
+        n = _drop_ghosts!(idx, dvec, n, isb)
         n == 0 && continue
         _accumulate_mls_shapes!(V, idx, dvec, n, wf, Val(P), Val(B_full), invL, ω)
     end
@@ -283,6 +308,17 @@ function _update_volumes_on_host!(pg::ParticleGrid, est::VolumeEstimator)
     update_volumes!(hg, est)
     copyto!(parent(pg.core.volumes), 1, parent(hg.core.volumes), 1, N)
     return nothing
+end
+
+# Compacts the first `n` entries of the point query to the interior particles.
+function _drop_ghosts!(idx, dvec, n, isb)
+    m = 0
+    @inbounds for k in 1:n
+        isb[idx[k]] && continue
+        m += 1
+        idx[m], dvec[m] = idx[k], dvec[k]
+    end
+    return m
 end
 
 # φ_i(y) = w_i p_i' a,  (Σ_k w_k p_k p_k') a = e_1,  p_k = (1, basis((x_k − y)/dx))

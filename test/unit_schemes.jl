@@ -887,19 +887,41 @@ end
         x    = i -> pg.core.positions[i][1]
         quad = f -> sum(pg.core.volumes[i] * f(x(i)) for i in 1:N)
 
-        @test sum(view(pg.core.volumes, 1:N)) ≈ 2.0                 # Shepard: Σ V = |Ω| exactly
+        ghost = view(pg.core.is_boundary, 1:N)
+        @test sum(view(pg.core.volumes, 1:N)) ≈ 2.0                 # Shepard: Σ V = |Ω| exactly ...
+        @test all(i -> !ghost[i] || pg.core.volumes[i] == 0, 1:N)   # ... over the interior: ghosts carry none
         err_shepard = abs(quad(x -> x^2) - 2 / 3)
 
         update_volumes!(pg, MLSVolumes(2; samples_per_dx = 4))        # reproduces quadratics
         @test sum(view(pg.core.volumes, 1:N)) ≈ 2.0
+        @test all(i -> !ghost[i] || pg.core.volumes[i] == 0, 1:N)
         @test all(v -> v >= 0, view(pg.core.volumes, 1:N))
-        # Exterior (ghost) particles can get negative MLS volumes; they are clamped to zero before
-        # the renormalisation, which costs some of the polynomial exactness near a non-periodic
-        # boundary (the clamped mass is O(dx) per ghost). Exactness is tested on the periodic cloud below.
+        # The partition is formed by the interior particles, so quadratics are reproduced up to the wall (the
+        # lattice's midpoint rule is what is left). Up to 0.9 the ghosts were part of the partition and their
+        # negative volumes were clamped, which cost the exactness near the boundary (errors of 1e-3).
         err_mls = abs(quad(x -> x^2) - 2 / 3)
-        @test err_mls < 5e-3
+        @test err_mls < 2e-5
         @test err_mls < err_shepard
-        @test abs(quad(x -> x) - 0.0) < 5e-3
+        @test abs(quad(x -> x) - 0.0) < 2e-5
+    end
+
+    @testset "Bounded 2-D box: the interior volumes sum to |Ω|, the ghosts carry none" begin
+        # At N = 20 the ghost band holds 40 % of the particles: with the former all-particle renormalisation the
+        # interior volumes summed to 0.6 |Ω| and Σ V f over the region was off by 40 %
+        geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0))
+        h    = 1 / 20
+        pg   = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        N    = pg.meta.N
+        inner = interior_indices(pg)
+        f(x) = exp(x[1]) * cos(x[2]); If = (exp(1) - 1) * sin(1)
+        quad = () -> sum(pg.core.volumes[i] * f(pg.core.positions[i]) for i in inner)
+        @test sum(pg.core.volumes[i] for i in inner) ≈ 1.0
+        @test all(i -> !pg.core.is_boundary[i] || pg.core.volumes[i] == 0, 1:N)
+        @test abs(quad() - If) / If < 5e-4                            # Shepard: 1.6e-4 (was 0.44)
+        update_volumes!(pg, MLSVolumes(1))
+        @test sum(pg.core.volumes[i] for i in inner) ≈ 1.0 && all(i -> !pg.core.is_boundary[i] || pg.core.volumes[i] == 0, 1:N)
+        @test abs(quad() - If) / If < 1e-4                            # 2.3e-5
+        @test total_mass(set_ic!(pg, x -> 3.0))[1] ≈ 3.0               # the content of the region, ghosts excluded
     end
 
     @testset "Quadrature order on a jittered periodic cloud (no ghosts)" begin
