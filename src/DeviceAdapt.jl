@@ -15,7 +15,8 @@ using Adapt
 Adapt.adapt_structure(to, m::GridMetadata) = GridMetadataView(m)
 
 Adapt.adapt_structure(to, c::ParticleGridCore{D, T}) where {D, T} = ParticleGridCore{D, T}(
-    adapt(to, c.positions), adapt(to, c.is_boundary), adapt(to, c.volumes), adapt(to, c.tags), adapt(to, c.particle_orders))
+    adapt(to, c.positions), adapt(to, c.is_boundary), adapt(to, c.volumes), adapt(to, c.tags), adapt(to, c.particle_orders),
+    adapt(to, c.normals), adapt(to, c.wall_distances))
 
 Adapt.adapt_structure(to, nd::NeighborData{D, T, WF}) where {D, T, WF} = NeighborData{D, T, WF}(
     nd.weight_func, adapt(to, nd.ranges), adapt(to, nd.indices), adapt(to, nd.weights), adapt(to, nd.distances),
