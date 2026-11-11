@@ -998,6 +998,14 @@ end
                 @test isempty(onwall) || minimum(sum(abs2, xs[i] - xs[j]) for i in onwall for j in eachindex(xs) if j != i) >= (dx / 4 - 1e-12)^2
             end
         end
+        # a case where snapped points landed next to jittered interior ones before the clash check included them
+        # (0.19h apart); now they keep h/4
+        hj = 0.037
+        pj = ParticleGrid(GeometricDomain(Ball((0.0, 0.0), 1.0)), (hj, hj), ExponentialWeightFunction(1.0, 2.5hj), 1;
+                          randomness = (0.3hj, 0.3hj), rng = MersenneTwister(3))
+        xj = view(pj.core.positions, 1:pj.meta.N)
+        wj = [i for i in eachindex(xj) if abs(pj.core.wall_distances[i]) <= 1e-12]
+        @test !isempty(wj) && minimum(sum(abs2, xj[i] - xj[j]) for i in wj for j in eachindex(xj) if j != i) >= (hj / 4 - 1e-12)^2
         # also behind a curved wall: no jittered interior point ends up outside the disc
         pgd = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
         pgdj = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1;
