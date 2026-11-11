@@ -1,0 +1,17 @@
+legacy disc                        N 550->557 Nint 315->321 new interior 6 new ghosts 7 removed 6 (old ghosts: true, old φ max NaN) flips 0 min ghost φ NaN->NaN min spacing 0.0427->0.0427
+plate                              (new only) Nint=3256 minghostφ=0.002077873722144897
+rect T=Float32 D=2 j=0.3 per=false N 699->709 Nint 408->441 new interior 33 new ghosts 10 removed 33 (old ghosts: true, old φ max 0.0197) flips 0 min ghost φ 5.81e-5->0.0365 min spacing 0.0223->0.0223
+rect T=Float32 D=2 j=0.3 per=true  N 527->540 Nint 398->420 new interior 22 new ghosts 13 removed 22 (old ghosts: true, old φ max 0.0139) flips 0 min ghost φ 0.000254->0.0359 min spacing 0.0238->0.0238
+rect T=Float64 D=1 j=0.45 per=false N 26->27 Nint 20->21 new interior 1 new ghosts 1 removed 1 (old ghosts: true, old φ max 0.0135) flips 0 min ghost φ 0.0135->0.0345 min spacing 0.0122->0.0122
+rect T=Float64 D=1 j=0.45 per=true N 20->20 Nint 20->20 new interior 0 new ghosts 0 removed 0 (old ghosts: true, old φ max 0) flips 0 min ghost φ Inf->Inf min spacing 0.0122->0.0122
+rect T=Float64 D=2 j=0.2 per=false N 699->715 Nint 401->441 new interior 40 new ghosts 16 removed 40 (old ghosts: true, old φ max 0.00969) flips 0 min ghost φ 0.000124->0.04 min spacing 0.0307->0.0316
+rect T=Float64 D=2 j=0.2 per=true  N 538->540 Nint 405->420 new interior 15 new ghosts 2 removed 15 (old ghosts: true, old φ max 0.00787) flips 0 min ghost φ 0.000518->0.04 min spacing 0.0307->0.0307
+rect T=Float64 D=2 j=0.45 per=false N 684->699 Nint 401->441 new interior 40 new ghosts 15 removed 40 (old ghosts: true, old φ max 0.0218) flips 0 min ghost φ 0.000279->0.0276 min spacing 0.00932->0.00905
+rect T=Float64 D=2 j=0.45 per=true N 530->533 Nint 405->420 new interior 15 new ghosts 3 removed 15 (old ghosts: true, old φ max 0.0177) flips 0 min ghost φ 0.00117->0.0276 min spacing 0.00932->0.00932
+rect T=Float64 D=3 j=0.3 per=false N 4007->4299 Nint 998->1331 new interior 333 new ghosts 292 removed 333 (old ghosts: true, old φ max 0.0385) flips 0 min ghost φ 0.0001->0.0702 min spacing 0.0416->0.0416
+rect T=Float64 D=3 j=0.3 per=true  N 2687->2757 Nint 1000->1210 new interior 210 new ghosts 70 removed 210 (old ghosts: true, old φ max 0.0413) flips 0 min ghost φ 0.000183->0.07 min spacing 0.0423->0.0423
+rect offlattice                    N 700->716 Nint 413->441 new interior 28 new ghosts 16 removed 28 (old ghosts: true, old φ max 0.00996) flips 0 min ghost φ 7.98e-5->0.0124 min spacing 0.0307->0.0307
+sphere D=2                         N 550->556 Nint 315->321 new interior 6 new ghosts 6 removed 6 (old ghosts: true, old φ max 0.0284) flips 0 min ghost φ 0.00188->0.00188 min spacing 0.0427->0.0427
+sphere D=3                         N 2310->2330 Nint 526->537 new interior 11 new ghosts 20 removed 11 (old ghosts: true, old φ max 0.042) flips 0 min ghost φ 0.000225->0.000225 min spacing 0.0833->0.0833
+step                               N 1549->1597 Nint 1002->1089 new interior 87 new ghosts 48 removed 87 (old ghosts: true, old φ max 0.015) flips 0 min ghost φ 4.33e-5->0.035 min spacing 0.0212->0.0212
+wedge30                            N 315->335 Nint 121->135 new interior 14 new ghosts 20 removed 14 (old ghosts: true, old φ max 0.0196) flips 0 min ghost φ 0.00125->0.00555 min spacing 0.0127->0.0127

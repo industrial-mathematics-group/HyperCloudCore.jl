@@ -1,0 +1,4 @@
+docs plate example: grid built, N = 1080
+half space with box: grid built, N = 459 domain_volume 0.49999999999999994
+open Cuboid channel: grid built, domain_volume 1.0
+open Cuboid channel volumes: (0.0017636569930202875, 0.0023146978847171508); interior_mass of 1: [0.7427570014712825]

@@ -1,0 +1,9 @@
+disc r=1           j=0.0  inserted   0 removed   0   interior on the wall  68 ->  68
+disc r=1           j=0.2  inserted   7 removed   2   interior on the wall  57 ->  56
+disc r=1           j=0.3  inserted   8 removed   4   interior on the wall  54 ->  52
+box minus disc     j=0.0  inserted   0 removed   0   interior on the wall 140 -> 140
+box minus disc     j=0.2  inserted   5 removed   0   interior on the wall  16 ->  16
+box minus disc     j=0.3  inserted   6 removed   2   interior on the wall  16 ->  16
+box 1.03 x 1.01    j=0.0  inserted   0 removed   0   interior on the wall  62 ->  62
+box 1.03 x 1.01    j=0.2  inserted   3 removed   2   interior on the wall  15 ->  14
+box 1.03 x 1.01    j=0.3  inserted   4 removed   0   interior on the wall  13 ->  13

@@ -1,0 +1,2 @@
+F64 x = [-1.0e-170, 0.5]: is_interior true, sd 0.0, tag 0
+F32 x = Float32[-1.0f-25]: is_interior true, tag 0

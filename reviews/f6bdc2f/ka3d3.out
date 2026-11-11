@@ -1,0 +1,13 @@
+Polyester first call (compile) 3-D degree 3: 12.9 s
+KA CPU first call (compile) 3-D degree 3: 1798.0 s
+┌ Warning: Assignment to `pg` in soft scope is ambiguous because a global variable by the same name exists: `pg` will be treated as a new local. Disambiguate by using `local pg` to suppress this warning or `global pg` to assign to the existing global variable.
+└ @ /tmp/brev_b/probes/ka3.jl:39
+┌ Warning: Assignment to `eq` in soft scope is ambiguous because a global variable by the same name exists: `eq` will be treated as a new local. Disambiguate by using `local eq` to suppress this warning or `global eq` to assign to the existing global variable.
+└ @ /tmp/brev_b/probes/ka3.jl:40
+┌ Warning: Assignment to `pg` in soft scope is ambiguous because a global variable by the same name exists: `pg` will be treated as a new local. Disambiguate by using `local pg` to suppress this warning or `global pg` to assign to the existing global variable.
+└ @ /tmp/brev_b/probes/ka3.jl:54
+┌ Warning: Assignment to `eq` in soft scope is ambiguous because a global variable by the same name exists: `eq` will be treated as a new local. Disambiguate by using `local eq` to suppress this warning or `global eq` to assign to the existing global variable.
+└ @ /tmp/brev_b/probes/ka3.jl:55
+┌ Warning: Assignment to `buf` in soft scope is ambiguous because a global variable by the same name exists: `buf` will be treated as a new local. Disambiguate by using `local buf` to suppress this warning or `global buf` to assign to the existing global variable.
+└ @ /tmp/brev_b/probes/ka3.jl:56
+exit 0

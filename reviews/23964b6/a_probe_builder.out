@@ -1,0 +1,17 @@
+ERROR: LoadError: Domain :shape: the shape has element type Float32, the run uses Float64; build the shape in Float64
+Stacktrace:
+ [1] error(s::String)
+   @ Base ./error.jl:44
+ [2] build_domain(::Val{:shape}, domain_conf::Dict{Symbol, Any}, context::Dict{Symbol, Any})
+   @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-fixes/src/Builders/domains.jl:116
+ [3] build_domain(domain_conf::Dict{Symbol, Any}, context::Dict{Symbol, Any})
+   @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-fixes/src/Builders/domains.jl:79
+ [4] top-level scope
+   @ /tmp/brev_a/probes/probe_builder.jl:4
+ [5] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [6] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [7] _start()
+   @ Base ./client.jl:577
+in expression starting at /tmp/brev_a/probes/probe_builder.jl:4

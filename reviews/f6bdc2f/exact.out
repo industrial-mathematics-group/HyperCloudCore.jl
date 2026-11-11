@@ -1,0 +1,53 @@
+Float64  D=1 q=1 R=2.5 jit=0.20 ext per=0: ghosts=    6  max rel err=2.78e-15  #>1e-08: 0
+Float64  D=1 q=2 R=2.5 jit=0.20 ext per=0: ghosts=    6  max rel err=1.03e-13  #>1e-08: 0
+Float64  D=1 q=3 R=3.5 jit=0.20 ext per=0: ghosts=    8  max rel err=8.59e-12  #>1e-08: 0
+Float64  D=1 q=1 R=2.5 jit=0.20 mir per=0: ghosts=    6  max rel err=9.74e-16  #>1e-08: 0
+Float64  D=1 q=2 R=2.5 jit=0.20 mir per=0: ghosts=    6  max rel err=3.17e-15  #>1e-08: 0
+Float64  D=1 q=3 R=3.5 jit=0.20 mir per=0: ghosts=    8  max rel err=1.56e-14  #>1e-08: 0
+Float64  D=2 q=1 R=2.5 jit=0.20 ext per=0: ghosts=  286  max rel err=2.36e-14  #>1e-08: 0
+Float64  D=2 q=2 R=2.5 jit=0.20 ext per=0: ghosts=  286  max rel err=1.87e-12  #>1e-08: 0
+Float64  D=2 q=3 R=3.5 jit=0.20 ext per=0: ghosts=  397  max rel err=2.31e-10  #>1e-08: 0
+Float64  D=2 q=1 R=2.5 jit=0.20 mir per=0: ghosts=  286  max rel err=1.86e-15  #>1e-08: 0
+Float64  D=2 q=2 R=2.5 jit=0.20 mir per=0: ghosts=  286  max rel err=7.37e-14  #>1e-08: 0
+Float64  D=2 q=3 R=3.5 jit=0.20 mir per=0: ghosts=  397  max rel err=1.70e-13  #>1e-08: 0
+Float64  D=3 q=1 R=2.5 jit=0.20 ext per=0: ghosts= 3104  max rel err=5.08e-14  #>1e-08: 0
+Float64  D=3 q=2 R=2.5 jit=0.20 ext per=0: ghosts= 3104  max rel err=5.93e-12  #>1e-08: 0
+Float64  D=3 q=1 R=2.5 jit=0.20 mir per=0: ghosts= 3104  max rel err=3.84e-15  #>1e-08: 0
+Float64  D=3 q=2 R=2.5 jit=0.20 mir per=0: ghosts= 3104  max rel err=2.35e-14  #>1e-08: 0
+Float32  D=1 q=1 R=2.5 jit=0.20 ext per=0: ghosts=    6  max rel err=1.99e-06  #>0.001: 0
+Float32  D=1 q=2 R=2.5 jit=0.20 ext per=0: ghosts=    6  max rel err=2.85e-05  #>0.001: 0
+Float32  D=1 q=3 R=3.5 jit=0.20 ext per=0: ghosts=    8  max rel err=2.51e-03  #>0.001: 2
+Float32  D=1 q=1 R=2.5 jit=0.20 mir per=0: ghosts=    6  max rel err=3.59e-07  #>0.001: 0
+Float32  D=1 q=2 R=2.5 jit=0.20 mir per=0: ghosts=    6  max rel err=2.85e-06  #>0.001: 0
+Float32  D=1 q=3 R=3.5 jit=0.20 mir per=0: ghosts=    8  max rel err=1.03e-05  #>0.001: 0
+Float32  D=2 q=1 R=2.5 jit=0.20 ext per=0: ghosts=  287  max rel err=1.58e-05  #>0.001: 0
+Float32  D=2 q=2 R=2.5 jit=0.20 ext per=0: ghosts=  287  max rel err=1.21e-03  #>0.001: 1
+Float32  D=2 q=3 R=3.5 jit=0.20 ext per=0: ghosts=  408  max rel err=1.08e-01  #>0.001: 184
+Float32  D=2 q=1 R=2.5 jit=0.20 mir per=0: ghosts=  287  max rel err=1.00e-06  #>0.001: 0
+Float32  D=2 q=2 R=2.5 jit=0.20 mir per=0: ghosts=  287  max rel err=2.51e-05  #>0.001: 0
+Float32  D=2 q=3 R=3.5 jit=0.20 mir per=0: ghosts=  408  max rel err=3.95e-05  #>0.001: 0
+Float32  D=3 q=1 R=2.5 jit=0.20 ext per=0: ghosts= 3079  max rel err=2.04e-05  #>0.001: 0
+Float32  D=3 q=2 R=2.5 jit=0.20 ext per=0: ghosts= 3079  max rel err=2.01e+00  #>0.001: 540
+Float32  D=3 q=1 R=2.5 jit=0.20 mir per=0: ghosts= 3079  max rel err=2.49e-06  #>0.001: 0
+Float32  D=3 q=2 R=2.5 jit=0.20 mir per=0: ghosts= 3079  max rel err=9.50e-04  #>0.001: 0
+--- high degrees, larger jitter, periodic
+Float64  D=1 q=4 R=3.5 jit=0.20 ext per=0: ghosts=    8  max rel err=2.27e-02  #>1e-08: 8
+Float64  D=1 q=4 R=3.5 jit=0.20 mir per=0: ghosts=    8  max rel err=3.03e-03  #>1e-08: 5
+Float64  D=1 q=5 R=3.5 jit=0.20 ext per=0: ghosts=    8  max rel err=1.15e-02  #>1e-08: 8
+Float64  D=1 q=5 R=3.5 jit=0.20 mir per=0: ghosts=    8  max rel err=1.26e-03  #>1e-08: 8
+Float64  D=2 q=4 R=4.5 jit=0.20 ext per=0: ghosts=  517  max rel err=4.72e-08  #>1e-08: 14
+Float64  D=2 q=4 R=4.5 jit=0.20 mir per=0: ghosts=  517  max rel err=2.27e-12  #>1e-08: 0
+Float64  D=2 q=5 R=4.5 jit=0.20 ext per=0: ghosts=  517  max rel err=5.67e-06  #>1e-08: 197
+Float64  D=2 q=5 R=4.5 jit=0.20 mir per=0: ghosts=  517  max rel err=9.70e-12  #>1e-08: 0
+Float64  D=2 q=2 R=2.5 jit=0.45 ext per=0: ghosts=  274  max rel err=5.96e-12  #>1e-08: 0
+┌ Warning: bc_map and boundary tags do not match: no boundary particle carries tag(s) [1, 2], so their condition is never applied; the boundary particles carry tag(s) [3, 4] (boxes tag the face `2d - 1` / `2d` of axis `d`; up to 0.7.9 1-D and 3-D boxes tagged every boundary particle 1, see get_rectangular_domain).
+└ @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-review/src/Grid/Domains.jl:342
+Float64  D=2 q=2 R=2.5 jit=0.20 ext per=1: ghosts=  134  max rel err=2.48e+00  #>1e-08: 38
+Float64  D=2 q=2 R=2.5 jit=0.45 mir per=0: ghosts=  274  max rel err=6.72e-14  #>1e-08: 0
+Float64  D=2 q=2 R=2.5 jit=0.20 mir per=1: ghosts=  134  max rel err=4.14e-01  #>1e-08: 30
+Float64  D=3 q=2 R=2.5 jit=0.45 ext per=0: ghosts= 2830  max rel err=4.40e-12  #>1e-08: 0
+┌ Warning: bc_map and boundary tags do not match: no boundary particle carries tag(s) [1, 2], so their condition is never applied; the boundary particles carry tag(s) [3, 4, 5, 6] (boxes tag the face `2d - 1` / `2d` of axis `d`; up to 0.7.9 1-D and 3-D boxes tagged every boundary particle 1, see get_rectangular_domain).
+└ @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-review/src/Grid/Domains.jl:342
+Float64  D=3 q=2 R=2.5 jit=0.20 ext per=1: ghosts= 1702  max rel err=4.00e+00  #>1e-08: 805
+Float64  D=3 q=2 R=2.5 jit=0.45 mir per=0: ghosts= 2830  max rel err=2.77e-14  #>1e-08: 0
+Float64  D=3 q=2 R=2.5 jit=0.20 mir per=1: ghosts= 1702  max rel err=3.46e-01  #>1e-08: 823

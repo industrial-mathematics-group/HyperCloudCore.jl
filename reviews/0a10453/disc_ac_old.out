@@ -1,0 +1,16 @@
+== disc acoustics, jitter 0.0, t = 1.0, MUSCL3: max |p - p_exact| over interior, n = 20/40/80 per diameter
+  Exact         6.90e-02 2.44e-02 1.16e-02  EOC 1.50 1.08
+  Mirror1 slip  6.07e-02 2.49e-02 1.33e-02  EOC 1.29 0.91
+  Mirror2 slip  8.65e-02 2.95e-02 1.48e-02  EOC 1.55 0.99
+== disc acoustics, jitter 0.0, t = 3.0, MUSCL3: max |p - p_exact| over interior, n = 20/40/80 per diameter
+  Exact         6.96e-02 4.81e-02 2.57e-02  EOC 0.53 0.90
+  Mirror1 slip  4.16e-02 7.55e-02 5.09e-02  EOC -0.86 0.57
+  Mirror2 slip  6.71e-02 8.37e-02 5.34e-02  EOC -0.32 0.65
+== disc acoustics, jitter 0.3, t = 1.0, MUSCL3: max |p - p_exact| over interior, n = 20/40/80 per diameter
+  Exact         6.94e-02 2.62e-02 1.14e-02  EOC 1.41 1.20
+  Mirror1 slip  6.21e-02 2.48e-02 1.20e-02  EOC 1.33 1.05
+  Mirror2 slip  7.71e-02 2.85e-02 1.30e-02  EOC 1.44 1.13
+== disc acoustics, jitter 0.3, t = 3.0, MUSCL3: max |p - p_exact| over interior, n = 20/40/80 per diameter
+  Exact         6.86e-02 4.77e-02 2.49e-02  EOC 0.53 0.94
+  Mirror1 slip  3.23e-02 6.61e-02 4.26e-02  EOC -1.04 0.63
+  Mirror2 slip  6.29e-02 7.52e-02 4.50e-02  EOC -0.26 0.74

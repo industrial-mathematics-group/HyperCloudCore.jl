@@ -168,7 +168,7 @@ end
 """
     ExtrapolationBC(degree = 1)
 
-Transmissive condition of polynomial degree `degree` (0–5): every boundary particle with the tag takes the value
+Transmissive condition of polynomial degree `degree` (0–5; in 3-D at most 3 is used): every boundary particle with the tag takes the value
 at its own position of an MLS fit through the interior. The data of the fit are the interior particle nearest
 to the boundary particle (the donor, found in its neighbour list and refined by walking the neighbour graph)
 and the donor's interior neighbours; the fit is centred at the boundary particle and weighted by the distance
@@ -182,6 +182,11 @@ interior neighbours is replaced by its best-supported interior neighbour nearest
 whenever the one-sided moment matrix is not positive definite even after the conditional regularisation. A
 boundary particle without any interior particle within two hops keeps its state. The condition needs no wall
 normals, so it works on every domain.
+
+In Float32, degrees ≥ 3 lose accuracy at the ghosts farthest from the data (a cubic evaluated up to `R + 4Δx` beyond
+one-sided data amplifies the round-off: 2-D, degree 3, jittered: 1e-1 relative error, against 1e-3 for degree 2);
+use Float64 for them. A degree `q` needs enough interior data within the cutoff: in 1-D `R ≳ (q + 0.5)Δx`
+(degree 4 runs as degree 3 at `R = 3.5Δx`).
 
 Extrapolation is an *outflow* condition: the ghost states feed back into the interior scheme through the
 stencils of the near-wall particles, and a high-degree one-sided extrapolation amplifies perturbations. At a
@@ -219,8 +224,11 @@ without the bound that loop grew without limit for degrees ≥ 2 with a 5th-orde
 the plain fit (exact for polynomials up to `degree` at every ghost).
 
 For a planar wall the mirror point is the exact reflection, so the condition is as accurate as the fit; on a
-curved wall the mirror image is second-order accurate. Requires a shape-based domain
-([`requires_shape`](@ref)).
+curved wall the mirror image is second-order accurate. Behind a convex corner (outside two faces) the nearest
+wall point is the corner: the normal is the diagonal direction to it and `op` is applied once with it, so an
+operator that reflects the normal velocity reflects the diagonal component only there (`(u, v) → (-v, -u)` at a
+box corner, not `(-u, -v)`), and only the condition of the face whose tag the ghost carries acts. Such ghosts
+are in the stencils of the corner particles only. Requires a shape-based domain ([`requires_shape`](@ref)).
 """
 struct MirrorBC{Q, F, B} <: AbstractBoundaryCondition
     op::F
@@ -243,7 +251,12 @@ function (bc::MirrorBC{Q, F, B})(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq
     return nothing
 end
 
+# In 3-D the degree is capped at 3 (20 unknowns, the limit of the package's other 3-D fits): degrees 4-5 (35/56
+# unknowns) would take StaticArrays' allocating, host-only Cholesky inside the kernel
+_ghost_degree(::Val{Q}, ::Val{D}) where {Q, D} = Val(D == 3 ? min(Q, 3) : Q)
+
 function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, valQ::Val, op, mirror::Val, bounded::Val) where {D, M, T}
+    valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     invL = one(T) / minimum(pg.meta.dx)
     foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
@@ -315,13 +328,19 @@ end
             (j2 != 0 && best2 < best) || break
             j, best = j2, best2
         end
-        # A donor at a corner has too few interior neighbours for the requested degree (3-4 for the 6 unknowns of a
-        # 2-D quadratic); its interior neighbour nearest to the target that carries the degree with the margin is
-        # taken instead, if it has one. The fit stays exact for polynomials whatever the distance; a lowered degree
-        # would not.
-        needed = _fit_support(D, Q)
-        n_sup  = _support_count(j, ranges, indices, isb)
-        if n_sup < needed
+        # Fit degree and donor: the requested degree, at most the donor's order - 1 (0 = order never set), lowered
+        # one step at a time until the donor or, failing that, its interior neighbour nearest to the target carries
+        # the degree with the margin. A donor at a wall or corner has too few interior neighbours for a high degree
+        # (3-4 for the 6 unknowns of a 2-D quadratic) while its neighbours further inside do; the fit stays exact for
+        # polynomials whatever the distance. (Trying the requested degree only and otherwise falling back to what the
+        # wall donor supports made a higher request give a lower degree: 1-D, R = 3.5Δx, degree 4 ran as degree 1
+        # while degree 3 ran as 3.)
+        q = Q
+        n_sup = _support_count(j, ranges, indices, isb)
+        jd = j
+        while q > 0
+            needed = _fit_support(D, q)
+            n_sup >= needed && break
             jb, bb = 0, typemax(eltype(x_t))
             for k in ranges[j]
                 m = indices[k]
@@ -329,16 +348,12 @@ end
                 d2 = sum(abs2, _min_image(pos[m] - x_t, L, Li))
                 d2 < bb && (jb = m; bb = d2)
             end
-            jb != 0 && (j = jb; n_sup = _support_count(j, ranges, indices, isb))
-        end
-        # Fit degree: the requested one, at most the donor's order - 1 (0 = order never set), at most what the
-        # donor and its interior neighbours support with the margin
-        q = Q
-        o = orders[j]
-        o > 0 && (q = min(q, o - 1))
-        while q > 0 && _fit_support(D, q) > n_sup
+            jb != 0 && (jd = jb; break)
             q -= 1
         end
+        j = jd
+        o = orders[j]                                  # the MOOD cap of the donor that is fitted (a lower degree
+        o > 0 && (q = min(q, o - 1))                   # needs less support, so the donor still carries it)
         U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
         if BOUNDED
             # Discrete maximum principle on the ghost state: the mirrored value stays within the range of the data
@@ -393,11 +408,35 @@ end
 # jittered clouds and destabilised the interior scheme.
 @inline function _fit_degree_b(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, buf::AbstractVector{State{M, T}}, rg, indices,
                                pos, isb, L, Li, wf, invL) where {B, q, D, T, M}
+    N_s, b_s = _ghost_moments(Val(B), Val(q), j, x_t, buf, rg, indices, pos, isb, L, Li, wf, invL)
+    C, ok = _cholesky_moment(N_s)
+    ok || return (@inbounds(buf[j]), false)
+    c_s = C \ b_s
+    return (State{M, T}(ntuple(m -> c_s[1, m], Val(M))), true)
+end
+
+# The weighted moments of the fit. Kept out of line on purpose: accumulated in the same function as the Cholesky
+# solve, Julia 1.13.3 / LLVM 20 miscompiled the Float32 3-D degree-2 case on the CPU backends (an unsymmetric moment
+# matrix, ghost errors of 2-7 on data of size 4; KA and Float64 were right, and the trigger depended on the thread
+# count). A separate function avoids the code shape; the Float32 3-D test guards it.
+@noinline function _ghost_moments(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, buf::AbstractVector{State{M, T}}, rg, indices,
+                                  pos, isb, L, Li, wf, invL) where {B, q, D, T, M}
     N_s = zero(SMatrix{B + 1, B + 1, T, (B + 1) * (B + 1)})
     b_s = zero(SMatrix{B + 1, M, T, (B + 1) * M})
     @inbounds begin
+        # The basis is scaled by the largest data distance seen from the target, not by the grid spacing: a ghost
+        # position lies up to R + 4Δx from its data, so with 1/Δx the degree-q columns were ~7^q times the constant
+        # one, and the Float32 moment matrix lost the fit (2-D degree 3: 9e-2 relative error). The value at the
+        # target, the constant term, does not depend on the scale.
+        r2max = sum(abs2, _min_image(pos[j] - x_t, L, Li))
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            r2max = max(r2max, sum(abs2, _min_image(pos[m] - x_t, L, Li)))
+        end
+        s   = r2max > zero(T) ? inv(sqrt(r2max)) : invL
         r   = _min_image(pos[j] - x_t, L, Li)
-        p   = _target_basis(Val(q), r * invL)
+        p   = _target_basis(Val(q), r * s)
         w   = wf(sum(abs2, r))
         N_s += w * (p * p')
         b_s += w * (p * buf[j]')
@@ -405,14 +444,11 @@ end
             m = indices[k]
             isb[m] && continue
             r    = _min_image(pos[m] - x_t, L, Li)
-            p    = _target_basis(Val(q), r * invL)
+            p    = _target_basis(Val(q), r * s)
             w    = wf(sum(abs2, r))
             N_s += w * (p * p')
             b_s += w * (p * buf[m]')
         end
     end
-    C, ok = _cholesky_moment(N_s)
-    ok || return (@inbounds(buf[j]), false)
-    c_s = C \ b_s
-    return (State{M, T}(ntuple(m -> c_s[1, m], Val(M))), true)
+    return N_s, b_s
 end

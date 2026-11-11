@@ -1,0 +1,12 @@
+ball D=2: ghosts 271, max err at mirror point 5.28e-14, mirror points outside the ball: 0, KA diff 0.00e+00
+ball D=3: ghosts 1789, max err at mirror point 2.75e-14, mirror points outside the ball: 0, KA diff 8.88e-16
+┌ Warning: Assignment to `pg` in soft scope is ambiguous because a global variable by the same name exists: `pg` will be treated as a new local. Disambiguate by using `local pg` to suppress this warning or `global pg` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:39
+┌ Warning: Assignment to `eq` in soft scope is ambiguous because a global variable by the same name exists: `eq` will be treated as a new local. Disambiguate by using `local eq` to suppress this warning or `global eq` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:40
+┌ Warning: Assignment to `pg` in soft scope is ambiguous because a global variable by the same name exists: `pg` will be treated as a new local. Disambiguate by using `local pg` to suppress this warning or `global pg` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:54
+┌ Warning: Assignment to `eq` in soft scope is ambiguous because a global variable by the same name exists: `eq` will be treated as a new local. Disambiguate by using `local eq` to suppress this warning or `global eq` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:55
+┌ Warning: Assignment to `buf` in soft scope is ambiguous because a global variable by the same name exists: `buf` will be treated as a new local. Disambiguate by using `local buf` to suppress this warning or `global buf` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:56

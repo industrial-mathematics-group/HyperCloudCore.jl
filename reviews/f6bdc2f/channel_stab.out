@@ -1,0 +1,28 @@
+N=20 MUSCL3 Outflow    t=2: err 7.117e-01  max|u| 0.281
+N=20 MUSCL3 Mirror1 b  t=2: err 3.645e-01  max|u| 0.520
+N=20 MUSCL3 Mirror2 b  t=2: err 5.054e-01  max|u| 0.414
+N=20 MUSCL3 Mirror3 b  t=2: err 5.037e-01  max|u| 0.420
+N=20 MUSCL3 Mirror1 u  t=2: err 4.780e-01  max|u| 0.697
+N=20 MUSCL3 Mirror2 u  t=2: err 4.874e-01  max|u| 0.525
+N=20 MUSCL3 Extrap1    t=2: err 8.314e-01  max|u| 1.457
+N=20 MUSCL5 Outflow    t=2: err 3.677e+00  max|u| 3.675
+N=20 MUSCL5 Mirror1 b  t=2: err 5.033e-01  max|u| 0.723
+N=20 MUSCL5 Mirror2 b  t=2: err 6.515e-01  max|u| 0.415
+N=20 MUSCL5 Mirror3 b  t=2: err 7.228e-01  max|u| 0.391
+N=20 MUSCL5 Mirror1 u  t=2: err 9.220e-01  max|u| 1.221
+N=20 MUSCL5 Mirror2 u  t=2: err 2.368e+00  max|u| 2.370
+N=20 MUSCL5 Extrap1    t=2: err 4.288e+00  max|u| 4.913
+N=40 MUSCL3 Outflow    t=2: err 5.019e-01  max|u| 0.637
+N=40 MUSCL3 Mirror1 b  t=2: err 5.870e-01  max|u| 0.782
+N=40 MUSCL3 Mirror2 b  t=2: err 7.313e-01  max|u| 0.663
+N=40 MUSCL3 Mirror3 b  t=2: err 7.086e-01  max|u| 0.658
+N=40 MUSCL3 Mirror1 u  t=2: err 7.958e-01  max|u| 1.083
+N=40 MUSCL3 Mirror2 u  t=2: err 9.554e-01  max|u| 0.872
+N=40 MUSCL3 Extrap1    t=2: err 1.748e+00  max|u| 1.934
+N=40 MUSCL5 Outflow    t=2: err 4.776e-01  max|u| 1.003
+N=40 MUSCL5 Mirror1 b  t=2: err 6.223e-01  max|u| 0.907
+N=40 MUSCL5 Mirror2 b  t=2: err 7.044e-01  max|u| 0.868
+N=40 MUSCL5 Mirror3 b  t=2: err 6.611e-01  max|u| 0.793
+N=40 MUSCL5 Mirror1 u  t=2: err 1.923e+00  max|u| 2.236
+N=40 MUSCL5 Mirror2 u  t=2: err 6.917e+00  max|u| 6.919
+N=40 MUSCL5 Extrap1    t=2: err 7.532e+00  max|u| 8.433

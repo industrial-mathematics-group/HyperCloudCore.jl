@@ -19,8 +19,12 @@ and half spaces, their unions, intersections and differences, translated and rot
 built on such a domain stores its outward wall normal and signed wall distance (`pg.core.normals`,
 `pg.core.wall_distances`), which the higher-order conditions [`ExtrapolationBC`](@ref) and [`MirrorBC`](@ref)
 use. The bounding box is that of the shape; along an axis where it is unbounded (open box axes, i.e. periodic
-axes, or shapes cut from half spaces) `mins`/`maxs` must be given. A shape used on a periodic axis must be
-open along it (its ends are no boundary; `Cuboid(...; open = ...)`).
+axes, or shapes cut from half spaces) `mins`/`maxs` must be given; on bounded axes they may enlarge the box (the
+lattice is anchored at it), but a box that would crop the shape is an error (intersect the shape with a
+[`Cuboid`](@ref) instead; the bounding boxes of rotated and combined shapes are conservative). A shape used on a
+periodic axis must be open along it (its ends are no boundary; `Cuboid(...; open = ...)`). The volume of the
+region (the shape within the box; [`domain_volume`](@ref)) is computed once here, analytically where the shape
+allows it and by [`shape_volume`](@ref) otherwise; pass `volume` if it is known.
 
 The second constructor takes the interior test `is_interior(x)` and tag function `get_tag(x)` directly (no
 shape; `shape === nothing`). Such a domain has no wall normals (`NaN`), so conditions that need them refuse it
@@ -36,6 +40,7 @@ at grid construction.
 - `get_tag::F_Tag`: A function generating integer boundary tags based on spatial location (`0` inside).
 - `bc_map::Dict{Int, AbstractBoundaryCondition}`: A mapping of integer tags to specific boundary condition evaluators.
 - `shape::S`: The [`AbstractShape`](@ref) of the region, or `nothing`.
+- `volume::T`: The volume of the region within the box (`NaN` without a shape).
 """
 struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
     label::GEO
@@ -46,11 +51,12 @@ struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
     get_tag::F_Tag
     bc_map::Dict{Int, AbstractBoundaryCondition}
     shape::S
+    volume::T
 end
 
 GeometricDomain(label, mins::Space{D, T}, maxs::Space{D, T}, is_periodic::SVector{D, Bool}, is_interior, get_tag,
                 bc_map::Dict{Int, AbstractBoundaryCondition}) where {D, T} =
-    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing)
+    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing, T(NaN))
 
 _periodic_flags(is_periodic::Bool, ::Val{D}) where {D} = SVector{D, Bool}(ntuple(_ -> is_periodic, Val(D)))
 _periodic_flags(is_periodic::NTuple{D, Bool}, ::Val{D}) where {D} = SVector{D, Bool}(is_periodic)
@@ -58,18 +64,34 @@ _periodic_flags(is_periodic::NTuple{D, Bool}, ::Val{D}) where {D} = SVector{D, B
 function GeometricDomain(shape::AbstractShape{D, T};
                          bc_map::Dict{Int, AbstractBoundaryCondition} = Dict{Int, AbstractBoundaryCondition}(),
                          is_periodic::Union{Bool, NTuple{D, Bool}} = false,
-                         mins = nothing, maxs = nothing, label = Val(:shape)) where {D, T}
+                         mins = nothing, maxs = nothing, label = Val(:shape), volume = nothing) where {D, T}
     is_per_svec = _periodic_flags(is_periodic, Val(D))
     bb_lo, bb_hi = bounding_box(shape)
+    # mins/maxs close the unbounded axes; on bounded ones they may enlarge the box (the lattice is anchored at it),
+    # but a box that would crop the shape is refused (the cut would carry no boundary condition)
+    for d in 1:D, (lim, bb, below) in ((mins, bb_lo[d], true), (maxs, bb_hi[d], false))
+        (lim === nothing || !isfinite(bb)) && continue
+        (below ? T(lim[d]) > bb : T(lim[d]) < bb) &&
+            throw(ArgumentError("GeometricDomain: mins/maxs ($(lim[d]) on axis $d) crop the shape (bounding box " *
+                                "$(bb_lo[d]) .. $(bb_hi[d]); the boxes of rotated and combined shapes are conservative, " *
+                                "give one containing it); intersect the shape with a Cuboid to cut it"))
+    end
     lo = Space{D, T}(ntuple(d -> mins === nothing ? bb_lo[d] : T(mins[d]), Val(D)))
     hi = Space{D, T}(ntuple(d -> maxs === nothing ? bb_hi[d] : T(maxs[d]), Val(D)))
     (all(isfinite, lo) && all(isfinite, hi)) ||
         throw(ArgumentError("GeometricDomain: the shape is unbounded along some axis (bounding box $bb_lo .. $bb_hi); " *
                             "give mins/maxs, or intersect the shape with a Cuboid"))
     all(lo .<= hi) || throw(ArgumentError("GeometricDomain: mins must not exceed maxs"))
-    is_interior_func = (pos) -> signed_distance(shape, pos) <= zero(T)
-    tag_func = (pos) -> signed_distance(shape, pos) <= zero(T) ? 0 : boundary_tag(shape, pos)
-    return GeometricDomain(label, lo, hi, is_per_svec, is_interior_func, tag_func, bc_map, shape)
+    is_interior_func = (pos) -> _inside(shape, pos)
+    tag_func = (pos) -> _inside(shape, pos) ? 0 : _checked_tag(boundary_tag(shape, pos), pos)
+    vol = volume === nothing ? _clipped_volume(shape, lo, hi) : T(volume)
+    return GeometricDomain(label, lo, hi, is_per_svec, is_interior_func, tag_func, bc_map, shape, vol)
+end
+
+# Boundary tags are positive: `0` marks interior particles (the scheme would update such a ghost without a condition)
+function _checked_tag(tag::Integer, pos)
+    tag >= 1 || throw(ArgumentError("boundary_tag returned $tag at $pos: boundary tags must be ≥ 1 (0 marks interior points)"))
+    return Int(tag)
 end
 
 """
@@ -244,24 +266,39 @@ function get_points(
     # wall as well (a tolerance on the distance did that at very fine Float32 resolutions).
     wall_lo = ntuple(d -> cd.is_periodic[d] ? -1 : _wall_index(geom.mins[d], cd.canvas_mins[d], dxs_f[d]), Val(D))
     wall_hi = ntuple(d -> cd.is_periodic[d] ? -1 : _wall_index(geom.maxs[d], cd.canvas_mins[d], dxs_f[d]), Val(D))
+    # A jittered point that left a periodic axis belongs to the other end: classifying it before wrapping made it
+    # a (frozen) boundary particle at the seam.
+    wrap(p) = Space{D, T}(ntuple(d -> cd.is_periodic[d] ? _wrap_periodic(p[d], geom.mins[d], cd.L_wrap[d]) : p[d], Val(D)))
+    # Points less than h/2 outside a wall (shape-based domains) are snapped onto it, see `_snap_near_wall!`
+    h_snap = minimum(dxs_f) / 2
+    near_wall = Space{D, T}[]
     for I in CartesianIndices(Ns_total)
-        pos_tuple = ntuple(Val(D)) do d
+        lattice = Space{D, T}(ntuple(Val(D)) do d
             j = I[d] - 1
-            x = j == wall_lo[d] ? geom.mins[d] : j == wall_hi[d] ? geom.maxs[d] : cd.canvas_mins[d] + j * dxs_f[d]
-            x += rand_f[d] * (rand(rng, T) * 2 - 1)
-            # A jittered point that left a periodic axis belongs to the other end: classifying it
-            # before wrapping made it a (frozen) boundary particle at the seam.
-            cd.is_periodic[d] ? _wrap_periodic(x, geom.mins[d], cd.L_wrap[d]) : x
-        end
-        
-        pos = Space{D, T}(pos_tuple)
+            j == wall_lo[d] ? geom.mins[d] : j == wall_hi[d] ? geom.maxs[d] : cd.canvas_mins[d] + j * dxs_f[d]
+        end)
+        jitter = Space{D, T}(ntuple(d -> rand_f[d] * (rand(rng, T) * 2 - 1), Val(D)))
+        pos = wrap(lattice + jitter)
         if geom.is_interior(pos)
             push!(inner_points, pos)
+        elseif !iszero(jitter) && geom.is_interior(lattice)
+            # The jitter carried an interior lattice point (e.g. one on a wall) across the wall: it is reflected
+            # back inside instead of becoming a ghost that sits almost on the wall. Such ghosts (about half of a
+            # jittered wall row, down to 1e-3 dx outside) are slaved to the interior next to them every stage;
+            # with them MirrorBC did not converge (channel along a wall, N = 20/40/80: max error 0.32/0.32/0.35)
+            # and OutflowBC lost accuracy (0.23 at N = 80), without them both converge (0.28/0.062/0.023 and
+            # 0.032, exact ghosts 0.026).
+            push!(inner_points, _reflect_inside(geom, pos, lattice, wrap))
+        elseif geom.shape !== nothing && signed_distance(geom.shape, pos) < h_snap
+            # (the signed distance is a lower bound of the wall distance outside a combined shape)
+            push!(near_wall, pos)
         else
             push!(ghost_candidates, pos)
         end
     end
     
+    _snap_near_wall!(inner_points, ghost_candidates, near_wall, geom, h_snap, wrap)
+
     max_dx = maximum(dxs_f)
     cutoff_dist_sq = (T(interp_range_factor) * max_dx + max_dx)^2
     surviving_ghosts = _narrow_band(inner_points, ghost_candidates, cutoff_dist_sq)
@@ -286,6 +323,66 @@ function get_points(
     return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances
 end
 
+# Points within `h_snap` = h/2 outside a wall (curved walls, obstacles and box extents off the lattice, jittered rows
+# that the reflection below does not cover) would be ghosts sitting almost on the wall, with a gap of up to h between
+# the wall and the first interior particle: the mirror points of the ghosts then fall into that gap, the fit of
+# `MirrorBC` extrapolates, and the condition did not converge (a channel wall 0.1h off the lattice row, N = 20/40/80,
+# t = 1: max error 0.41/0.67/0.63 against 0.09/0.04/0.016 with exact ghosts). Such a point is snapped onto the wall
+# (its nearest wall point) and becomes interior, as the lattice row on a box face does: every ghost is then at least
+# h/2 outside and the interior reaches the wall. On an unjittered lattice a snapped point stays at least h/2 from every
+# other lattice point; a snapped point that would come within h/4 of an interior particle (jittered or reflected
+# ones next to the wall, other snapped points behind corners) is pushed out to h/2 as a ghost instead, also if it
+# does not test interior after rounding. Distances are minimum images across periodic seams.
+function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T}, h_snap::T, wrap) where {GEO, D, T}
+    isempty(near) && return nothing
+    cell = h_snap / 2                                  # closer than h/4 is a clash
+    # Cells of width >= `cell`; on a periodic axis a whole number of them spans the period and the index wraps
+    L  = geom.maxs - geom.mins
+    nc = ntuple(d -> geom.is_periodic[d] ? max(1, floor(Int, L[d] / cell)) : 0, Val(D))
+    w  = ntuple(d -> geom.is_periodic[d] ? L[d] / nc[d] : cell, Val(D))
+    key(p) = ntuple(d -> floor(Int, (p[d] - geom.mins[d]) / w[d]), Val(D))
+    wrapkey(k) = ntuple(d -> geom.is_periodic[d] ? mod(k[d], nc[d]) : k[d], Val(D))
+    mindist2(a, b) = sum(ntuple(Val(D)) do d
+        δ = a[d] - b[d]
+        geom.is_periodic[d] && (δ -= L[d] * round(δ / L[d]))
+        δ^2
+    end)
+    taken = Dict{NTuple{D, Int}, Vector{Space{D, T}}}()
+    for p in inner                                     # the interior particles next to the wall
+        signed_distance(geom.shape, p) > -h_snap && push!(get!(taken, wrapkey(key(p)), Space{D, T}[]), p)
+    end
+    for pos in near
+        n, φ = wall_geometry(geom, pos)
+        if !(isfinite(φ) && φ < h_snap)
+            push!(ghosts, pos)                         # farther than the lower bound suggested
+            continue
+        end
+        s = wrap(pos - φ * n)
+        geom.is_interior(s) || (s = wrap(pos - (φ + 64 * eps(T) * max(one(T), maximum(abs, pos))) * n))   # rounding
+        k = key(s)
+        clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
+            any(q -> mindist2(q, s) < cell^2, get(taken, wrapkey(ntuple(d -> k[d] + off[d], Val(D))), ()))
+        end
+        if !clash && geom.is_interior(s)
+            push!(inner, s)
+            push!(get!(taken, wrapkey(k), Space{D, T}[]), s)
+        else
+            push!(ghosts, wrap(pos + (h_snap - φ) * n))
+        end
+    end
+    return nothing
+end
+
+# The mirror image of `pos` behind the wall (a shape-based domain), or the lattice position it was jittered from
+# if there is no shape or the mirror image is not interior (a corner)
+function _reflect_inside(geom::GeometricDomain, pos, lattice, wrap)
+    geom.shape === nothing && return lattice
+    n, φ = wall_geometry(geom, pos)
+    isfinite(φ) || return lattice
+    p = wrap(pos - 2φ * n)
+    return geom.is_interior(p) ? p : lattice
+end
+
 """
     wall_geometry(geom::GeometricDomain, x) -> (normal, distance)
 
@@ -294,12 +391,16 @@ domain's shape; `NaN`s for a domain without a shape. Stored per particle in `pg.
 `pg.core.wall_distances` when a grid is built or particles are inserted.
 
 The signed distance of a combined shape (`max`/`min` of its pieces) is only a bound where several pieces are
-active at once: behind a corner formed by two pieces (outside the floor *and* inside the step of a channel) the
-nearest piece is not the nearest point of the region. The wall point is therefore found by projecting `x` onto
-the active piece and repeating from there until the projection lies on the boundary (at most eight steps);
-the normal is the direction from that point to `x` and the distance its length. For a point whose first
-projection already lies on the boundary (every point of a primitive shape, most points of a combination) the
-shape's own normal and distance are returned unchanged.
+active at once: behind a corner formed by two pieces (outside the floor *and* inside the step of a channel, or
+outside both faces of a wedge) the nearest piece is not the nearest point of the region. The wall point is
+therefore found in two stages: projecting onto the active piece and repeating from there until the projection
+lies on the boundary (alternating projections, which reach *a* boundary point but slowly at acute corners and
+not necessarily the nearest one at obtuse corners), then moving along the boundary towards `x` (the tangential
+part of `x - p`, projected back onto the boundary, with step halving) while that gets closer, which ends at the
+nearest point of a face or at the corner. The normal is the direction from that point to `x` and the distance its
+length. For a point whose first projection already lies on the boundary (every point of a primitive shape, most
+points of a combination) the shape's own normal and distance are returned unchanged. Inside a combination the
+distance is the combined signed distance (a bound for unions; no condition reads interior wall data).
 """
 wall_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}) where {GEO, D, T} =
     geom.shape === nothing ? (Space{D, T}(ntuple(_ -> T(NaN), Val(D))), T(NaN)) : _wall_geometry(geom.shape, x)
@@ -310,16 +411,41 @@ function _wall_geometry(shape::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
     p = x - φ0 * n0
     φp, np, _ = _probe(shape, p)
     abs(φp) <= tol && return (n0, φ0)            # the projection is on the boundary: the piece's values are exact
-    for _ in 1:7
-        p = p - φp * np
-        φp, np, _ = _probe(shape, p)
-        abs(φp) <= tol && break
+    p = _onto_boundary(shape, p, tol)
+    # Descend along the boundary: at a point of a face the nearest point is where `x - p` is normal to it
+    for _ in 1:64
+        _, np, _ = _probe(shape, p)
+        d  = x - p
+        t  = d - sum(d .* np) * np               # tangential part of x - p
+        dist2 = sum(abs2, d)
+        sum(abs2, t) <= (tol * tol) * max(one(T), dist2) && break
+        step, moved = one(T), false
+        for _ in 1:30
+            q = _onto_boundary(shape, p + step * t, tol)
+            if sum(abs2, x - q) < dist2 * (1 - 16 * eps(T))
+                p, moved = q, true
+                break
+            end
+            step /= 2
+        end
+        moved || break                           # a corner (x - p in its normal cone): nothing closer nearby
     end
     d = x - p
     dist = sqrt(sum(abs2, d))
     dist <= tol && return (n0, φ0)
     sgn = φ0 < zero(T) ? -one(T) : one(T)
     return (sgn * d / dist, sgn * dist)
+end
+
+# A boundary point near `p` by alternating projections onto the active piece (converges like cos² of the corner
+# angle: up to 512 steps for acute corners; the last iterate is used if it has not converged)
+function _onto_boundary(shape::AbstractShape{D, T}, p::Space{D, T}, tol::T) where {D, T}
+    for _ in 1:512
+        φ, n, _ = _probe(shape, p)
+        abs(φ) <= tol && return p
+        p = p - φ * n
+    end
+    return p
 end
 
 # Boundary particles whose tag has no condition keep their state (the stage predictor copies `pg.rhos`), and a

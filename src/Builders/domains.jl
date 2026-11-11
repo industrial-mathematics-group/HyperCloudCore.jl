@@ -100,10 +100,23 @@ end
 function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
     haskey(domain_conf, :shape) || error("Domain :shape needs the key :shape (an AbstractShape)")
     shape = domain_conf[:shape]
-    shape isa String && (shape = eval(Meta.parse(shape)))
+    # A string is evaluated in `Main`, where the user's own shape types live (HyperCloudCore's shapes are visible
+    # there through `using HyperCloud`/`using HyperCloudCore`); HyperCloudCore itself if `Main` doesn't know a name
+    if shape isa String
+        ex = Meta.parse(shape)
+        shape = try
+            Core.eval(Main, ex)
+        catch e
+            e isa UndefVarError || rethrow()
+            eval(ex)
+        end
+    end
     shape isa AbstractShape || error("Domain :shape: :shape must be an AbstractShape, got $(typeof(shape))")
     T = real_type(context)
-    eltype(shape) == T || @warn "Domain :shape: the shape has element type $(eltype(shape)), the run uses $T"
+    eltype(shape) == T ||
+        error("Domain :shape: the shape has element type $(eltype(shape)), the run uses $T; build the shape in $T")
+    haskey(context, :D) && ndims(shape) != context[:D] &&
+        error("Domain :shape: the shape is $(ndims(shape))-D, the run is $(context[:D])-D")
     bc_map = parse_bc(domain_conf)
     is_per = get(domain_conf, :periodic, false)
     mins = haskey(domain_conf, :mins) ? Tuple(T.(domain_conf[:mins])) : nothing

@@ -1,0 +1,6 @@
+Mirror2, exact for φ < 0.5h        N=80 jit=0.20 t=0.50: max err 3.077e-02
+exact, Mirror2 only for φ < 0.5h   N=80 jit=0.20 t=0.50: max err 2.035e-01
+Mirror2, exact for φ < 1.5h        N=80 jit=0.20 t=0.50: max err 2.550e-02
+exact, Mirror2 only for φ >= 1.5h  N=80 jit=0.20 t=0.50: max err 2.550e-02
+Mirror0                            N=80 jit=0.20 t=0.50: max err 1.032e-01
+Extrap2 (as wall)                  N=80 jit=0.20 t=0.50: max err 1.350e+13

@@ -1,0 +1,6 @@
+Float64 D=1: ghosts 6, Threads == Polyester: true, max |KA - Polyester| / scale = 0.00e+00, all finite: true
+Float64 D=2: ghosts 291, Threads == Polyester: true, max |KA - Polyester| / scale = 8.78e-14, all finite: true
+Float64 D=3: ghosts 2477, Threads == Polyester: false, max |KA - Polyester| / scale = 2.60e-13, all finite: true
+Float32 D=1: ghosts 6, Threads == Polyester: true, max |KA - Polyester| / scale = 0.00e+00, all finite: true
+Float32 D=2: ghosts 293, Threads == Polyester: true, max |KA - Polyester| / scale = 0.00e+00, all finite: true
+Float32 D=3: ghosts 2479, Threads == Polyester: false, max |KA - Polyester| / scale = 1.13e-04, all finite: true

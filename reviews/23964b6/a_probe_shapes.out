@@ -1,0 +1,55 @@
+ERROR: LoadError: ArgumentError: Tagged: boundary tags must be ≥ 1 (0 marks interior points), got 0
+Stacktrace:
+ [1] Tagged
+   @ /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-fixes/src/Grid/Shapes.jl:362 [inlined]
+ [2] Tagged(shape::Cuboid{2, Float64}, tag::Int64)
+   @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-fixes/src/Grid/Shapes.jl:366
+ [3] top-level scope
+   @ /tmp/brev_a/probes/probe_shapes.jl:116
+ [4] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [5] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [6] _start()
+   @ Base ./client.jl:577
+in expression starting at /tmp/brev_a/probes/probe_shapes.jl:116
+== 1. Cuboid vs brute-force distance (2-D/3-D, F64/F32, open axes)
+  T=Float64 D=1 open=(false,): max |sd - exact| = 0.0, non-unit normals 0
+  T=Float64 D=2 open=(false, false): max |sd - exact| = 0.0, non-unit normals 0
+  T=Float64 D=2 open=(true, false): max |sd - exact| = 0.0, non-unit normals 0
+  T=Float64 D=3 open=(false, false, false): max |sd - exact| = 0.0, non-unit normals 0
+  T=Float64 D=3 open=(true, false, false): max |sd - exact| = 0.0, non-unit normals 0
+  T=Float32 D=1 open=(false,): max |sd - exact| = 5.960464477539063e-8, non-unit normals 0
+  T=Float32 D=2 open=(false, false): max |sd - exact| = 2.0002974654431682e-7, non-unit normals 0
+  T=Float32 D=2 open=(true, false): max |sd - exact| = 2.9802322387695312e-8, non-unit normals 0
+  T=Float32 D=3 open=(false, false, false): max |sd - exact| = 2.1312382125771023e-7, non-unit normals 0
+  T=Float32 D=3 open=(true, false, false): max |sd - exact| = 1.1535758281944197e-7, non-unit normals 0
+== 2. Rotated: 2-D/3-D conventions
+  z-rot 90: point (-0.5, 1.5, 0.25) inside? true; (0.5, 1.5, 0.25) inside? false
+  bbox ([-1.0, 0.0, 0.0], [2.220446049250313e-16, 2.0, 0.5])
+  x-rot 90: (1, 0, 0.5) inside? true normal at (1,-0.25,1.2): [0.0, 1.1102230246251565e-16, 1.0] tag 4
+  random rotation: max |sd(R y) - sd(y)|, |n(Ry) - R n(y)| = 7.665565404797764e-15; det R = 1.0000000000000002, R*k - k = 0.0
+  bbox contains rotated samples: true
+  Float32 3-D Rotated eltype Float32, sd type Float32
+  Float32 2-D Rotated ok: SVector{2, Float32}
+== 3. wall_geometry behind convex corners of intersections (wedges): distance vs exact
+  α = 15°: max rel. error of the wall distance 1.96e-8 (0 of the outside samples > 1e-6) at [-0.15390025638308752, -0.0412299475005121]; mirror sd -7.25e-6
+  α = 30°: max rel. error of the wall distance 1.68e-11 (0 of the outside samples > 1e-6) at [-0.0010417361209600795, 0.0008215900005302145]; mirror sd 0.000822
+  α = 45°: max rel. error of the wall distance 3.83e-12 (0 of the outside samples > 1e-6) at [-0.004243988255404263, -0.0002165819219868137]; mirror sd -0.000217
+  α = 60°: max rel. error of the wall distance 4.14e-12 (0 of the outside samples > 1e-6) at [-3.035683691487989e-6, -0.0031578251000297986]; mirror sd 0.00158
+  α = 90°: max rel. error of the wall distance 1.72e-16 (0 of the outside samples > 1e-6) at [-0.22940727521565396, -0.22708099241445304]; mirror sd -0.227
+  α = 120°: max rel. error of the wall distance 1.65e-10 (0 of the outside samples > 1e-6) at [-0.044480271519701686, -0.10923004329857501]; mirror sd -0.0931
+  α = 150°: max rel. error of the wall distance 6.56e-11 (0 of the outside samples > 1e-6) at [-0.04523737770438396, -0.2554808800898271]; mirror sd -0.244
+  α = 170°: max rel. error of the wall distance 7.97e-12 (0 of the outside samples > 1e-6) at [-0.013420744338042788, -0.2724104624373398]; mirror sd -0.271
+== 4. wall_geometry inside a union (interior particles): distance vs exact
+  union of two overlapping boxes = [0,3]x[0,1]; at (1.5, 0.5): sd -0.5, wall_geometry ([0.7071067811865475, -0.7071067811865475], -0.7071067811865476) (exact -0.5, normal ±y)
+  at (1.9, 0.9): sd -0.09999999999999998, wall_geometry ([0.0, 1.0], -0.09999999999999998) (exact -0.1, (0,1))
+  at (1.95, 0.5): sd -0.5, wall_geometry ([0.0, -1.0], -0.5) (exact -0.5, normal ±y), tag 3
+== 5. L-shaped region from union; ghosts in the concave notch
+  [1.2, 1.2]: sd 0.19999999999999996 wall ([0.0, 1.0], 0.19999999999999996) tag 4
+  [1.05, 1.5]: sd 0.050000000000000044 wall ([1.0, 0.0], 0.050000000000000044) tag 2
+  [1.5, 1.05]: sd 0.050000000000000044 wall ([0.0, 1.0], 0.050000000000000044) tag 4
+== 6. Box minus disc (hole): ghosts inside the hole
+  [0.5, 0.45]: sd 0.15000000000000002, wall ([-0.0, 1.0], 0.15000000000000002), tag 5 (exact 0.15, normal (0,1) towards the centre? outward of the fluid = into the hole: (0, 1)... centre-pointing)
+  centre: sd 0.2, wall ([-1.0, -0.0], 0.2)
+== 7. Tags: Tagged with 0 / negative

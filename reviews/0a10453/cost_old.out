@@ -1,0 +1,9 @@
+2-D box 400^2 (on lattice)           N   165637  build median 0.101 s   get_points min 0.009 s
+2-D box 400^2 (on lattice) j=0.3     N   165617  build median 0.119 s   get_points min 0.009 s
+2-D disc 400^2                       N   129515  build median 0.086 s   get_points min 0.006 s
+2-D box minus disc 400x200           N    78476  build median 0.050 s   get_points min 0.006 s
+2-D step 0.61/0.213 h=1/200          N   105080  build median 0.060 s   get_points min 0.010 s
+2-D rot plate h=1/200                N    84103  build median 0.054 s   get_points min 0.008 s
+3-D box 64^3 (on lattice)            N   355443  build median 0.481 s   get_points min 0.033 s
+3-D ball 64^3                        N   182843  build median 0.273 s   get_points min 0.025 s
+3-D box minus ball h=1/40            N   189222  build median 0.258 s   get_points min 0.020 s

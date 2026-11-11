@@ -1,0 +1,56 @@
+== 2-D disc r=1 jitter 0.0
+  Outflow      max 5.88e-01 3.09e-01 1.64e-01   (ghosts φ<h: 2.38e-01 1.19e-01 5.89e-02)  EOC 0.92
+  Extrap1      max 6.17e-01 1.58e-01 4.02e-02   (ghosts φ<h: 1.45e-01 4.68e-02 9.96e-03)  EOC 1.97
+  Extrap2      max 2.93e-01 3.79e-02 4.85e-03   (ghosts φ<h: 3.77e-02 4.85e-03 6.38e-04)  EOC 2.96
+  Mirror1      max 7.51e-02 4.03e-02 2.71e-02   (ghosts φ<h: 7.51e-02 4.03e-02 2.71e-02)  EOC 0.57
+  Mirror2      max 7.51e-02 4.03e-02 2.71e-02   (ghosts φ<h: 7.51e-02 4.03e-02 2.71e-02)  EOC 0.57
+  Mirror2 unb  max 2.31e-02 3.92e-03 5.37e-04   (ghosts φ<h: 2.31e-02 3.92e-03 5.37e-04)  EOC 2.87
+== 2-D disc r=1 jitter 0.3
+  Outflow      max 5.88e-01 3.30e-01 1.70e-01   (ghosts φ<h: 2.11e-01 1.62e-01 9.62e-02)  EOC 0.95
+  Extrap1      max 6.81e-01 1.69e-01 4.47e-02   (ghosts φ<h: 1.69e-01 3.49e-02 1.21e-02)  EOC 1.92
+  Extrap2      max 2.71e-01 5.31e-02 5.52e-03   (ghosts φ<h: 4.65e-02 8.87e-03 1.39e-03)  EOC 3.27
+  Mirror1      max 7.08e-02 2.32e-02 3.24e-02   (ghosts φ<h: 6.14e-02 2.32e-02 3.24e-02)  EOC -0.48
+  Mirror2      max 5.32e-02 2.32e-02 3.24e-02   (ghosts φ<h: 5.32e-02 2.32e-02 3.24e-02)  EOC -0.48
+  Mirror2 unb  max 1.90e-02 2.17e-03 5.75e-04   (ghosts φ<h: 1.90e-02 2.17e-03 5.75e-04)  EOC 1.91
+== 2-D box - rot plate jitter 0.0
+  Outflow      max 4.20e-01 2.01e-01 9.94e-02   (ghosts φ<h: 8.25e-02 6.69e-02 3.38e-02)  EOC 1.02
+  Extrap1      max 1.05e-01 2.74e-02 8.61e-03   (ghosts φ<h: 2.46e-02 7.71e-03 1.96e-03)  EOC 1.67
+  Extrap2      max 3.71e-02 4.69e-03 5.88e-04   (ghosts φ<h: 3.59e-03 4.20e-04 5.15e-05)  EOC 3.00
+  Mirror1      max 2.21e-02 5.30e-03 1.36e-03   (ghosts φ<h: 2.21e-02 5.30e-03 1.36e-03)  EOC 1.96
+  Mirror2      max 1.65e-03 1.54e-04 3.56e-05   (ghosts φ<h: 1.65e-03 1.54e-04 3.56e-05)  EOC 2.11
+  Mirror2 unb  max 1.65e-03 1.54e-04 3.56e-05   (ghosts φ<h: 1.65e-03 1.54e-04 3.56e-05)  EOC 2.11
+== 2-D box - rot plate jitter 0.3
+  Outflow      max 4.69e-01 2.26e-01 1.14e-01   (ghosts φ<h: 1.48e-01 7.55e-02 3.84e-02)  EOC 0.99
+  Extrap1      max 9.74e-02 2.90e-02 1.02e-02   (ghosts φ<h: 3.64e-02 7.75e-03 2.02e-03)  EOC 1.50
+  Extrap2      max 4.06e-02 5.43e-03 5.76e-04   (ghosts φ<h: 2.75e-03 7.46e-04 8.96e-05)  EOC 3.24
+  Mirror1      max 2.23e-02 5.66e-03 1.35e-03   (ghosts φ<h: 2.23e-02 5.66e-03 1.35e-03)  EOC 2.07
+  Mirror2      max 9.59e-04 1.26e-04 2.20e-05   (ghosts φ<h: 8.69e-04 1.09e-04 2.20e-05)  EOC 2.52
+  Mirror2 unb  max 9.59e-04 1.26e-04 2.20e-05   (ghosts φ<h: 8.69e-04 1.09e-04 2.20e-05)  EOC 2.52
+== 2-D step .61/.213 jitter 0.0
+  Outflow      max 2.96e-01 1.30e-01 6.21e-02   (ghosts φ<h: 6.27e-02 3.63e-02 2.19e-02)  EOC 1.06
+  Extrap1      max 1.40e-01 3.52e-02 8.79e-03   (ghosts φ<h: 2.08e-02 5.39e-03 1.65e-03)  EOC 2.00
+  Extrap2      max 3.32e-02 4.19e-03 5.24e-04   (ghosts φ<h: 2.84e-03 3.73e-04 4.88e-05)  EOC 3.00
+  Mirror1      max 2.20e-02 5.34e-03 7.83e-03   (ghosts φ<h: 1.68e-02 4.42e-03 7.83e-03)  EOC -0.55
+  Mirror2      max 1.53e-02 7.90e-05 7.83e-03   (ghosts φ<h: 1.53e-02 4.14e-05 7.83e-03)  EOC -6.63
+  Mirror2 unb  max 1.28e-03 7.90e-05 3.61e-05   (ghosts φ<h: 1.28e-03 4.14e-05 3.61e-05)  EOC 1.13
+== 2-D step .61/.213 jitter 0.3
+  Outflow      max 3.34e-01 1.49e-01 7.31e-02   (ghosts φ<h: 1.04e-01 5.54e-02 3.06e-02)  EOC 1.03
+  Extrap1      max 1.80e-01 4.94e-02 1.18e-02   (ghosts φ<h: 4.06e-02 6.68e-03 3.61e-03)  EOC 2.06
+  Extrap2      max 3.67e-02 4.97e-03 5.63e-04   (ghosts φ<h: 4.04e-03 5.33e-04 1.09e-04)  EOC 3.14
+  Mirror1      max 2.24e-02 9.31e-03 1.05e-02   (ghosts φ<h: 1.74e-02 9.31e-03 1.05e-02)  EOC -0.17
+  Mirror2      max 1.59e-02 9.31e-03 1.05e-02   (ghosts φ<h: 1.59e-02 9.31e-03 1.05e-02)  EOC -0.17
+  Mirror2 unb  max 1.83e-03 1.36e-04 4.14e-05   (ghosts φ<h: 1.83e-03 9.17e-05 4.14e-05)  EOC 1.71
+== 3-D ball r=1 jitter 0.0
+  Outflow      max 1.30e+00 7.49e-01 5.25e-01   (ghosts φ<h: 5.56e-01 2.76e-01 1.90e-01)  EOC 0.88
+  Extrap1      max 2.10e+00 6.13e-01 2.75e-01   (ghosts φ<h: 6.35e-01 1.42e-01 7.20e-02)  EOC 1.98
+  Extrap2      max 2.05e+00 3.15e-01 9.38e-02   (ghosts φ<h: 2.90e-01 4.32e-02 1.30e-02)  EOC 2.98
+  Mirror1      max 3.14e-01 7.89e-02 5.17e-02   (ghosts φ<h: 3.14e-01 7.21e-02 5.17e-02)  EOC 1.04
+  Mirror2      max 2.28e-01 7.21e-02 5.17e-02   (ghosts φ<h: 2.28e-01 7.21e-02 5.17e-02)  EOC 0.82
+  Mirror2 unb  max 1.20e-01 1.94e-02 7.13e-03   (ghosts φ<h: 1.20e-01 1.94e-02 7.13e-03)  EOC 2.46
+== 3-D ball r=1 jitter 0.3
+  Outflow      max 1.32e+00 7.16e-01 4.92e-01   (ghosts φ<h: 5.43e-01 3.05e-01 2.15e-01)  EOC 0.93
+  Extrap1      max 1.93e+00 6.30e-01 3.09e-01   (ghosts φ<h: 4.87e-01 1.39e-01 6.50e-02)  EOC 1.76
+  Extrap2      max 1.92e+00 3.29e-01 9.68e-02   (ghosts φ<h: 2.85e-01 3.93e-02 1.20e-02)  EOC 3.02
+  Mirror1      max 2.71e-01 7.31e-02 4.43e-02   (ghosts φ<h: 2.42e-01 6.83e-02 4.43e-02)  EOC 1.24
+  Mirror2      max 1.34e-01 2.46e-02 4.43e-02   (ghosts φ<h: 1.34e-01 2.46e-02 4.43e-02)  EOC -1.45
+  Mirror2 unb  max 9.96e-02 1.21e-02 4.24e-03   (ghosts φ<h: 9.96e-02 1.21e-02 4.24e-03)  EOC 2.59

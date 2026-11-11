@@ -1,0 +1,5 @@
+ghosts 3079, #err>1e-2: 319, max 7.09
+ghost 713: φ/dx=1.21 err=7.09 donor dist/dx=1.52 nsup=15 needed=15 cond64=3.23e+04  chol ok=true pivots_ok=true
+ghost 1881: φ/dx=1.94 err=6.92 donor dist/dx=2.37 nsup=35 needed=15 cond64=9.52e+04  chol ok=true pivots_ok=true
+ghost 1754: φ/dx=1.13 err=4.97 donor dist/dx=2.07 nsup=24 needed=15 cond64=6.78e+04  chol ok=true pivots_ok=true
+ghost 1466: φ/dx=0.90 err=4.77 donor dist/dx=1.40 nsup=16 needed=15 cond64=7.39e+03  chol ok=true pivots_ok=true

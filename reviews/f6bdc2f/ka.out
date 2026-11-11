@@ -1,0 +1,143 @@
+== KA CPU vs Polyester (and Threads)
+Float64 D=1: ghosts 6, Threads == Polyester: true, max |KA - Polyester| / scale = 0.00e+00, all finite: true
+Float64 D=2: ghosts 291, Threads == Polyester: true, max |KA - Polyester| / scale = 8.78e-14, all finite: true
+
+[28632] signal 15: Terminated
+in expression starting at /tmp/brev_b/probes/ka.jl:31
+unknown function (ip: 0x7f6346f0b72c) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f00387) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f009ab) at /lib/x86_64-linux-gnu/libc.so.6
+pthread_cond_wait at /lib/x86_64-linux-gnu/libc.so.6 (unknown line)
+uv_cond_wait at /workspace/srcdir/libuv/src/unix/thread.c:822
+jl_parallel_gc_threadfun at /cache/build/builder-amdci4-1/julialang/julia-ci/src/gc-stock.c:3729
+unknown function (ip: 0x7f6346f038ba) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f81537) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: (nil)) at (unknown file)
+unknown function (ip: 0x7f6346f0b72c) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f00387) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f009ab) at /lib/x86_64-linux-gnu/libc.so.6
+pthread_cond_wait at /lib/x86_64-linux-gnu/libc.so.6 (unknown line)
+uv_cond_wait at /workspace/srcdir/libuv/src/unix/thread.c:822
+ijl_task_get_next at /cache/build/builder-amdci4-1/julialang/julia-ci/src/scheduler.c:614
+wait at ./task.jl:1297
+wait_forever at ./task.jl:1196
+jfptr_wait_forever_31691.1 at /opt/julia/lib/julia/sys.so (unknown line)
+jl_apply at /cache/build/builder-amdci4-1/julialang/julia-ci/src/julia.h:2319 [inlined]
+start_task at /cache/build/builder-amdci4-1/julialang/julia-ci/src/task.c:1287
+unknown function (ip: (nil)) at (unknown file)
+unknown function (ip: 0x7f6346f0b72c) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f00387) at /lib/x86_64-linux-gnu/libc.so.6
+unknown function (ip: 0x7f6346f009ab) at /lib/x86_64-linux-gnu/libc.so.6
+pthread_cond_wait at /lib/x86_64-linux-gnu/libc.so.6 (unknown line)
+uv_cond_wait at /workspace/srcdir/libuv/src/unix/thread.c:822
+ijl_task_get_next at /cache/build/builder-amdci4-1/julialang/julia-ci/src/scheduler.c:614
+wait at ./task.jl:1297
+wait_forever at ./task.jl:1196
+jfptr_wait_forever_31691.1 at /opt/julia/lib/julia/sys.so (unknown line)
+jl_apply at /cache/build/builder-amdci4-1/julialang/julia-ci/src/julia.h:2319 [inlined]
+start_task at /cache/build/builder-amdci4-1/julialang/julia-ci/src/task.c:1287
+unknown function (ip: (nil)) at (unknown file)
+_ZN4llvm16InstCombinerImpl12visitPHINodeERNS_7PHINodeE at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm16InstCombinerImpl3runEv at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm15InstCombinePass3runERNS_8FunctionERNS_15AnalysisManagerIS1_JEEE at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm6detail9PassModelINS_8FunctionENS_15InstCombinePassENS_15AnalysisManagerIS2_JEEEJEE3runERS2_RS5_ at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm11PassManagerINS_8FunctionENS_15AnalysisManagerIS1_JEEEJEE3runERS1_RS3_ at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm6detail9PassModelINS_8FunctionENS_11PassManagerIS2_NS_15AnalysisManagerIS2_JEEEJEEES5_JEE3runERS2_RS5_ at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm27ModuleToFunctionPassAdaptor3runERNS_6ModuleERNS_15AnalysisManagerIS1_JEEE at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm6detail9PassModelINS_6ModuleENS_27ModuleToFunctionPassAdaptorENS_15AnalysisManagerIS2_JEEEJEE3runERS2_RS5_ at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+_ZN4llvm11PassManagerINS_6ModuleENS_15AnalysisManagerIS1_JEEEJEE3runERS1_RS3_ at /opt/julia/bin/../lib/julia/libLLVM.so.20.1jl (unknown line)
+runPassManager<llvm::Module> at /workspace/srcdir/LLVM.jl/deps/LLVMExtra/lib/NewPM.cpp:1214 [inlined]
+runJuliaPasses at /workspace/srcdir/LLVM.jl/deps/LLVMExtra/lib/NewPM.cpp:1458
+LLVMRunJuliaPasses at /home/agent/.julia/packages/LLVM/JAJT6/lib/libLLVM_extra.jl:680 [inlined]
+LLVMRunJuliaPasses at /home/agent/.julia/packages/LLVM/JAJT6/lib/libLLVM_extra.jl:679 [inlined]
+run_pipeline! at /home/agent/.julia/packages/LLVM/JAJT6/src/passes.jl:1443
+run_passes! at /home/agent/.julia/packages/LLVM/JAJT6/src/passes.jl:1414
+_run! at /home/agent/.julia/packages/LLVM/JAJT6/src/passes.jl:1389
+#run!##0 at /home/agent/.julia/packages/LLVM/JAJT6/src/passes.jl:1372 [inlined]
+#context!##0 at /home/agent/.julia/packages/LLVM/JAJT6/src/state.jl:137
+library! at /home/agent/.julia/packages/LLVM/JAJT6/src/library.jl:296 [inlined]
+context! at /home/agent/.julia/packages/LLVM/JAJT6/src/state.jl:134 [inlined]
+run! at /home/agent/.julia/packages/LLVM/JAJT6/src/passes.jl:1372
+macro expansion at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/optim.jl:73 [inlined]
+macro expansion at /home/agent/.julia/packages/LLVM/JAJT6/src/base.jl:669 [inlined]
+#172 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/optim.jl:57
+with_llvm_machine at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/interface.jl:43
+#optimize!#169 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/optim.jl:54 [inlined]
+optimize! at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/optim.jl:52 [inlined]
+#emit_llvm#251 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:402
+unknown function (ip: 0x7f62691a424b) at (unknown file)
+emit_llvm at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:208 [inlined]
+#compile_unhooked#248 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:122
+compile_unhooked at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:106 [inlined]
+#compile##0 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:91 [inlined]
+report_failure at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:97
+compile at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:90
+unknown function (ip: 0x7f6303ae1426) at (unknown file)
+invoke_frozen at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/compilation.jl:272 [inlined]
+#compile_to_obj##0 at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/compilation.jl:281
+#245 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:33 [inlined]
+#context!##0 at /home/agent/.julia/packages/LLVM/JAJT6/src/state.jl:137
+library! at /home/agent/.julia/packages/LLVM/JAJT6/src/library.jl:296 [inlined]
+context! at /home/agent/.julia/packages/LLVM/JAJT6/src/state.jl:134 [inlined]
+#243 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:32
+with_disposal at /home/agent/.julia/packages/LLVM/JAJT6/src/base.jl:494
+#290 at /home/agent/.julia/packages/LLVM/JAJT6/src/executionengine/ts_module.jl:56 [inlined]
+library! at /home/agent/.julia/packages/LLVM/JAJT6/src/library.jl:296
+jfptr_libraryNOT._17823 at /home/agent/.julia/compiled/v1.13/KernelAbstractions/aywHT_LjicU.so (unknown line)
+#ThreadSafeContext#288 at /home/agent/.julia/packages/LLVM/JAJT6/src/executionengine/ts_module.jl:55
+ThreadSafeContext at /home/agent/.julia/packages/LLVM/JAJT6/src/executionengine/ts_module.jl:52 [inlined]
+#JuliaContext#240 at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:26 [inlined]
+JuliaContext at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/driver.jl:25 [inlined]
+compile_to_obj at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/compilation.jl:280 [inlined]
+compile_or_lookup at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/execution.jl:424
+macro expansion at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/execution.jl:377 [inlined]
+macro expansion at ./lock.jl:376 [inlined]
+lookup_kernel at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/execution.jl:372
+#62 at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/execution.jl:353
+unknown function (ip: 0x7f632cb766a2) at (unknown file)
+cached_lookup_slow at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/execution.jl:177
+cached_lookup at /home/agent/.julia/packages/GPUCompiler/7W2Eh/src/execution.jl:125 [inlined]
+#clfunction#59 at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/execution.jl:352
+clfunction at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/compiler/execution.jl:344 [inlined]
+#kernel_function_as#5 at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/backend.jl:211 [inlined]
+kernel_function_as at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/pocl/backend.jl:205 [inlined]
+launch_kernel at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/backend_launch.jl:174
+launch_kernel at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/backend_launch.jl:141 [inlined]
+#launch_tuple#47 at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/backend_launch.jl:117
+launch_tuple at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/backend_launch.jl:104
+unknown function (ip: 0x7f632cb75f27) at (unknown file)
+Kernel at /home/agent/.julia/packages/KernelAbstractions/msuwu/src/backend_launch.jl:95
+unknown function (ip: 0x7f632cb74641) at (unknown file)
+foreach_particle at /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-review/src/Backend.jl:129
+unknown function (ip: 0x7f632cb74031) at (unknown file)
+_launch_ghost_fit! at /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-review/src/Grid/BoundaryConditions.jl:249
+MirrorBC at /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-review/src/Grid/BoundaryConditions.jl:242
+unknown function (ip: 0x7f6268f3b3d7) at (unknown file)
+ap at /tmp/brev_b/probes/ka.jl:27
+unknown function (ip: 0x7f6268e64c48) at (unknown file)
+jl_apply at /cache/build/builder-amdci4-1/julialang/julia-ci/src/julia.h:2319 [inlined]
+do_call at /cache/build/builder-amdci4-1/julialang/julia-ci/src/interpreter.c:123
+eval_value at /cache/build/builder-amdci4-1/julialang/julia-ci/src/interpreter.c:243
+eval_body at /cache/build/builder-amdci4-1/julialang/julia-ci/src/interpreter.c:581
+jl_interpret_toplevel_thunk at /cache/build/builder-amdci4-1/julialang/julia-ci/src/interpreter.c:884
+jl_toplevel_eval_flex at /cache/build/builder-amdci4-1/julialang/julia-ci/src/toplevel.c:742
+jl_eval_toplevel_stmts at /cache/build/builder-amdci4-1/julialang/julia-ci/src/toplevel.c:585
+jl_toplevel_eval_flex at /cache/build/builder-amdci4-1/julialang/julia-ci/src/toplevel.c:683
+ijl_toplevel_eval at /cache/build/builder-amdci4-1/julialang/julia-ci/src/toplevel.c:754
+ijl_toplevel_eval_in at /cache/build/builder-amdci4-1/julialang/julia-ci/src/toplevel.c:799
+eval at ./boot.jl:489
+include_string at ./loading.jl:3064
+_include at ./loading.jl:3124
+include at ./Base.jl:309
+exec_options at ./client.jl:344
+_start at ./client.jl:577
+jfptr__start_57951.1 at /opt/julia/lib/julia/sys.so (unknown line)
+jl_apply at /cache/build/builder-amdci4-1/julialang/julia-ci/src/julia.h:2319 [inlined]
+true_main at /cache/build/builder-amdci4-1/julialang/julia-ci/src/jlapi.c:985
+jl_repl_entrypoint at /cache/build/builder-amdci4-1/julialang/julia-ci/src/jlapi.c:1152
+main at julia (unknown line)
+unknown function (ip: 0x7f6346e9aca7) at /lib/x86_64-linux-gnu/libc.so.6
+__libc_start_main at /lib/x86_64-linux-gnu/libc.so.6 (unknown line)
+unknown function (ip: 0x4010b8) at julia
+unknown function (ip: (nil)) at (unknown file)
+Allocations: 145294236 (Pool: 145292425; Big: 1811); GC: 62

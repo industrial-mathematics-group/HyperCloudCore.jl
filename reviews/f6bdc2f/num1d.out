@@ -1,0 +1,20 @@
+== MUSCL5, R = 3.5dx, jitter 0.0
+  OutflowBC  errs 7.62e-02 2.96e-02 1.39e-02 6.76e-03  EOC 1.36 1.09 1.04
+  Extrap(1)  errs 2.91e-02 5.60e-03 1.33e-03 3.30e-04  EOC 2.38 2.08 2.01
+  Extrap(3)  errs 1.07e-02 4.18e-04 2.26e-05 1.13e-06  EOC 4.67 4.21 4.32
+  Extrap(4)  errs 2.91e-02 5.60e-03 1.33e-03 3.30e-04  EOC 2.38 2.08 2.01
+== MUSCL5, R = 3.5dx, jitter 0.2
+  OutflowBC  errs 7.84e-02 2.74e-02 1.28e-02 6.48e-03  EOC 1.52 1.10 0.98
+  Extrap(1)  errs 2.95e-02 6.47e-03 1.42e-03 3.02e-04  EOC 2.19 2.19 2.23
+  Extrap(3)  errs 9.79e-03 2.68e-04 1.99e-05 1.15e-06  EOC 5.19 3.75 4.12
+  Extrap(4)  errs 2.95e-02 6.47e-03 1.42e-03 3.02e-04  EOC 2.19 2.19 2.23
+== MUSCL5, R = 4.5dx, jitter 0.0
+  OutflowBC  errs 1.17e-01 4.05e-02 1.82e-02 8.77e-03  EOC 1.53 1.15 1.05
+  Extrap(1)  errs 5.45e-02 1.03e-02 2.35e-03 5.83e-04  EOC 2.40 2.13 2.01
+  Extrap(3)  errs 3.78e-02 1.57e-03 6.38e-05 2.87e-06  EOC 4.59 4.62 4.48
+  Extrap(4)  errs 3.80e-02 1.58e-03 5.35e-05 1.77e-06  EOC 4.59 4.88 4.92
+== MUSCL5, R = 4.5dx, jitter 0.2
+  OutflowBC  errs 1.06e-01 3.72e-02 1.72e-02 8.12e-03  EOC 1.51 1.12 1.08
+  Extrap(1)  errs 5.62e-02 1.21e-02 2.45e-03 5.68e-04  EOC 2.21 2.31 2.11
+  Extrap(3)  errs 2.24e-02 1.05e-03 5.11e-05 2.63e-06  EOC 4.41 4.36 4.28
+  Extrap(4)  errs 2.16e-02 1.04e-03 4.16e-05 1.66e-06  EOC 4.38 4.65 4.65

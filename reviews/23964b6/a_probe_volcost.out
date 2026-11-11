@@ -1,0 +1,9 @@
+n=50 rectangular 3x1: N=8937, update_volumes! 0.11 ms, domain_volume 3.0
+n=50 step (CSG): N=7724, update_volumes! 0.07 ms, domain_volume 2.5199989812568764
+n=50 box via CSG: N=8937, update_volumes! 0.11 ms, domain_volume 2.999998501848243
+n=100 rectangular 3x1: N=32837, update_volumes! 0.3 ms, domain_volume 3.0
+n=100 step (CSG): N=28034, update_volumes! 0.26 ms, domain_volume 2.5199989812568764
+n=100 box via CSG: N=32837, update_volumes! 0.32 ms, domain_volume 2.999998501848243
+n=200 rectangular 3x1: N=125637, update_volumes! 1.21 ms, domain_volume 3.0
+n=200 step (CSG): N=106434, update_volumes! 0.98 ms, domain_volume 2.5199989812568764
+n=200 box via CSG: N=125637, update_volumes! 1.16 ms, domain_volume 2.999998501848243

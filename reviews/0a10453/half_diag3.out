@@ -1,0 +1,11 @@
+frac 0.00 Mirror2 b  N= 40  max err at t = 0.25/0.5/1/2: 3.584e-02 6.162e-02 1.041e-01 1.678e-01
+frac 0.00 Mirror2 b  N= 80  max err at t = 0.25/0.5/1/2: 1.892e-02 2.659e-02 3.804e-02 5.637e-02
+frac 0.00 Mirror2 b  N=160  max err at t = 0.25/0.5/1/2: 1.330e-02 1.944e-02 2.904e-02 4.424e-02
+frac 0.25 Mirror2 b  N= 40  max err at t = 0.25/0.5/1/2: 3.559e-02 5.986e-02 1.025e-01 1.657e-01
+frac 0.25 Mirror2 b  N= 80  max err at t = 0.25/0.5/1/2: 1.087e-02 1.318e-02 1.640e-02 2.405e-02
+frac 0.25 Mirror2 b  N=160  max err at t = 0.25/0.5/1/2: 6.400e-03 8.061e-03 1.032e-02 1.343e-02
+frac 0.75 Mirror2 b  N= 40  max err at t = 0.25/0.5/1/2: 3.739e-02 6.178e-02 1.055e-01 1.721e-01
+frac 0.75 Mirror2 b  N= 80  max err at t = 0.25/0.5/1/2: 2.508e-02 3.747e-02 5.736e-02 8.953e-02
+frac 0.75 Mirror2 b  N=160  max err at t = 0.25/0.5/1/2: 1.906e-02 2.927e-02 4.557e-02 7.177e-02
+┌ Warning: bc_map and boundary tags do not match: no boundary particle carries tag(s) [3], so their condition is never applied; the boundary particles carry tag(s) [4] (boxes tag the face `2d - 1` / `2d` of axis `d`; up to 0.7.9 1-D and 3-D boxes tagged every boundary particle 1, see get_rectangular_domain).
+└ @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-fixes/src/Grid/Domains.jl:454

@@ -1,0 +1,14 @@
+open cuboid: domain_volume 1.0 interior_mass [0.7427570014712825] sum V interior 0.7427570014712825
+rectangular: domain_volume 1.0 interior_mass [0.7427570014712825] sum V interior 0.7427570014712825
+Rotated ball bbox: ([-1.414213562373095, -1.414213562373095], [1.414213562373095, 1.414213562373095])
+rotated ball, tight box: ArgumentError
+loose box ignored: mins = [0.0, 0.0]
+closed shape on periodic axis: accepted, vol 1.0
+volume kw: 3.0 F32 CSG vol 0.8743373 exact 0.8743362938564083
+Translated tagged ball volume: 3.141592653589793
+ball sq inside false; in union true
+Tagged -2: ArgumentError
+tag-0 function grid: ArgumentError
+float tag fn: 2
+step: wall_geometry mean 0.57 us, worst 3.7 us
+rotated wedge 17°: wall_geometry mean 54.51 us, worst 353.3 us

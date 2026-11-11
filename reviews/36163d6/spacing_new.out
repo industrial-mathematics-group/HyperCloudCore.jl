@@ -1,0 +1,54 @@
+ERROR: LoadError: UndefVarError: `Shapes` not defined in `HyperCloudCore`
+Suggestion: check for spelling errors or missing imports.
+Stacktrace:
+ [1] getproperty
+   @ ./Base_compiler.jl:50 [inlined]
+ [2] top-level scope
+   @ /tmp/brev_e/probes/spacing.jl:46
+ [3] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [4] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [5] _start()
+   @ Base ./client.jl:577
+in expression starting at /tmp/brev_e/probes/spacing.jl:31
+disc r=1 h=0.1 j=0.0                           Nint    349  min all 0.592h  min int 0.592h (φ -0.51/-0.00 h)  min ghost φ 0.630h  on wall 44
+disc r=1 h=0.037 j=0.0                         Nint   2381  min all 0.551h  min int 0.551h (φ -0.00/-0.52 h)  min ghost φ 0.503h  on wall 84
+disc r=0.13 h=0.05 (small) j=0.0               Nint     32  min all 0.659h  min int 0.659h (φ -0.34/0.00 h)  min ghost φ 0.794h  on wall 12
+box 1.03 j=0.0                                 Nint    462  min all 0.600h  min int 0.600h (φ 0.00/0.00 h)  min ghost φ 1.000h  on wall 82
+box minus disc j=0.0                           Nint    812  min all 0.550h  min int 0.550h (φ -0.50/-0.00 h)  min ghost φ 0.600h  on wall 140
+step 0.61/0.213 j=0.0                          Nint   1089  min all 0.740h  min int 0.740h (φ -0.00/-0.74 h)  min ghost φ 0.800h  on wall 156
+wedge 30 j=0.0                                 Nint    144  min all 0.547h  min int 0.547h (φ 0.00/0.00 h)  min ghost φ 0.526h  on wall 44
+rot plate j=0.0                                Nint   3312  min all 0.661h  min int 0.661h (φ -0.00/-0.43 h)  min ghost φ 0.532h  on wall 256
+L notch (reflex) j=0.0                         Nint    341  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.940h  on wall 61
+union discs j=0.0                              Nint    781  min all 0.552h  min int 0.552h (φ -0.48/-0.00 h)  min ghost φ 0.500h  on wall 67
+disc r=1 h=0.1 j=0.2                           Nint    347  min all 0.450h  min int 0.450h (φ -0.43/0.00 h)  min ghost φ 0.527h  on wall 29
+disc r=1 h=0.037 j=0.2                         Nint   2380  min all 0.344h  min int 0.344h (φ 0.00/-0.31 h)  min ghost φ 0.501h  on wall 72
+disc r=0.13 h=0.05 (small) j=0.2               Nint     31  min all 0.639h  min int 0.639h (φ -0.00/-0.38 h)  min ghost φ 0.532h  on wall 10
+box 1.03 j=0.2                                 Nint    456  min all 0.491h  min int 0.491h (φ -0.49/0.00 h)  min ghost φ 0.507h  on wall 15
+box minus disc j=0.2                           Nint    810  min all 0.443h  min int 0.443h (φ -0.44/-0.00 h)  min ghost φ 0.515h  on wall 16
+step 0.61/0.213 j=0.2                          Nint   1089  min all 0.554h  min int 0.554h (φ -0.00/-0.55 h)  min ghost φ 0.729h  on wall 48
+wedge 30 j=0.2                                 Nint    144  min all 0.480h  min int 0.480h (φ -0.14/0.00 h)  min ghost φ 0.500h  on wall 12
+rot plate j=0.2                                Nint   3314  min all 0.497h  min int 0.497h (φ -0.00/-0.26 h)  min ghost φ 0.559h  on wall 16
+L notch (reflex) j=0.2                         Nint    341  min all 0.616h  min int 0.665h (φ -0.06/-0.08 h)  min ghost φ 0.778h  on wall 0
+union discs j=0.2                              Nint    784  min all 0.291h  min int 0.291h (φ -0.28/-0.00 h)  min ghost φ 0.516h  on wall 62
+disc r=1 h=0.1 j=0.3                           Nint    347  min all 0.394h  min int 0.394h (φ -0.39/-0.00 h)  min ghost φ 0.558h  on wall 29
+disc r=1 h=0.037 j=0.3                         Nint   2380  min all 0.254h  min int 0.254h (φ 0.00/-0.25 h)  min ghost φ 0.500h  on wall 68
+disc r=0.13 h=0.05 (small) j=0.3               Nint     31  min all 0.478h  min int 0.478h (φ -0.02/-0.22 h)  min ghost φ 0.572h  on wall 10
+box 1.03 j=0.3                                 Nint    454  min all 0.420h  min int 0.428h (φ -5.61/-5.54 h)  min ghost φ 0.509h  on wall 13
+box minus disc j=0.3                           Nint    810  min all 0.420h  min int 0.420h (φ -1.43/-1.02 h)  min ghost φ 0.500h  on wall 16
+step 0.61/0.213 j=0.3                          Nint   1085  min all 0.418h  min int 0.418h (φ -1.70/-1.29 h)  min ghost φ 0.503h  on wall 40
+wedge 30 j=0.3                                 Nint    145  min all 0.355h  min int 0.355h (φ -0.13/-0.00 h)  min ghost φ 0.530h  on wall 11
+rot plate j=0.3                                Nint   3313  min all 0.357h  min int 0.357h (φ -0.30/-0.00 h)  min ghost φ 0.521h  on wall 15
+L notch (reflex) j=0.3                         Nint    341  min all 0.435h  min int 0.498h (φ -0.13/-0.15 h)  min ghost φ 0.697h  on wall 0
+union discs j=0.3                              Nint    781  min all 0.277h  min int 0.277h (φ 0.00/-0.16 h)  min ghost φ 0.500h  on wall 56
+disc r=1 h=0.1 j=0.45                          Nint    346  min all 0.133h  min int 0.220h (φ -2.03/-1.81 h)  min ghost φ 0.510h  on wall 26
+disc r=1 h=0.037 j=0.45                        Nint   2373  min all 0.124h  min int 0.124h (φ -8.80/-8.83 h)  min ghost φ 0.500h  on wall 58
+disc r=0.13 h=0.05 (small) j=0.45              Nint     30  min all 0.198h  min int 0.198h (φ -0.23/-0.10 h)  min ghost φ 0.567h  on wall 9
+box 1.03 j=0.45                                Nint    451  min all 0.133h  min int 0.166h (φ -5.61/-5.51 h)  min ghost φ 0.516h  on wall 8
+box minus disc j=0.45                          Nint    809  min all 0.133h  min int 0.133h (φ -1.28/-1.15 h)  min ghost φ 0.500h  on wall 13
+step 0.61/0.213 j=0.45                         Nint   1079  min all 0.133h  min int 0.133h (φ -2.62/-2.66 h)  min ghost φ 0.535h  on wall 29
+wedge 30 j=0.45                                Nint    145  min all 0.220h  min int 0.341h (φ -0.40/-0.54 h)  min ghost φ 0.514h  on wall 11
+rot plate j=0.45                               Nint   3311  min all 0.133h  min int 0.133h (φ -4.88/-4.92 h)  min ghost φ 0.506h  on wall 11
+L notch (reflex) j=0.45                        Nint    341  min all 0.220h  min int 0.249h (φ -0.22/-0.25 h)  min ghost φ 0.553h  on wall 0
+union discs j=0.45                             Nint    770  min all 0.133h  min int 0.216h (φ -1.44/-1.48 h)  min ghost φ 0.500h  on wall 41

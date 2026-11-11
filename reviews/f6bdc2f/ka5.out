@@ -1,0 +1,2 @@
+Float32 3-D ExtrapolationBC(2) (3079 ghosts): Polyester: max err 7.09e+00, #>1e-2: 319; Threads: max err 7.09e+00, #>1e-2: 640; KA CPU: max err 1.48e-02, #>1e-2: 1
+Float32 3-D MirrorBC(2, unbounded) (3079 ghosts): Polyester: max err 1.30e-04, #>1e-2: 0; Threads: max err 1.30e-04, #>1e-2: 0; KA CPU: max err 1.30e-04, #>1e-2: 0
