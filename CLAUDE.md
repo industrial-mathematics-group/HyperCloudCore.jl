@@ -31,7 +31,7 @@ combinations that already exist, and on small stencils (degree-5 2-D fits cost ~
 | `src/API.jl`, `src/Types.jl` | API contracts physics packages implement (`flux`, `max_eigenvalue`, `velocity`, sources, …) and abstract types |
 | `src/Backend.jl` | Execution backends and `foreach_particle` (every parallel per-particle loop) |
 | `src/DeviceAdapt.jl`, `src/Growable.jl`, `src/MemoryBudget.jl` | `Adapt` rules / `KernelView`, growable buffers, memory estimate and `reserve!` |
-| `src/Grid/` | Domains, particle grids, neighbour search (cell lists), BCs, volumes, adaptivity, reordering |
+| `src/Grid/` | Shapes (signed distances), domains, particle grids, neighbour search (cell lists), BCs, volumes, adaptivity, reordering |
 | `src/Interpolation/` | MLS interpolators, schemes, numerical fluxes, limiters |
 | `src/TimeStepping/` | RK/IMEX time stepper, Butcher tableaus, MOOD, grid movers |
 | `src/Builders/` | Config-driven builders (`build_*`) used by HyperCloud |

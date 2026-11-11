@@ -80,8 +80,9 @@ MLSVolumes(P::Int; samples_per_dx::Int = 2) = MLSVolumes{P}(samples_per_dx)
 """
     domain_volume(geom::GeometricDomain) -> T
 
-Volume of the physical region. Analytic for the built-in shapes; define a method for custom
-geometry labels (or integrate `geom.is_interior` on a lattice).
+Volume of the physical region. Analytic for boxes and balls, [`shape_volume`](@ref) of the shape of every
+other shape-based domain (a lattice integration unless the shape defines its volume); define a method for
+custom geometry labels without a shape (or integrate `geom.is_interior` on a lattice).
 """
 domain_volume(geom::GeometricDomain{Val{:rectangular}}) = prod(geom.maxs .- geom.mins)
 
@@ -91,7 +92,9 @@ function domain_volume(geom::GeometricDomain{Val{:spherical}, D, T}) where {D, T
 end
 
 domain_volume(geom::GeometricDomain{GEO}) where {GEO} =
-    error("domain_volume is not defined for geometry label $GEO; add a method or integrate `geom.is_interior`.")
+    geom.shape === nothing ?
+        error("domain_volume is not defined for geometry label $GEO; add a method or integrate `geom.is_interior`.") :
+        shape_volume(geom.shape)
 
 domain_volume(pg::ParticleGrid) = domain_volume(pg.geometry)
 
