@@ -329,14 +329,28 @@ end
 # `MirrorBC` extrapolates, and the condition did not converge (a channel wall 0.1h off the lattice row, N = 20/40/80,
 # t = 1: max error 0.41/0.67/0.63 against 0.09/0.04/0.016 with exact ghosts). Such a point is snapped onto the wall
 # (its nearest wall point) and becomes interior, as the lattice row on a box face does: every ghost is then at least
-# h/2 outside and the interior reaches the wall. On a lattice a snapped point stays at least h/2 from every other
-# lattice point; two snapped points can come close only at a reflex corner (the inside corner of a step), where the
-# later one is pushed out to h/2 as a ghost instead (also if the snapped point does not test interior after rounding).
+# h/2 outside and the interior reaches the wall. On an unjittered lattice a snapped point stays at least h/2 from every
+# other lattice point; a snapped point that would come within h/4 of an interior particle (jittered or reflected
+# ones next to the wall, other snapped points behind corners) is pushed out to h/2 as a ghost instead, also if it
+# does not test interior after rounding. Distances are minimum images across periodic seams.
 function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T}, h_snap::T, wrap) where {GEO, D, T}
     isempty(near) && return nothing
-    cell = h_snap / 2                                  # snapped points closer than h/4 collide
+    cell = h_snap / 2                                  # closer than h/4 is a clash
+    # Cells of width >= `cell`; on a periodic axis a whole number of them spans the period and the index wraps
+    L  = geom.maxs - geom.mins
+    nc = ntuple(d -> geom.is_periodic[d] ? max(1, floor(Int, L[d] / cell)) : 0, Val(D))
+    w  = ntuple(d -> geom.is_periodic[d] ? L[d] / nc[d] : cell, Val(D))
+    key(p) = ntuple(d -> floor(Int, (p[d] - geom.mins[d]) / w[d]), Val(D))
+    wrapkey(k) = ntuple(d -> geom.is_periodic[d] ? mod(k[d], nc[d]) : k[d], Val(D))
+    mindist2(a, b) = sum(ntuple(Val(D)) do d
+        δ = a[d] - b[d]
+        geom.is_periodic[d] && (δ -= L[d] * round(δ / L[d]))
+        δ^2
+    end)
     taken = Dict{NTuple{D, Int}, Vector{Space{D, T}}}()
-    key(p) = ntuple(d -> floor(Int, p[d] / cell), Val(D))
+    for p in inner                                     # the interior particles next to the wall
+        signed_distance(geom.shape, p) > -h_snap && push!(get!(taken, wrapkey(key(p)), Space{D, T}[]), p)
+    end
     for pos in near
         n, φ = wall_geometry(geom, pos)
         if !(isfinite(φ) && φ < h_snap)
@@ -347,11 +361,11 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         geom.is_interior(s) || (s = wrap(pos - (φ + 64 * eps(T) * max(one(T), maximum(abs, pos))) * n))   # rounding
         k = key(s)
         clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
-            any(q -> sum(abs2, q - s) < cell^2, get(taken, ntuple(d -> k[d] + off[d], Val(D)), ()))
+            any(q -> mindist2(q, s) < cell^2, get(taken, wrapkey(ntuple(d -> k[d] + off[d], Val(D))), ()))
         end
         if !clash && geom.is_interior(s)
             push!(inner, s)
-            push!(get!(taken, k, Space{D, T}[]), s)
+            push!(get!(taken, wrapkey(k), Space{D, T}[]), s)
         else
             push!(ghosts, wrap(pos + (h_snap - φ) * n))
         end

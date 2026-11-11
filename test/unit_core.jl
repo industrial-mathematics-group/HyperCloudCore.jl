@@ -993,6 +993,9 @@ end
                 @test all(i -> p.core.is_boundary[i] || p.core.wall_distances[i] <= 0, 1:p.meta.N)
                 xs = view(p.core.positions, 1:p.meta.N)
                 @test jit > 0 || minimum(sum(abs2, xs[i] - xs[j]) for i in eachindex(xs) for j in (i + 1):length(xs)) >= (dx / 2 - 1e-12)^2
+                # snapped points (on the wall) keep dx/4 from every other particle, also on a jittered cloud
+                onwall = [i for i in eachindex(xs) if abs(p.core.wall_distances[i]) <= 1e-12]
+                @test isempty(onwall) || minimum(sum(abs2, xs[i] - xs[j]) for i in onwall for j in eachindex(xs) if j != i) >= (dx / 4 - 1e-12)^2
             end
         end
         # also behind a curved wall: no jittered interior point ends up outside the disc
