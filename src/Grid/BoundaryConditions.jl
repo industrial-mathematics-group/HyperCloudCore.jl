@@ -336,8 +336,6 @@ end
         # wall donor supports made a higher request give a lower degree: 1-D, R = 3.5Δx, degree 4 ran as degree 1
         # while degree 3 ran as 3.)
         q = Q
-        o = orders[j]
-        o > 0 && (q = min(q, o - 1))
         n_sup = _support_count(j, ranges, indices, isb)
         jd = j
         while q > 0
@@ -354,6 +352,8 @@ end
             q -= 1
         end
         j = jd
+        o = orders[j]                                  # the MOOD cap of the donor that is fitted (a lower degree
+        o > 0 && (q = min(q, o - 1))                   # needs less support, so the donor still carries it)
         U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
         if BOUNDED
             # Discrete maximum principle on the ghost state: the mirrored value stays within the range of the data

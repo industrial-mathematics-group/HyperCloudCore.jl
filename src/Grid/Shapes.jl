@@ -116,7 +116,8 @@ _inside(s::AbstractShape{D, T}, x::Space{D, T}) where {D, T} = signed_distance(s
 # integration of the shape cut by the box. Called once, by the `GeometricDomain` constructor.
 function _clipped_volume(s::AbstractShape{D, T}, lo::Space{D, T}, hi::Space{D, T}) where {D, T}
     bb_lo, bb_hi = bounding_box(s)
-    (bb_lo == lo && bb_hi == hi) && return T(shape_volume(s))
+    # the box contains the (bounded) shape: its own volume, analytic where the shape defines it
+    (all(isfinite, bb_lo) && all(isfinite, bb_hi) && all(lo .<= bb_lo) && all(hi .>= bb_hi)) && return T(shape_volume(s))
     return T(shape_volume(intersect(s, Cuboid{D, T}(Tuple(lo), Tuple(hi)))))
 end
 

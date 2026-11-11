@@ -19,8 +19,9 @@ and half spaces, their unions, intersections and differences, translated and rot
 built on such a domain stores its outward wall normal and signed wall distance (`pg.core.normals`,
 `pg.core.wall_distances`), which the higher-order conditions [`ExtrapolationBC`](@ref) and [`MirrorBC`](@ref)
 use. The bounding box is that of the shape; along an axis where it is unbounded (open box axes, i.e. periodic
-axes, or shapes cut from half spaces) `mins`/`maxs` must be given, and they are only used there (a box that
-would crop a bounded axis is an error: intersect the shape with a [`Cuboid`](@ref) instead). A shape used on a
+axes, or shapes cut from half spaces) `mins`/`maxs` must be given; on bounded axes they may enlarge the box (the
+lattice is anchored at it), but a box that would crop the shape is an error (intersect the shape with a
+[`Cuboid`](@ref) instead; the bounding boxes of rotated and combined shapes are conservative). A shape used on a
 periodic axis must be open along it (its ends are no boundary; `Cuboid(...; open = ...)`). The volume of the
 region (the shape within the box; [`domain_volume`](@ref)) is computed once here, analytically where the shape
 allows it and by [`shape_volume`](@ref) otherwise; pass `volume` if it is known.
@@ -66,16 +67,17 @@ function GeometricDomain(shape::AbstractShape{D, T};
                          mins = nothing, maxs = nothing, label = Val(:shape), volume = nothing) where {D, T}
     is_per_svec = _periodic_flags(is_periodic, Val(D))
     bb_lo, bb_hi = bounding_box(shape)
-    # mins/maxs close the unbounded axes; on bounded ones the shape's own extent is used, and a box that would
-    # crop it is refused (the cut would carry no boundary condition, and the volume would be the uncropped one)
+    # mins/maxs close the unbounded axes; on bounded ones they may enlarge the box (the lattice is anchored at it),
+    # but a box that would crop the shape is refused (the cut would carry no boundary condition)
     for d in 1:D, (lim, bb, below) in ((mins, bb_lo[d], true), (maxs, bb_hi[d], false))
         (lim === nothing || !isfinite(bb)) && continue
         (below ? T(lim[d]) > bb : T(lim[d]) < bb) &&
-            throw(ArgumentError("GeometricDomain: mins/maxs ($(lim[d]) on axis $d) crop the shape (extent $(bb_lo[d]) .. " *
-                                "$(bb_hi[d])); intersect the shape with a Cuboid to cut it"))
+            throw(ArgumentError("GeometricDomain: mins/maxs ($(lim[d]) on axis $d) crop the shape (bounding box " *
+                                "$(bb_lo[d]) .. $(bb_hi[d]); the boxes of rotated and combined shapes are conservative, " *
+                                "give one containing it); intersect the shape with a Cuboid to cut it"))
     end
-    lo = Space{D, T}(ntuple(d -> isfinite(bb_lo[d]) || mins === nothing ? bb_lo[d] : T(mins[d]), Val(D)))
-    hi = Space{D, T}(ntuple(d -> isfinite(bb_hi[d]) || maxs === nothing ? bb_hi[d] : T(maxs[d]), Val(D)))
+    lo = Space{D, T}(ntuple(d -> mins === nothing ? bb_lo[d] : T(mins[d]), Val(D)))
+    hi = Space{D, T}(ntuple(d -> maxs === nothing ? bb_hi[d] : T(maxs[d]), Val(D)))
     (all(isfinite, lo) && all(isfinite, hi)) ||
         throw(ArgumentError("GeometricDomain: the shape is unbounded along some axis (bounding box $bb_lo .. $bb_hi); " *
                             "give mins/maxs, or intersect the shape with a Cuboid"))
@@ -267,6 +269,9 @@ function get_points(
     # A jittered point that left a periodic axis belongs to the other end: classifying it before wrapping made it
     # a (frozen) boundary particle at the seam.
     wrap(p) = Space{D, T}(ntuple(d -> cd.is_periodic[d] ? _wrap_periodic(p[d], geom.mins[d], cd.L_wrap[d]) : p[d], Val(D)))
+    # Points less than h/2 outside a wall (shape-based domains) are snapped onto it, see `_snap_near_wall!`
+    h_snap = minimum(dxs_f) / 2
+    near_wall = Space{D, T}[]
     for I in CartesianIndices(Ns_total)
         lattice = Space{D, T}(ntuple(Val(D)) do d
             j = I[d] - 1
@@ -284,11 +289,16 @@ function get_points(
             # and OutflowBC lost accuracy (0.23 at N = 80), without them both converge (0.28/0.062/0.023 and
             # 0.032, exact ghosts 0.026).
             push!(inner_points, _reflect_inside(geom, pos, lattice, wrap))
+        elseif geom.shape !== nothing && signed_distance(geom.shape, pos) < h_snap
+            # (the signed distance is a lower bound of the wall distance outside a combined shape)
+            push!(near_wall, pos)
         else
             push!(ghost_candidates, pos)
         end
     end
     
+    _snap_near_wall!(inner_points, ghost_candidates, near_wall, geom, h_snap, wrap)
+
     max_dx = maximum(dxs_f)
     cutoff_dist_sq = (T(interp_range_factor) * max_dx + max_dx)^2
     surviving_ghosts = _narrow_band(inner_points, ghost_candidates, cutoff_dist_sq)
@@ -311,6 +321,42 @@ function get_points(
     end
 
     return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances
+end
+
+# Points within `h_snap` = h/2 outside a wall (curved walls, obstacles and box extents off the lattice, jittered rows
+# that the reflection below does not cover) would be ghosts sitting almost on the wall, with a gap of up to h between
+# the wall and the first interior particle: the mirror points of the ghosts then fall into that gap, the fit of
+# `MirrorBC` extrapolates, and the condition did not converge (a channel wall 0.1h off the lattice row, N = 20/40/80,
+# t = 1: max error 0.41/0.67/0.63 against 0.09/0.04/0.016 with exact ghosts). Such a point is snapped onto the wall
+# (its nearest wall point) and becomes interior, as the lattice row on a box face does: every ghost is then at least
+# h/2 outside and the interior reaches the wall. On a lattice a snapped point stays at least h/2 from every other
+# lattice point; two snapped points can come close only at a reflex corner (the inside corner of a step), where the
+# later one is pushed out to h/2 as a ghost instead (also if the snapped point does not test interior after rounding).
+function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T}, h_snap::T, wrap) where {GEO, D, T}
+    isempty(near) && return nothing
+    cell = h_snap / 2                                  # snapped points closer than h/4 collide
+    taken = Dict{NTuple{D, Int}, Vector{Space{D, T}}}()
+    key(p) = ntuple(d -> floor(Int, p[d] / cell), Val(D))
+    for pos in near
+        n, φ = wall_geometry(geom, pos)
+        if !(isfinite(φ) && φ < h_snap)
+            push!(ghosts, pos)                         # farther than the lower bound suggested
+            continue
+        end
+        s = wrap(pos - φ * n)
+        geom.is_interior(s) || (s = wrap(pos - (φ + 64 * eps(T) * max(one(T), maximum(abs, pos))) * n))   # rounding
+        k = key(s)
+        clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
+            any(q -> sum(abs2, q - s) < cell^2, get(taken, ntuple(d -> k[d] + off[d], Val(D)), ()))
+        end
+        if !clash && geom.is_interior(s)
+            push!(inner, s)
+            push!(get!(taken, k, Space{D, T}[]), s)
+        else
+            push!(ghosts, wrap(pos + (h_snap - φ) * n))
+        end
+    end
+    return nothing
 end
 
 # The mirror image of `pos` behind the wall (a shape-based domain), or the lattice position it was jittered from
