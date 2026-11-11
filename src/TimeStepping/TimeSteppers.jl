@@ -299,19 +299,25 @@ function _sync_boundaries!(pg::ParticleGrid{D, M, T}, t::T, max_order::Int) wher
     return nothing
 end
 
-# Number of equal sub-intervals of [t0, t] over each of which every piece moves at most a quarter spacing (the
-# displacement of the rigid map, at the canvas corners)
+# Number of equal sub-intervals of [t0, t] over each of which every piece moves at most a quarter spacing: the
+# displacement of the corners of the piece's box in its body frame (the canvas corners for an unbounded piece; with
+# the canvas corners always, a ball spinning in place needed 4096 sub-steps to start at t = 5)
 function _sync_substeps(pg::ParticleGrid{D, M, T}, t0::T, t::T) where {D, M, T}
     geom, cd = pg.geometry, pg.domain
     lim = minimum(pg.meta.dx) / 4
-    corners = [Space{D, T}(ntuple(d -> I[d] == 0 ? cd.canvas_mins[d] : cd.canvas_maxs[d], Val(D)))
-               for I in CartesianIndices(ntuple(_ -> 0:1, Val(D)))]
+    box_corners(lo, hi) = [Space{D, T}(ntuple(d -> I[d] == 0 ? lo[d] : hi[d], Val(D))) for I in CartesianIndices(ntuple(_ -> 0:1, Val(D)))]
+    body = map(geom.pieces) do piece
+        lo, hi = bounding_box(piece.shape)
+        all(isfinite, lo) && all(isfinite, hi) ? (box_corners(lo, hi), true) : (box_corners(cd.canvas_mins, cd.canvas_maxs), false)
+    end
     function moves(ta, tb)
         dmax = zero(T)
-        for piece in geom.pieces
+        for (piece, (pts, in_body)) in zip(geom.pieces, body)
             ma, mb = pose(piece, ta), pose(piece, tb)
-            for x in corners
-                dmax = max(dmax, sqrt(sum(abs2, mb.c + mb.R * (ma.R' * (x - ma.c)) - x)))
+            for x in pts
+                d = in_body ? HyperCloudCore.body_to_world(mb, x) - HyperCloudCore.body_to_world(ma, x) :
+                              mb.c + mb.R * (ma.R' * (x - ma.c)) - x
+                dmax = max(dmax, sqrt(sum(abs2, d)))
             end
         end
         return dmax

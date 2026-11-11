@@ -58,8 +58,9 @@ end
   extent as radius (needs `context[:D]`);
 - `:shape`: the [`AbstractShape`](@ref) in `:shape` (an instance, or a string of Julia code that evaluates to
   one, in which `T` is the run's float type: `"Ball((T(0), T(0)), T(0.5))"` works for Float32 and Float64), with
-  `:mins`/`:maxs` where the shape is unbounded (optional otherwise). A string is also what the parameter hash
-  sees in full: the motion of a `Moving` piece is a function, which the hash of an instance does not see.
+  `:mins`/`:maxs` where the shape is unbounded (optional otherwise; several statements separated by `;` work, and
+  `T` shadows a global `T` of `Main`). A string is also what the parameter hash sees in full: the motion of a
+  `Moving` piece is a function, which the hash of an instance does not see.
 
 All read `:periodic` (`Bool` or `NTuple{D, Bool}`, default `false`) and the boundary conditions
 (`:bc`, see [`parse_bc`](@ref)). A [`GeometricDomain`](@ref) among the values of `domain_conf` is returned
@@ -107,7 +108,11 @@ function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
     # there through `using HyperCloud`/`using HyperCloudCore`); HyperCloudCore itself if `Main` doesn't know a name.
     # `T` is bound to the run's float type.
     if shape isa String
-        ex = :(let T = $T; $(Meta.parse(shape)); end)
+        body = Meta.parse(shape)                          # a syntax error is thrown here, as a ParseError
+        body isa Expr && body.head in (:incomplete, :error) &&
+            throw(ArgumentError("Domain :shape: the string is not complete Julia code: $(body.args[1])"))
+        body isa Expr && body.head === :toplevel && (body = Expr(:block, body.args...))   # "a = …; Shape(…, a)"
+        ex = :(let T = $T; $body; end)
         shape = try
             Core.eval(Main, ex)
         catch e

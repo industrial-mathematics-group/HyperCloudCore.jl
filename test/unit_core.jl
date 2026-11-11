@@ -796,6 +796,9 @@ end
     # `T` in a string is the run's float type
     g32 = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), T(1))"), Dict{Symbol, Any}(:T => Float32, :D => 2))
     @test g32.shape isa Ball{2, Float32}
+    gm = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "r = T(0.5); Ball((T(0), T(0)), r)"), Dict{Symbol, Any}(:T => Float32, :D => 2))
+    @test gm.shape isa Ball{2, Float32}
+    @test_throws ArgumentError HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), "), ctx)
     @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape), ctx)
     # the former constructor still works, without wall geometry
     legacy = GeometricDomain(Val(:legacy_square), SVector(0.0, 0.0), SVector(1.0, 1.0), SVector(false, false),

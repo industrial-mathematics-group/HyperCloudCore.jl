@@ -1006,8 +1006,15 @@ end
         face = 1 + t
         bottom = [pg.core.positions[i] for i in 1:pg.meta.N if pg.core.is_boundary[i] && pg.core.tags[i] == 3]
         @test maximum(x -> x[1], bottom) >= face - h
-        @test count(i -> pg.core.positions[i][2] == 0.0 && 1 + h < pg.core.positions[i][1] < face - h, inner(pg)) >= 5
+        @test count(i -> abs(pg.core.positions[i][2] - h) < 1e-12 && 1 + h < pg.core.positions[i][1] < face - h, inner(pg)) >= 5
         @test all(i -> pg.core.volumes[i] == 0, [i for i in 1:pg.meta.N if pg.core.is_boundary[i]])
+        # a piece faster than the documented limit (1.5 spacings per sweep): particles it covered whole have no volume
+        # left and go without a remap (they made the remaps divide 0 by 0: NaN up to 10 h from the face)
+        pg = piston_grid(-0.5)
+        t = 0.0
+        for _ in 1:4; t += 3h; advance!(pg, t); end
+        @test all(i -> isfinite(pg.rhos[i][1]) && isfinite(pg.core.volumes[i]), 1:pg.meta.N)
+        @test abs(sum(pg.core.volumes[i] for i in inner(pg)) - 0.5 * (1 - 0.5t)) < 0.5h
         # a piece reaching across a periodic end is refused (no periodic images of pieces)
         plate = Moving(Tagged(Cuboid((-0.2, -0.05), (0.2, 0.05)), t -> t + 4), translating((1.0, 0.0)))
         chan  = Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - plate
@@ -1047,6 +1054,10 @@ end
         pgl = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; mover = LagrangianMover())
         @test_throws ArgumentError HyperCloudCore._sync_boundaries!(pgl, 0.0, 3)
         @test_throws ArgumentError adapt_particles!(pg, ParticleAdaptivity(Float64; volume_estimator = ShepardVolumes()), 3)
+        # ... so the builder gives a static cloud with moving pieces no estimator (it gave Shepard: the first call threw)
+        ad = HyperCloudCore.build_adaptivity(Dict{Symbol, Any}(:enabled => true), Dict{Symbol, Any}(:T => Float64, :Grid => pg))
+        @test ad.volume_estimator === nothing
+        @test adapt_particles!(pg, ad, 3) isa NamedTuple
     end
 
     @testset "A plate translating with the flow: the solution translates (order 2)" begin
