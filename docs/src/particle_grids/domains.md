@@ -26,6 +26,7 @@ The region is described by a **signed distance** $\varphi(x)$: negative inside, 
 | `complement(a)`, `setdiff(a, b, ...)`, `a - b` | the outside of `a`; `a` with `b` cut out | of the active piece (kept) |
 | `Tagged(shape, tag)`, `Tagged(shape, f)` | the same region | `tag`, or `f(tag)` |
 | `Translated(shape, offset)`, `Rotated(shape, R; center)` | the moved region | of the shape |
+| `Moving(shape, motion)` | the region at the pose `motion(t)` (rigid, prescribed in time; see [Moving Boundaries](@ref)) | of the shape |
 
 The **active piece** of a union is the one with the smallest signed distance (the nearest piece for an outside point), of an intersection the one with the largest (the piece the point is farthest outside of). Its normal and tag are used, so a ghost particle outside a channel with an obstacle is tagged by the wall or the obstacle face it actually lies behind. The signed distance of a cuboid is the Euclidean distance also outside its edges and corners, where the normal points to the corner and the mirror image is the point reflection through it.
 

@@ -409,7 +409,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
                        new_pos::Vector{Space{D, T}}, new_rho::Vector{State{M, T}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
                        record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing,
-                       removed_mask = nothing, region = nothing) where {D, M, T}
+                       removed_mask = nothing) where {D, M, T}
     nb     = pg.neighbor
     pos    = pg.core.positions
     V      = pg.core.volumes
@@ -433,7 +433,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     # `removed_mask` (the sweep of moving boundaries): particles other events of the same call remove, so that no
     # content is given to a particle that the compaction drops
     is_removed = removed_mask === nothing ? falses(n_loc) : [removed_mask[loc_idx[l]] for l in 1:n_loc]
-    for r in ev.removed; is_removed[lmap[r]] = true; end
+    is_other   = copy(is_removed)                          # removed by another event: gone from the balance below
+    for r in ev.removed; is_removed[lmap[r]] = true; is_other[lmap[r]] = false; end
     # Boundary (ghost) particles are not remapped: their states are boundary data (`FixedDirichlet` restores them
     # from `pg.rhos`, `OutflowBC` overwrites them), so the remap must not write them. Their swept share is left out
     # of the balance below, which then puts it onto the interior particles: Σ V U over the interior is exact.
@@ -460,10 +461,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         grads[l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
     end
 
-    # 3. Quadrature over the box center ± 2R. With `region = (t_old, t_new)` (the sweep of moving boundaries) the
-    #    region itself changed: a lattice point counts with the old partition where it was fluid at `t_old` and
-    #    with the new one where it is fluid at `t_new`, so the volumes follow the region (a covered point's share
-    #    leaves, an uncovered point's share arrives); see step 4 for the states
+    # 3. Quadrature over the box center ± 2R (the region at `boundary_time`: moving pieces have been swept)
     t_bnd = pg.meta.boundary_time
     δV  = zeros(T, n_loc + n_add)
     δm  = zeros(State{M, T}, n_loc + n_add)
@@ -476,14 +474,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     for I in CartesianIndices(ntuple(_ -> nq, Val(D)))
         y_raw = Space{D, T}(ntuple(d -> ev.center[d] - 2R + (I[d] - T(0.5)) * hq, Val(D)))
         y = _wrap_point(pg, y_raw)
-        if region === nothing
-            _is_interior(geom, y, t_bnd) || continue
-            in_old = in_new = true
-        else
-            in_old = _is_interior(geom, y, region[1])
-            in_new = _is_interior(geom, y, region[2])
-            (in_old || in_new) || continue
-        end
+        _is_interior(geom, y, t_bnd) || continue
         n = _collect_near!(pg, y, R_sq, qidx, qd)
         n == 0 && continue
 
@@ -516,9 +507,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
             w_add[a] = d2 <= R_sq ? wf(d2) : zero(T)
             S_new += w_add[a]
         end
-        ((S_old > 0 || !in_old) && (S_new > 0 || !in_new)) || continue
-        inv_old = in_old ? inv(S_old) : zero(T)
-        inv_new = in_new ? inv(S_new) : zero(T)
+        (S_old > 0 && S_new > 0) || continue
+        inv_old, inv_new = inv(S_old), inv(S_new)
 
         # Ũ(y): limited linear reconstruction of the nearest old particle
         lstar = lmap[qidx[jstar]]
@@ -547,8 +537,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     # 4. New volumes and contents; exact residual correction
     V_before = zero(T); m_before = zero(State{M, T})
     @inbounds for l in 1:n_loc
-        is_fixed[l] && continue
-        j = loc_idx[l]
+        (is_fixed[l] || is_other[l]) && continue           # (other events' removals: counting them once per
+        j = loc_idx[l]                                     # overlapping event handed their volume out repeatedly)
         V_before += V[j]; m_before += V[j] * U[j]
     end
     Vn = zeros(T, n_loc + n_add)
@@ -568,12 +558,6 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     end
     V_after > 0 || error("Remap produced no volume at $(ev.center); increase samples_per_dx.")
     εV, εm = V_before - V_after, m_before - m_after
-    # A sweep of moving boundaries changes the region: neither its volume nor its content is conserved by the
-    # remap. The volumes are the partition integrals over the new region, the states the volume-weighted blends of
-    # the old state and the reconstruction on the gained part (a consistent interpolation: an inserted particle
-    # carries the reconstructed state, a covered one vanishes with its content). Enforcing the content made the
-    # whole local set drop by one particle's content at every insertion in a growing region.
-    region === nothing || (εV = zero(T); εm = zero(State{M, T}))
     @inbounds for l in 1:(n_loc + n_add)
         (l <= n_loc && (is_removed[l] || is_fixed[l])) && continue
         frac  = Vn[l] / V_after

@@ -547,7 +547,7 @@ end
 Moving(shape::AbstractShape{D, T}, motion) where {D, T} = Moving{D, T, typeof(shape), typeof(motion)}(shape, motion)
 
 "The pose of the moving piece `m` at time `t`."
-@inline pose(m::Moving{D, T}, t) where {D, T} = m.motion(T(t))::RigidMotion{D, T}
+@inline pose(m::Moving{D, T}, t) where {D, T} = m.motion(T(t))::RigidMotion{D, T, D * D}
 
 # A moving piece frozen at one pose (what `at_time` turns `Moving` into); carries the piece for the probe
 struct Posed{D, T, S <: AbstractShape{D, T}, L, P} <: AbstractShape{D, T}

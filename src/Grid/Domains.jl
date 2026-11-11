@@ -67,12 +67,12 @@ GeometricDomain(label, mins::Space{D, T}, maxs::Space{D, T}, is_periodic::SVecto
     GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing, T(NaN), (), Int[])
 
 # The interior test and tag function of a shape-based domain, callable with and without a time
-struct _ShapeInside{S}
+struct _ShapeInside{S} <: Function
     shape::S
 end
 (f::_ShapeInside)(pos) = _inside(f.shape, pos)
 (f::_ShapeInside)(pos, t) = _inside(at_time(f.shape, t), pos)
-struct _ShapeTag{S}
+struct _ShapeTag{S} <: Function
     shape::S
 end
 (f::_ShapeTag)(pos) = f(pos, 0)
@@ -412,7 +412,7 @@ function tag_motion(geom::GeometricDomain{GEO, D, T}, tag::Int, t_from, t_to) wh
     k = tag + 1 <= length(geom.piece_of_tag) ? geom.piece_of_tag[tag + 1] : 0
     k == 0 && return GhostMotion(Val(D), T)
     m = geom.pieces[k]
-    return GhostMotion(pose(m, t_from), pose(m, t_to))
+    return GhostMotion(pose(m, t_from), pose(m, t_to))::GhostMotion{D, T, D * D}
 end
 
 # One `GhostMotion` per tag (index `tag + 1`), as a tuple for the kernels (bits; the tag count is small)
@@ -462,6 +462,8 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
             any(q -> mindist2(q, s) < cell^2, get(taken, wrapkey(ntuple(d -> k[d] + off[d], Val(D))), ()))
         end
+        # A point on a moving piece would be covered as soon as it moves: it becomes a ghost at h/2 instead
+        clash = clash || _probe(geom.shape, pos)[4] !== nothing
         if !clash && geom.is_interior(s)
             push!(inner, s)
             push!(get!(taken, wrapkey(k), Space{D, T}[]), s)

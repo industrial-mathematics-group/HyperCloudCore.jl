@@ -43,6 +43,8 @@ Every parallel per-particle loop is a kernel body `body(i, args...)` launched wi
 `foreach_particle(body, backend, N, args)`; never write a raw `@threads`/`@batch` loop or
 backend-specific code elsewhere. Kernel bodies must work on every backend:
 
+- At most 20 arguments per kernel body (the kernel view of a longer argument tuple is not inferred and
+  allocates at every launch; pack related values into a tuple).
 - No allocation, no dynamic dispatch, no `Dict` access, only bits-type arguments
   (`kernel_view`/`Adapt` turns host structs into their kernel form; add an
   `adapt_structure` method in `src/DeviceAdapt.jl` for new containers).

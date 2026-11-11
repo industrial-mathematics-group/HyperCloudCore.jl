@@ -261,11 +261,12 @@ function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, val
     invL = one(T) / minimum(pg.meta.dx)
     # A moving piece: the stored ghost positions and normals belong to `boundary_time`; the kernel moves them to
     # the time of the state being built (the interior cloud does not move), and the wall point gets the velocity
-    gm = has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) : GhostMotion(Val(D), T)
+    gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
+                                           GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
     foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
         (buf, pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
          pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
-         pg.domain.L_wrap, pg.domain.invL_wrap, invL, gm, tag, valQ, op, eq, mirror, bounded, Val(D)))
+         (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
     return nothing
 end
 
@@ -307,9 +308,10 @@ end
 
 # Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
 @inline function _ghost_fit_body!(i, buf, pos, isb, tags, normals, wdist, orders, ranges, indices, wf,
-                                  L, Li, invL, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
+                                  wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
     @inbounds begin
         (isb[i] && tags[i] == tag) || return nothing
+        L, Li, invL = wrap
         x_i = move(gm, pos[i])
         n_i = rotate(gm, normals[i])
         φ_i = wdist[i]

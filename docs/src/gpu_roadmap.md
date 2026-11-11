@@ -28,6 +28,7 @@ set_backend!(CUDABackend())                 # from CUDA.jl (likewise ROCBackend(
 | periodic wrap, neighbour counting, slot ranges, writing | `_wrap_position!`, `_count_neighbours!`, `_neighbour_ranges!`, `_write_neighbours!` | `Grid/NeighborLogic.jl` |
 | boundary conditions (Dirichlet; outflow donor search, one pass per hop) | `_dirichlet_body!`, `_outflow_init!`, `_outflow_pass!`, `_outflow_fallback!` | `Grid/BoundaryConditions.jl` |
 | boundary conditions from one-sided fits (`ExtrapolationBC`, `MirrorBC`: donor search, target-centred MLS fit, mirror operator) | `_ghost_fit_body!` | `Grid/BoundaryConditions.jl` |
+| ghosts of moving pieces placed at a stage time (positions and normals) | `_place_ghost!` | `Grid/MovingBoundaries.jl` |
 | adaptivity pre-check (any pair violating the spacing rules) | `_adapt_candidate!` | `Grid/Adaptivity.jl` |
 
 With the KernelAbstractions backend these bodies are compiled as device kernels. The 0.10 `CPU()`
