@@ -992,21 +992,30 @@ end
             end
             return nothing
         end
-        function run_lattice(bc, N)
+        function run_lattice(bc, N; mood = MOOD(), drops = nothing)
             h    = 1 / N
             geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = (true, false),
                                           bc_map = Dict{Int, AbstractBoundaryCondition}(3 => bc, 4 => bc))
             pg   = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
             for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i], 0.0)); end
             interp = MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux())
-            ts = GeneralRKTimeStepper(eqx, interp, MOOD(), RK3_SSP_Tableau(Float64))
+            ts = GeneralRKTimeStepper(eqx, interp, mood, RK3_SSP_Tableau(Float64))
             dt = 0.5 * get_time_step(pg, eqx, interp); t = 0.0
-            while t < 0.5 - 1e-12; d = min(dt, 0.5 - t); ts(eqx, pg, t, d); t += d; end
+            while t < 0.5 - 1e-12
+                d = min(dt, 0.5 - t); ts(eqx, pg, t, d); t += d
+                drops === nothing || (drops[] += count(i -> ts.work.triggered_step[i] && pg.core.positions[i][2] < 2.5h, interior_indices(pg)))
+            end
             return maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i], t)) for i in interior_indices(pg))
         end
         ex40, ex80 = run_lattice(ExactGhosts(), 40), run_lattice(ExactGhosts(), 80)
         @test ex80 < 0.25 * ex40
         @test run_lattice(MirrorBC(; degree = 2), 80) < 1.3 * ex80
+        # The ghosts' gradients and curvatures enter MOODu2's smooth-extremum test of the wall rows. With zero ghost
+        # curvatures the test always failed there and MOODu2 acted as MOODu1 on the first rows: MOODu2(1e-4) with a
+        # mirror, N = 40, dropped orders 4.2 times per step on the wall rows (error 0.21); now never (0.068)
+        nd = Ref(0)
+        @test run_lattice(MirrorBC(; degree = 2), 40; mood = MOOD(MOODu2(1e-4)), drops = nd) < 0.1
+        @test nd[] == 0
     end
 
     @testset "Jitter does not push interior points across a wall" begin
