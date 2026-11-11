@@ -1288,8 +1288,9 @@ end
         @test all(i -> ghost(i) || 1 - 1e-12 <= pg.rhos[i][1] <= 2 + 1e-12, 1:pg.meta.N)
 
         # Jittered boxes with many events next to the walls, with and without the stepper's volume estimator: the
-        # estimator also changes ghost volumes, whose content change used to be put onto the interior (interior
-        # content off by ~1e-3 of the total in 1-D and 2-D); it stays with the ghosts now.
+        # estimator used to change ghost volumes, whose content change was put onto the interior (interior content
+        # off by ~1e-3 of the total in 1-D and 2-D). The ghosts carry no volume now, so total_mass is the interior
+        # content and its change is the reported residual.
         for (D, n) in ((1, 20), (2, 16)), est in (nothing, ShepardVolumes())
             bcD   = Dict{Int, AbstractBoundaryCondition}(t => FixedDirichlet() for t in 1:2D)
             geomD = get_rectangular_domain(Float64, ntuple(_ -> 0.0, D), ntuple(_ -> 1.0, D); bc_map = bcD)
@@ -1306,11 +1307,13 @@ end
             inner() = sum(i -> pgD.core.volumes[i] * pgD.rhos[i][1], filter(!gD, 1:pgD.meta.N))
             scale   = sum(i -> pgD.core.volumes[i] * abs(pgD.rhos[i][1]), 1:pgD.meta.N)
             c0  = inner()
+            m0  = total_mass(pgD)[1]
             rep = adapt_particles!(pgD, ParticleAdaptivity(Float64; volume_estimator = est), kmax)
             @test rep.inserted + rep.removed > 0
             @test Dict(pgD.core.positions[i] => pgD.rhos[i] for i in 1:pgD.meta.N if gD(i)) == states0
             @test abs(inner() - c0) < 1e-13 * scale
             @test abs(rep.mass_residual[1]) < 1e-13 * scale            # reports the interior content
+            @test abs((total_mass(pgD)[1] - m0) - rep.mass_residual[1]) < 1e-13 * scale && total_mass(pgD) == interior_mass(pgD)
         end
     end
 
