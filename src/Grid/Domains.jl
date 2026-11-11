@@ -19,8 +19,11 @@ and half spaces, their unions, intersections and differences, translated and rot
 built on such a domain stores its outward wall normal and signed wall distance (`pg.core.normals`,
 `pg.core.wall_distances`), which the higher-order conditions [`ExtrapolationBC`](@ref) and [`MirrorBC`](@ref)
 use. The bounding box is that of the shape; along an axis where it is unbounded (open box axes, i.e. periodic
-axes, or shapes cut from half spaces) `mins`/`maxs` must be given. A shape used on a periodic axis must be
-open along it (its ends are no boundary; `Cuboid(...; open = ...)`).
+axes, or shapes cut from half spaces) `mins`/`maxs` must be given, and they are only used there (a box that
+would crop a bounded axis is an error: intersect the shape with a [`Cuboid`](@ref) instead). A shape used on a
+periodic axis must be open along it (its ends are no boundary; `Cuboid(...; open = ...)`). The volume of the
+region (the shape within the box; [`domain_volume`](@ref)) is computed once here, analytically where the shape
+allows it and by [`shape_volume`](@ref) otherwise; pass `volume` if it is known.
 
 The second constructor takes the interior test `is_interior(x)` and tag function `get_tag(x)` directly (no
 shape; `shape === nothing`). Such a domain has no wall normals (`NaN`), so conditions that need them refuse it
@@ -36,6 +39,7 @@ at grid construction.
 - `get_tag::F_Tag`: A function generating integer boundary tags based on spatial location (`0` inside).
 - `bc_map::Dict{Int, AbstractBoundaryCondition}`: A mapping of integer tags to specific boundary condition evaluators.
 - `shape::S`: The [`AbstractShape`](@ref) of the region, or `nothing`.
+- `volume::T`: The volume of the region within the box (`NaN` without a shape).
 """
 struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
     label::GEO
@@ -46,11 +50,12 @@ struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
     get_tag::F_Tag
     bc_map::Dict{Int, AbstractBoundaryCondition}
     shape::S
+    volume::T
 end
 
 GeometricDomain(label, mins::Space{D, T}, maxs::Space{D, T}, is_periodic::SVector{D, Bool}, is_interior, get_tag,
                 bc_map::Dict{Int, AbstractBoundaryCondition}) where {D, T} =
-    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing)
+    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing, T(NaN))
 
 _periodic_flags(is_periodic::Bool, ::Val{D}) where {D} = SVector{D, Bool}(ntuple(_ -> is_periodic, Val(D)))
 _periodic_flags(is_periodic::NTuple{D, Bool}, ::Val{D}) where {D} = SVector{D, Bool}(is_periodic)
@@ -58,18 +63,33 @@ _periodic_flags(is_periodic::NTuple{D, Bool}, ::Val{D}) where {D} = SVector{D, B
 function GeometricDomain(shape::AbstractShape{D, T};
                          bc_map::Dict{Int, AbstractBoundaryCondition} = Dict{Int, AbstractBoundaryCondition}(),
                          is_periodic::Union{Bool, NTuple{D, Bool}} = false,
-                         mins = nothing, maxs = nothing, label = Val(:shape)) where {D, T}
+                         mins = nothing, maxs = nothing, label = Val(:shape), volume = nothing) where {D, T}
     is_per_svec = _periodic_flags(is_periodic, Val(D))
     bb_lo, bb_hi = bounding_box(shape)
-    lo = Space{D, T}(ntuple(d -> mins === nothing ? bb_lo[d] : T(mins[d]), Val(D)))
-    hi = Space{D, T}(ntuple(d -> maxs === nothing ? bb_hi[d] : T(maxs[d]), Val(D)))
+    # mins/maxs close the unbounded axes; on bounded ones the shape's own extent is used, and a box that would
+    # crop it is refused (the cut would carry no boundary condition, and the volume would be the uncropped one)
+    for d in 1:D, (lim, bb, below) in ((mins, bb_lo[d], true), (maxs, bb_hi[d], false))
+        (lim === nothing || !isfinite(bb)) && continue
+        (below ? T(lim[d]) > bb : T(lim[d]) < bb) &&
+            throw(ArgumentError("GeometricDomain: mins/maxs ($(lim[d]) on axis $d) crop the shape (extent $(bb_lo[d]) .. " *
+                                "$(bb_hi[d])); intersect the shape with a Cuboid to cut it"))
+    end
+    lo = Space{D, T}(ntuple(d -> isfinite(bb_lo[d]) || mins === nothing ? bb_lo[d] : T(mins[d]), Val(D)))
+    hi = Space{D, T}(ntuple(d -> isfinite(bb_hi[d]) || maxs === nothing ? bb_hi[d] : T(maxs[d]), Val(D)))
     (all(isfinite, lo) && all(isfinite, hi)) ||
         throw(ArgumentError("GeometricDomain: the shape is unbounded along some axis (bounding box $bb_lo .. $bb_hi); " *
                             "give mins/maxs, or intersect the shape with a Cuboid"))
     all(lo .<= hi) || throw(ArgumentError("GeometricDomain: mins must not exceed maxs"))
-    is_interior_func = (pos) -> signed_distance(shape, pos) <= zero(T)
-    tag_func = (pos) -> signed_distance(shape, pos) <= zero(T) ? 0 : boundary_tag(shape, pos)
-    return GeometricDomain(label, lo, hi, is_per_svec, is_interior_func, tag_func, bc_map, shape)
+    is_interior_func = (pos) -> _inside(shape, pos)
+    tag_func = (pos) -> _inside(shape, pos) ? 0 : _checked_tag(boundary_tag(shape, pos), pos)
+    vol = volume === nothing ? _clipped_volume(shape, lo, hi) : T(volume)
+    return GeometricDomain(label, lo, hi, is_per_svec, is_interior_func, tag_func, bc_map, shape, vol)
+end
+
+# Boundary tags are positive: `0` marks interior particles (the scheme would update such a ghost without a condition)
+function _checked_tag(tag::Integer, pos)
+    tag >= 1 || throw(ArgumentError("boundary_tag returned $tag at $pos: boundary tags must be ≥ 1 (0 marks interior points)"))
+    return Int(tag)
 end
 
 """
@@ -294,12 +314,16 @@ domain's shape; `NaN`s for a domain without a shape. Stored per particle in `pg.
 `pg.core.wall_distances` when a grid is built or particles are inserted.
 
 The signed distance of a combined shape (`max`/`min` of its pieces) is only a bound where several pieces are
-active at once: behind a corner formed by two pieces (outside the floor *and* inside the step of a channel) the
-nearest piece is not the nearest point of the region. The wall point is therefore found by projecting `x` onto
-the active piece and repeating from there until the projection lies on the boundary (at most eight steps);
-the normal is the direction from that point to `x` and the distance its length. For a point whose first
-projection already lies on the boundary (every point of a primitive shape, most points of a combination) the
-shape's own normal and distance are returned unchanged.
+active at once: behind a corner formed by two pieces (outside the floor *and* inside the step of a channel, or
+outside both faces of a wedge) the nearest piece is not the nearest point of the region. The wall point is
+therefore found in two stages: projecting onto the active piece and repeating from there until the projection
+lies on the boundary (alternating projections, which reach *a* boundary point but slowly at acute corners and
+not necessarily the nearest one at obtuse corners), then moving along the boundary towards `x` (the tangential
+part of `x - p`, projected back onto the boundary, with step halving) while that gets closer, which ends at the
+nearest point of a face or at the corner. The normal is the direction from that point to `x` and the distance its
+length. For a point whose first projection already lies on the boundary (every point of a primitive shape, most
+points of a combination) the shape's own normal and distance are returned unchanged. Inside a combination the
+distance is the combined signed distance (a bound for unions; no condition reads interior wall data).
 """
 wall_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}) where {GEO, D, T} =
     geom.shape === nothing ? (Space{D, T}(ntuple(_ -> T(NaN), Val(D))), T(NaN)) : _wall_geometry(geom.shape, x)
@@ -310,16 +334,41 @@ function _wall_geometry(shape::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
     p = x - φ0 * n0
     φp, np, _ = _probe(shape, p)
     abs(φp) <= tol && return (n0, φ0)            # the projection is on the boundary: the piece's values are exact
-    for _ in 1:7
-        p = p - φp * np
-        φp, np, _ = _probe(shape, p)
-        abs(φp) <= tol && break
+    p = _onto_boundary(shape, p, tol)
+    # Descend along the boundary: at a point of a face the nearest point is where `x - p` is normal to it
+    for _ in 1:64
+        _, np, _ = _probe(shape, p)
+        d  = x - p
+        t  = d - sum(d .* np) * np               # tangential part of x - p
+        dist2 = sum(abs2, d)
+        sum(abs2, t) <= (tol * tol) * max(one(T), dist2) && break
+        step, moved = one(T), false
+        for _ in 1:30
+            q = _onto_boundary(shape, p + step * t, tol)
+            if sum(abs2, x - q) < dist2 * (1 - 16 * eps(T))
+                p, moved = q, true
+                break
+            end
+            step /= 2
+        end
+        moved || break                           # a corner (x - p in its normal cone): nothing closer nearby
     end
     d = x - p
     dist = sqrt(sum(abs2, d))
     dist <= tol && return (n0, φ0)
     sgn = φ0 < zero(T) ? -one(T) : one(T)
     return (sgn * d / dist, sgn * dist)
+end
+
+# A boundary point near `p` by alternating projections onto the active piece (converges like cos² of the corner
+# angle: up to 512 steps for acute corners; the last iterate is used if it has not converged)
+function _onto_boundary(shape::AbstractShape{D, T}, p::Space{D, T}, tol::T) where {D, T}
+    for _ in 1:512
+        φ, n, _ = _probe(shape, p)
+        abs(φ) <= tol && return p
+        p = p - φ * n
+    end
+    return p
 end
 
 # Boundary particles whose tag has no condition keep their state (the stage predictor copies `pg.rhos`), and a

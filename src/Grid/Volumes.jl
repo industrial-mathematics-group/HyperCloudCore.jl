@@ -94,7 +94,7 @@ end
 domain_volume(geom::GeometricDomain{GEO}) where {GEO} =
     geom.shape === nothing ?
         error("domain_volume is not defined for geometry label $GEO; add a method or integrate `geom.is_interior`.") :
-        shape_volume(geom.shape)
+        geom.volume
 
 domain_volume(pg::ParticleGrid) = domain_volume(pg.geometry)
 

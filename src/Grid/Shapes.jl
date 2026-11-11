@@ -107,6 +107,19 @@ function shape_volume(s::AbstractShape{D, T}; samples::Int = 2_000_000) where {D
     return acc * vol_cell
 end
 
+# Whether `x` belongs to the region (domains use it for the interior test and the tags). Defaults to
+# `signed_distance <= 0`; a ball compares squared distances (see `_inside(::Ball, x)`).
+_inside(s::AbstractShape{D, T}, x::Space{D, T}) where {D, T} = signed_distance(s, x) <= zero(T)
+
+# Volume of the shape within the box `lo..hi` (the domain box): the shape's own volume when the box is its
+# bounding box (analytic where the shape defines it), the analytic box overlap for a box, else a lattice
+# integration of the shape cut by the box. Called once, by the `GeometricDomain` constructor.
+function _clipped_volume(s::AbstractShape{D, T}, lo::Space{D, T}, hi::Space{D, T}) where {D, T}
+    bb_lo, bb_hi = bounding_box(s)
+    (bb_lo == lo && bb_hi == hi) && return T(shape_volume(s))
+    return T(shape_volume(intersect(s, Cuboid{D, T}(Tuple(lo), Tuple(hi)))))
+end
+
 # (φ, n, tag) of the active boundary piece at `x`. Leaves evaluate their three functions; composites pick
 # the active child's triple, so a tag or normal is never taken from a piece other than the one whose
 # distance is in force.
@@ -212,6 +225,9 @@ end
 Ball(center::Space{D, T}, radius::Real) where {D, T} = Ball{D, T}(Tuple(center), radius)
 
 signed_distance(b::Ball{D, T}, x::Space{D, T}) where {D, T} = sqrt(sum(abs2, x - b.center)) - b.radius
+# Inside test on the squared distance: the `sqrt` of the signed distance rounds points one ulp outside onto the
+# sphere (exactly as the spherical domain decided before shapes)
+_inside(b::Ball{D, T}, x::Space{D, T}) where {D, T} = sum(abs2, x - b.center) <= b.radius^2
 boundary_normal(b::Ball{D, T}, x::Space{D, T}) where {D, T} = _unit(x - b.center)
 bounding_box(b::Ball) = (b.center .- b.radius, b.center .+ b.radius)
 shape_volume(b::Ball{D, T}; kwargs...) where {D, T} =
@@ -342,7 +358,14 @@ faces of an obstacle box the tags 5–8 after the four walls of a 2-D canvas).
 struct Tagged{D, T, S <: AbstractShape{D, T}, F} <: AbstractShape{D, T}
     shape::S
     tag::F
+    function Tagged{D, T, S, F}(shape::S, tag::F) where {D, T, S <: AbstractShape{D, T}, F}
+        tag isa Integer && tag < 1 && throw(ArgumentError("Tagged: boundary tags must be ≥ 1 (0 marks interior points), got $tag"))
+        return new{D, T, S, F}(shape, tag)
+    end
 end
+Tagged(shape::AbstractShape{D, T}, tag::Integer) where {D, T} = Tagged{D, T, typeof(shape), Int}(shape, Int(tag))
+Tagged(shape::AbstractShape{D, T}, f) where {D, T} = Tagged{D, T, typeof(shape), typeof(f)}(shape, f)
+_inside(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = _inside(t.shape, x)
 @inline _retag(tag::Int, ::Int) = tag
 @inline _retag(f, tag::Int) = Int(f(tag))
 signed_distance(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = signed_distance(t.shape, x)
@@ -369,6 +392,7 @@ signed_distance(t::Translated{D, T}, x::Space{D, T}) where {D, T} = signed_dista
 boundary_normal(t::Translated{D, T}, x::Space{D, T}) where {D, T} = boundary_normal(t.shape, x - t.offset)
 boundary_tag(t::Translated{D, T}, x::Space{D, T}) where {D, T} = boundary_tag(t.shape, x - t.offset)
 @inline _probe(t::Translated, x) = _probe(t.shape, x - t.offset)
+_inside(t::Translated{D, T}, x::Space{D, T}) where {D, T} = _inside(t.shape, x - t.offset)
 bounding_box(t::Translated) = (b = bounding_box(t.shape); (b[1] + t.offset, b[2] + t.offset))
 shape_volume(t::Translated; kwargs...) = shape_volume(t.shape; kwargs...)
 
@@ -401,6 +425,7 @@ function Rotated(s::AbstractShape{3, T}, axis, angle::Real; kwargs...) where {T}
     return Rotated(s, SMatrix{3, 3, T, 9}(I) + sn * K + (1 - c) * (K * K); kwargs...)
 end
 @inline _local(r::Rotated, x) = r.R' * (x - r.center) + r.center
+_inside(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = _inside(r.shape, _local(r, x))
 signed_distance(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = signed_distance(r.shape, _local(r, x))
 boundary_normal(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = r.R * boundary_normal(r.shape, _local(r, x))
 boundary_tag(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = boundary_tag(r.shape, _local(r, x))
@@ -420,3 +445,8 @@ function bounding_box(r::Rotated{D, T}) where {D, T}
     return (lo, hi)
 end
 shape_volume(r::Rotated; kwargs...) = shape_volume(r.shape; kwargs...)
+
+# The box overlap of a cuboid (open axes span the domain box), see `_clipped_volume`
+function _clipped_volume(c::Cuboid{D, T}, lo::Space{D, T}, hi::Space{D, T}) where {D, T}
+    return prod(ntuple(d -> c.open[d] ? hi[d] - lo[d] : max(zero(T), min(c.maxs[d], hi[d]) - max(c.mins[d], lo[d])), Val(D)))
+end

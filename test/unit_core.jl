@@ -738,10 +738,47 @@ end
     @test_throws ArgumentError GeometricDomain(HalfSpace((0.0, 0.0), (1.0, 0.0)))
     g2 = GeometricDomain(HalfSpace((0.5, 0.0), (1.0, 0.0)); mins = (0.0, 0.0), maxs = (1.0, 1.0))
     @test g2.mins == SVector(0.0, 0.0) && g2.get_tag(SVector(0.7, 0.5)) == 1 && g2.is_interior(SVector(0.3, 0.5))
+    # ... and they can be gridded: the volume is that of the shape within the box, computed once (it used to
+    # integrate over the unbounded shape: an ArgumentError, or Inf for an open box)
+    @test domain_volume(g2) ≈ 0.5 rtol = 1e-4
+    plate = Rotated(Cuboid((-0.2, -0.02), (0.2, 0.02)), π / 6)
+    gp = GeometricDomain(Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - Tagged(plate, 5);
+                         is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5))
+    @test domain_volume(gp) ≈ 2 - 0.4 * 0.04 rtol = 1e-3
+    pgp = ParticleGrid(gp, (0.05, 0.05), ExponentialWeightFunction(1.0, 0.125), 1)
+    @test all(isfinite, view(pgp.core.volumes, 1:pgp.meta.N)) && domain_volume(pgp) === gp.volume
+    @test domain_volume(GeometricDomain(Cuboid((0.0, 0.0), (1.0, 1.0); open = (true, false));
+                                        is_periodic = (true, false), mins = (0.0, 0.0), maxs = (2.0, 1.0))) == 2.0
+    # mins/maxs only close unbounded axes: a box that would crop a bounded shape is refused (the cut had no ghosts)
+    @test_throws ArgumentError GeometricDomain(Ball((0.0, 0.0), 1.0); mins = (0.0, 0.0), maxs = (1.0, 1.0))
+    @test GeometricDomain(Ball((0.0, 0.0), 1.0); mins = (-2.0, -2.0), maxs = (2.0, 2.0)).mins == SVector(-1.0, -1.0)
+    # boundary tags are positive (a tag 0 marked ghosts interior)
+    @test_throws ArgumentError Tagged(Cuboid((0.0, 0.0), (1.0, 1.0)), 0)
+    g0 = GeometricDomain(Tagged(Cuboid((0.0, 0.0), (1.0, 1.0)), t -> t - 1))
+    @test_throws ArgumentError g0.get_tag(SVector(-0.1, 0.5))
+    # Wedges: behind a convex corner of any angle the wall point is the nearest boundary point (the projections
+    # alone stopped on a face at obtuse corners, 15 % off at 120°, and had not converged at acute ones)
+    segdist(p, a, b) = (t = clamp(dot(p - a, b - a) / dot(b - a, b - a), 0, 1); norm(p - (a + t * (b - a))))
+    for α in (30, 120, 150)
+        a  = deg2rad(α)
+        gw = GeometricDomain(intersect(Cuboid((-5.0, 0.0), (5.0, 5.0)), HalfSpace((0.0, 0.0), (-sin(a), cos(a)))))
+        for x in (SVector(-0.04, -0.07), SVector(-0.1, -0.02), SVector(0.03, -0.05), 0.08 * SVector(cos(a + 0.6), sin(a + 0.6)))
+            signed_distance(gw.shape, x) > 0 || continue
+            exact = min(segdist(x, SVector(0.0, 0.0), SVector(5.0, 0.0)), segdist(x, SVector(0.0, 0.0), 5 * SVector(cos(a), sin(a))))
+            @test isapprox(wall_geometry(gw, x)[2], exact; rtol = 1e-6)
+        end
+    end
+    # a disc decides inside/outside on the squared distance, as the spherical domain did before shapes (the sqrt
+    # rounded lattice points one ulp outside onto the circle: N 541 -> 545)
+    pgd = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
+    @test all(i -> pgd.core.is_boundary[i] == (sum(abs2, pgd.core.positions[i]) > 1), 1:pgd.meta.N)
+    @test pgd.meta.N_interior == count(i -> sum(abs2, pgd.core.positions[i]) <= 1, 1:pgd.meta.N)
     # the builder
     ctx = Dict{Symbol, Any}(:T => Float64, :D => 2)
     gb = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => shape, :bc => Dict(1 => :outflow)), ctx)
     @test gb.shape === shape && gb.bc_map[1] isa OutflowBC
+    @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => Ball((0f0, 0f0), 1f0)), ctx)
+    @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => Ball((0.0,), 1.0)), ctx)
     gs = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => "shape", :shape => "Ball((0.0, 0.0), 1.0)"), ctx)
     @test gs.shape isa Ball
     @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape), ctx)
