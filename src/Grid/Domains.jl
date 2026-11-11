@@ -264,19 +264,26 @@ function get_points(
     # wall as well (a tolerance on the distance did that at very fine Float32 resolutions).
     wall_lo = ntuple(d -> cd.is_periodic[d] ? -1 : _wall_index(geom.mins[d], cd.canvas_mins[d], dxs_f[d]), Val(D))
     wall_hi = ntuple(d -> cd.is_periodic[d] ? -1 : _wall_index(geom.maxs[d], cd.canvas_mins[d], dxs_f[d]), Val(D))
+    # A jittered point that left a periodic axis belongs to the other end: classifying it before wrapping made it
+    # a (frozen) boundary particle at the seam.
+    wrap(p) = Space{D, T}(ntuple(d -> cd.is_periodic[d] ? _wrap_periodic(p[d], geom.mins[d], cd.L_wrap[d]) : p[d], Val(D)))
     for I in CartesianIndices(Ns_total)
-        pos_tuple = ntuple(Val(D)) do d
+        lattice = Space{D, T}(ntuple(Val(D)) do d
             j = I[d] - 1
-            x = j == wall_lo[d] ? geom.mins[d] : j == wall_hi[d] ? geom.maxs[d] : cd.canvas_mins[d] + j * dxs_f[d]
-            x += rand_f[d] * (rand(rng, T) * 2 - 1)
-            # A jittered point that left a periodic axis belongs to the other end: classifying it
-            # before wrapping made it a (frozen) boundary particle at the seam.
-            cd.is_periodic[d] ? _wrap_periodic(x, geom.mins[d], cd.L_wrap[d]) : x
-        end
-        
-        pos = Space{D, T}(pos_tuple)
+            j == wall_lo[d] ? geom.mins[d] : j == wall_hi[d] ? geom.maxs[d] : cd.canvas_mins[d] + j * dxs_f[d]
+        end)
+        jitter = Space{D, T}(ntuple(d -> rand_f[d] * (rand(rng, T) * 2 - 1), Val(D)))
+        pos = wrap(lattice + jitter)
         if geom.is_interior(pos)
             push!(inner_points, pos)
+        elseif !iszero(jitter) && geom.is_interior(lattice)
+            # The jitter carried an interior lattice point (e.g. one on a wall) across the wall: it is reflected
+            # back inside instead of becoming a ghost that sits almost on the wall. Such ghosts (about half of a
+            # jittered wall row, down to 1e-3 dx outside) are slaved to the interior next to them every stage;
+            # with them MirrorBC did not converge (channel along a wall, N = 20/40/80: max error 0.32/0.32/0.35)
+            # and OutflowBC lost accuracy (0.23 at N = 80), without them both converge (0.28/0.062/0.023 and
+            # 0.032, exact ghosts 0.026).
+            push!(inner_points, _reflect_inside(geom, pos, lattice, wrap))
         else
             push!(ghost_candidates, pos)
         end
@@ -304,6 +311,16 @@ function get_points(
     end
 
     return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances
+end
+
+# The mirror image of `pos` behind the wall (a shape-based domain), or the lattice position it was jittered from
+# if there is no shape or the mirror image is not interior (a corner)
+function _reflect_inside(geom::GeometricDomain, pos, lattice, wrap)
+    geom.shape === nothing && return lattice
+    n, φ = wall_geometry(geom, pos)
+    isfinite(φ) || return lattice
+    p = wrap(pos - 2φ * n)
+    return geom.is_interior(p) ? p : lattice
 end
 
 """

@@ -910,7 +910,7 @@ end
         # planes: MirrorBC without an operator. A long run (one period) at the scheme's own time step.
         eqx = LinearAdvection(((1.0,), (0.0,)), Float64)
         u0(x, t) = exp(-((mod(x[1] - t, 1.0) - 0.5)^2 + x[2]^2) / 0.02)
-        function run(bc, N, order, tab)
+        function run(bc, N, order, tab; tend = 1.0)
             h    = 1 / N
             geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = (true, false),
                                           bc_map = Dict{Int, AbstractBoundaryCondition}(3 => bc, 4 => bc))
@@ -920,17 +920,70 @@ end
             ts  = GeneralRKTimeStepper(eqx, interp, MOOD(), tab)
             dt  = 0.5 * get_time_step(pg, eqx, interp)
             t   = 0.0
-            while t < 1.0 - 1e-12
-                ts(eqx, pg, t, dt); t += dt
+            while t < tend - 1e-12
+                d = min(dt, tend - t); ts(eqx, pg, t, d); t += d
             end
             err = maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i], t)) for i in interior_indices(pg))
             return err, maximum(abs(pg.rhos[i][1]) for i in 1:pg.meta.N)
         end
         e_mirror, m_mirror = run(MirrorBC(; degree = 2), 20, 3, RK3_SSP_Tableau(Float64))
-        e_copy,   m_copy   = run(OutflowBC(), 20, 3, RK3_SSP_Tableau(Float64))
-        @test e_mirror < e_copy && m_mirror <= 1.05
+        @test m_mirror <= 1.05
         e5, m5 = run(MirrorBC(; degree = 2), 20, 5, RK4_SSP_Tableau(Float64))          # unbounded: 1.25 at t = 1, 2.4 at t = 2
         @test m5 <= 1.05 && e5 < 1.0
+        # ... and converges on the jittered cloud. With the ghosts the jitter used to push just across the wall (half
+        # of the wall row, down to 1e-3 h outside) the error stalled at 0.17 for N = 20, 40, 80 at t = 0.25 (and grew
+        # in time); the point generator now reflects them back inside
+        e40, _ = run(MirrorBC(; degree = 2), 40, 3, RK3_SSP_Tableau(Float64); tend = 0.25)
+        e80, _ = run(MirrorBC(; degree = 2), 80, 3, RK3_SSP_Tableau(Float64); tend = 0.25)
+        @test e80 < 0.6 * e40 && e80 < 0.05
+        e_copy80, _ = run(OutflowBC(), 80, 3, RK3_SSP_Tableau(Float64); tend = 0.25)
+        @test e80 < e_copy80                                                       # the mirror beats the donor copy
+    end
+
+    @testset "Jitter does not push interior points across a wall" begin
+        # the jittered grid has the interior points of the unjittered one (none became a ghost on the wall), and the
+        # ghosts of a box keep their lattice distance from it (rows at h, 2h, ... minus the jitter)
+        geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0))
+        pg0  = ParticleGrid(geom, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1)
+        for jit in (0.2, 0.45)
+            pgj = ParticleGrid(geom, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1; randomness = (jit * dx, jit * dx), rng = MersenneTwister(2))
+            @test pgj.meta.N_interior == pg0.meta.N_interior
+            @test all(i -> !pgj.core.is_boundary[i] || pgj.core.wall_distances[i] >= (1 - jit) * dx - 1e-12, 1:pgj.meta.N)
+            @test all(i -> pgj.core.is_boundary[i] || pgj.core.wall_distances[i] <= 0, 1:pgj.meta.N)
+        end
+        # also behind a curved wall: no jittered interior point ends up outside the disc
+        pgd = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
+        pgdj = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1;
+                            randomness = (0.03, 0.03), rng = MersenneTwister(3))
+        @test pgdj.meta.N_interior >= pgd.meta.N_interior - count(i -> !pgd.core.is_boundary[i] && pgd.core.wall_distances[i] > -0.03, 1:pgd.meta.N)
+    end
+
+    @testset "Degree fallback is monotone; 3-D degree cap; Float32 3-D" begin
+        # 1-D, R = 3.5Δx: the wall donor carries degree 1 only, its neighbours degree 3; degree 4 used to fall back to
+        # what the wall donor supports (degree 1) while degree 3 found the better donor. Now both fit degree 3: exact
+        # for cubics.
+        f3(x) = 1 + x[1] - 2x[1]^2 + 3x[1]^3
+        g1 = get_rectangular_domain(Float64, (0.0,), (1.0,); bc_map = Dict{Int, AbstractBoundaryCondition}(1 => ExtrapolationBC(4), 2 => ExtrapolationBC(3)))
+        p1 = ParticleGrid(g1, (0.05,), ExponentialWeightFunction(1.0, 3.5 * 0.05), 1)
+        for i in 1:p1.meta.N; p1.rhos[i] = State{1, Float64}(f3(p1.core.positions[i])); end
+        b1 = copy(p1.rhos)
+        for (tag, bc) in g1.bc_map; bc(p1, b1, tag, nothing, nothing, 0.0); end
+        @test all(i -> !p1.core.is_boundary[i] || isapprox(b1[i][1], f3(p1.core.positions[i]); atol = 1e-8), 1:p1.meta.N)
+        # degrees 4-5 are capped at 3 in 3-D (they would need an allocating, host-only Cholesky in the kernel)
+        @test HyperCloudCore._ghost_degree(Val(5), Val(3)) === Val(3) && HyperCloudCore._ghost_degree(Val(5), Val(2)) === Val(5)
+        # Float32 3-D degree 2: the extrapolated ghosts of a quadratic to Float32 accuracy on the CPU backends (a
+        # miscompile of the fit kernel by Julia 1.13.3 / LLVM 20 gave errors of 2-7 on data of size 4, depending on the
+        # thread count; the out-of-line moment accumulation avoids that code shape, this test guards it)
+        T  = Float32
+        q3(x) = 1 + x[1] + x[2] + x[3] + x[1]^2 - x[2] * x[3]
+        g3 = get_rectangular_domain(T, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0); bc_map = Dict{Int, AbstractBoundaryCondition}(t => ExtrapolationBC(2) for t in 1:6))
+        p3 = ParticleGrid(g3, (T(0.1), T(0.1), T(0.1)), ExponentialWeightFunction(T(1), T(0.25)), 1; randomness = (T(0.02), T(0.02), T(0.02)),
+                          rng = MersenneTwister(1))
+        for i in 1:p3.meta.N; p3.rhos[i] = State{1, T}(T(q3(Float64.(p3.core.positions[i])))); end
+        eq3 = LinearAdvection(((1.0,), (1.0,), (1.0,)), T)
+        b3 = copy(p3.rhos)
+        for (tag, bc) in g3.bc_map; bc(p3, b3, tag, nothing, eq3, 0.0); end
+        @test maximum(i -> p3.core.is_boundary[i] ? abs(b3[i][1] - q3(Float64.(p3.core.positions[i]))) : 0.0, 1:p3.meta.N) < 0.05
     end
 end
 
