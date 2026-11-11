@@ -74,7 +74,7 @@ writes through either grid are seen by both while their metadata can diverge. Us
 function device_grid(::Type{AT}, pg::ParticleGrid{D, M, T}) where {AT <: AbstractArray, D, M, T}
     m  = pg.meta
     to = ToStorage{AT}()
-    meta = GridMetadata{D, T}(m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version)
+    meta = GridMetadata{D, T}(m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version, m.boundary_time, m.sweep_time)
     # Neighbour slots: row-major on the host, slot-major on a device (converted on host arrays).
     nd_host = parent(pg.rhos) isa Array ? pg.neighbor : adapt(ToStorage{Array}(), pg.neighbor)
     nd_host = with_slot_layout(nd_host, m.N, AT === Array ? RowMajorSlots : SlotMajorSlots)

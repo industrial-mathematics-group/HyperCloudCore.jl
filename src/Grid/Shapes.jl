@@ -1,5 +1,6 @@
 export AbstractShape, Cuboid, Ball, HalfSpace, Tagged, Translated, Rotated, complement
 export signed_distance, boundary_normal, boundary_tag, bounding_box, shape_volume
+export RigidMotion, Moving, translating, rotating, at_time, wall_velocity, moving_pieces
 
 # =========================================================================
 # SHAPES: signed-distance descriptions of the physical region
@@ -121,10 +122,11 @@ function _clipped_volume(s::AbstractShape{D, T}, lo::Space{D, T}, hi::Space{D, T
     return T(shape_volume(intersect(s, Cuboid{D, T}(Tuple(lo), Tuple(hi)))))
 end
 
-# (φ, n, tag) of the active boundary piece at `x`. Leaves evaluate their three functions; composites pick
-# the active child's triple, so a tag or normal is never taken from a piece other than the one whose
-# distance is in force.
-@inline _probe(s::AbstractShape, x) = (signed_distance(s, x), boundary_normal(s, x), boundary_tag(s, x))
+# (φ, n, tag, piece) of the active boundary piece at `x`: its signed distance, normal and tag, and the `Moving`
+# node it belongs to (`nothing` for a static piece). Leaves evaluate their three functions; composites pick the
+# active child's tuple, so a tag or normal is never taken from a piece other than the one whose distance is in
+# force. Host only (the piece is not a bits value).
+@inline _probe(s::AbstractShape, x) = (signed_distance(s, x), boundary_normal(s, x), boundary_tag(s, x), nothing)
 
 @inline function _unit(g::Space{D, T}) where {D, T}
     n2 = sum(abs2, g)
@@ -325,8 +327,8 @@ end
 @inline _probe(u::UnionShape, x) = _probe_select(u.shapes, x, <)
 @inline _probe(u::IntersectionShape, x) = _probe_select(u.shapes, x, >)
 @inline function _probe(c::ComplementShape, x)
-    φ, n, tag = _probe(c.shape, x)
-    return (-φ, -n, tag)
+    φ, n, tag, pc = _probe(c.shape, x)
+    return (-φ, -n, tag, pc)
 end
 signed_distance(u::UnionShape{D, T}, x::Space{D, T}) where {D, T} = _dist_select(u.shapes, x, min)
 signed_distance(u::IntersectionShape{D, T}, x::Space{D, T}) where {D, T} = _dist_select(u.shapes, x, max)
@@ -373,8 +375,8 @@ signed_distance(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = signed_distance(
 boundary_normal(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = boundary_normal(t.shape, x)
 boundary_tag(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = _retag(t.tag, boundary_tag(t.shape, x))
 @inline function _probe(t::Tagged, x)
-    φ, n, tag = _probe(t.shape, x)
-    return (φ, n, _retag(t.tag, tag))
+    φ, n, tag, pc = _probe(t.shape, x)
+    return (φ, n, _retag(t.tag, tag), pc)
 end
 bounding_box(t::Tagged) = bounding_box(t.shape)
 shape_volume(t::Tagged; kwargs...) = shape_volume(t.shape; kwargs...)
@@ -431,8 +433,8 @@ signed_distance(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = signed_distance
 boundary_normal(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = r.R * boundary_normal(r.shape, _local(r, x))
 boundary_tag(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = boundary_tag(r.shape, _local(r, x))
 @inline function _probe(r::Rotated, x)
-    φ, n, tag = _probe(r.shape, _local(r, x))
-    return (φ, r.R * n, tag)
+    φ, n, tag, pc = _probe(r.shape, _local(r, x))
+    return (φ, r.R * n, tag, pc)
 end
 function bounding_box(r::Rotated{D, T}) where {D, T}
     mins, maxs = bounding_box(r.shape)
@@ -450,4 +452,170 @@ shape_volume(r::Rotated; kwargs...) = shape_volume(r.shape; kwargs...)
 # The box overlap of a cuboid (open axes span the domain box), see `_clipped_volume`
 function _clipped_volume(c::Cuboid{D, T}, lo::Space{D, T}, hi::Space{D, T}) where {D, T}
     return prod(ntuple(d -> c.open[d] ? hi[d] - lo[d] : max(zero(T), min(c.maxs[d], hi[d]) - max(c.mins[d], lo[d])), Val(D)))
+end
+
+# -------------------------------------------------------------------------
+# Moving pieces: rigid motions prescribed in time
+# -------------------------------------------------------------------------
+"""
+    RigidMotion(c, R, v, Ω)
+
+The pose and velocity of a rigid body at one instant: a point `y` of the body (in the body's own frame, the
+frame its shape is described in) is at `c + R y`, the body's velocity at the world point `x` is `v + Ω (x - c)`
+(`v = dc/dt`, `Ω = dR/dt Rᵀ` skew). `RigidMotion(D, T)` is the identity (at rest). The motion of a [`Moving`](@ref)
+piece is a function `t -> RigidMotion`; [`translating`](@ref) and [`rotating`](@ref) build the common ones.
+"""
+struct RigidMotion{D, T, L}
+    c::Space{D, T}
+    R::SMatrix{D, D, T, L}
+    v::Space{D, T}
+    Ω::SMatrix{D, D, T, L}
+end
+RigidMotion(::Val{D}, ::Type{T}) where {D, T} = RigidMotion(zero(Space{D, T}), SMatrix{D, D, T, D * D}(I), zero(Space{D, T}), zero(SMatrix{D, D, T, D * D}))
+RigidMotion(D::Int, ::Type{T} = Float64) where {T} = RigidMotion(Val(D), T)
+
+"The world position of the body point `y`."
+@inline body_to_world(m::RigidMotion, y) = m.c + m.R * y
+"The body-frame coordinates of the world point `x`."
+@inline world_to_body(m::RigidMotion, x) = m.R' * (x - m.c)
+"The body's velocity at the world point `x`."
+@inline body_velocity(m::RigidMotion, x) = m.v + m.Ω * (x - m.c)
+
+"""
+    translating(velocity) -> motion
+
+The motion of a body translating at the constant `velocity`: `t -> RigidMotion(velocity t, I, velocity, 0)`.
+"""
+function translating(velocity)
+    v = Space{length(velocity), float(eltype(velocity))}(velocity...)
+    D, T = length(v), eltype(v)
+    Id, Z = SMatrix{D, D, T, D * D}(I), zero(SMatrix{D, D, T, D * D})
+    return t -> RigidMotion(v * T(t), Id, v, Z)
+end
+
+"""
+    rotating(ω; center = 0) -> motion           # 2-D: angular rate ω (counter-clockwise)
+    rotating(axis, ω; center = 0) -> motion     # 3-D
+
+The motion of a body rotating at the constant angular rate `ω` about `center` (in its body frame).
+"""
+function rotating(ω::Real; center = (0.0, 0.0))
+    T  = float(promote_type(typeof(ω), eltype(center)))
+    c0 = Space{2, T}(center...)
+    J  = SMatrix{2, 2, T, 4}(0, 1, -1, 0)
+    Ω  = T(ω) * J
+    return t -> begin
+        θ = T(ω) * T(t)
+        R = SMatrix{2, 2, T, 4}(cos(θ), sin(θ), -sin(θ), cos(θ))
+        c = c0 - R * c0                       # x(t) = c0 + R (y - c0)
+        RigidMotion(c, R, -Ω * R * c0, Ω)
+    end
+end
+function rotating(axis, ω::Real; center = (0.0, 0.0, 0.0))
+    T  = float(promote_type(typeof(ω), eltype(center), eltype(axis)))
+    c0 = Space{3, T}(center...)
+    k  = _unit(Space{3, T}(axis...))
+    K  = SMatrix{3, 3, T, 9}(0, k[3], -k[2], -k[3], 0, k[1], k[2], -k[1], 0)
+    Ω  = T(ω) * K
+    return t -> begin
+        θ = T(ω) * T(t)
+        R = SMatrix{3, 3, T, 9}(I) + sin(θ) * K + (1 - cos(θ)) * (K * K)
+        c = c0 - R * c0
+        RigidMotion(c, R, -Ω * R * c0, Ω)
+    end
+end
+
+"""
+    Moving(shape, motion)
+
+`shape` moved rigidly by `motion(t)::RigidMotion` (the body frame is the frame `shape` is described in; at
+`t = 0` the motion should be the identity). A domain built from a shape with moving pieces moves their ghost
+particles with them every stage, removes interior particles they cover and refills the region they leave
+(see the docs on moving boundaries). The static methods (`signed_distance(m, x)` etc.) evaluate the piece at
+`t = 0`; [`at_time`](@ref) gives the shape at a time. A moving piece must not contain another one.
+"""
+struct Moving{D, T, S <: AbstractShape{D, T}, F} <: AbstractShape{D, T}
+    shape::S
+    motion::F
+    function Moving{D, T, S, F}(shape::S, motion::F) where {D, T, S <: AbstractShape{D, T}, F}
+        isempty(moving_pieces(shape)) || throw(ArgumentError("Moving: the shape of a moving piece must not contain a moving piece"))
+        m0 = motion(zero(T))
+        m0 isa RigidMotion{D, T} || throw(ArgumentError("Moving: motion(t) must return a RigidMotion{$D, $T}, got $(typeof(m0))"))
+        return new{D, T, S, F}(shape, motion)
+    end
+end
+Moving(shape::AbstractShape{D, T}, motion) where {D, T} = Moving{D, T, typeof(shape), typeof(motion)}(shape, motion)
+
+"The pose of the moving piece `m` at time `t`."
+@inline pose(m::Moving{D, T}, t) where {D, T} = m.motion(T(t))::RigidMotion{D, T}
+
+# A moving piece frozen at one pose (what `at_time` turns `Moving` into); carries the piece for the probe
+struct Posed{D, T, S <: AbstractShape{D, T}, L, P} <: AbstractShape{D, T}
+    shape::S
+    motion::RigidMotion{D, T, L}
+    piece::P
+end
+Posed(m::Moving{D, T}, t) where {D, T} = Posed(m.shape, pose(m, t), m)
+_inside(p::Posed{D, T}, x::Space{D, T}) where {D, T} = _inside(p.shape, world_to_body(p.motion, x))
+signed_distance(p::Posed{D, T}, x::Space{D, T}) where {D, T} = signed_distance(p.shape, world_to_body(p.motion, x))
+boundary_normal(p::Posed{D, T}, x::Space{D, T}) where {D, T} = p.motion.R * boundary_normal(p.shape, world_to_body(p.motion, x))
+boundary_tag(p::Posed{D, T}, x::Space{D, T}) where {D, T} = boundary_tag(p.shape, world_to_body(p.motion, x))
+@inline function _probe(p::Posed, x)
+    φ, n, tag, _ = _probe(p.shape, world_to_body(p.motion, x))
+    return (φ, p.motion.R * n, tag, p.piece)
+end
+function bounding_box(p::Posed{D, T}) where {D, T}
+    mins, maxs = bounding_box(p.shape)
+    (all(isfinite, mins) && all(isfinite, maxs)) || return (Space{D, T}(ntuple(_ -> T(-Inf), Val(D))), Space{D, T}(ntuple(_ -> T(Inf), Val(D))))
+    lo, hi = Space{D, T}(ntuple(_ -> T(Inf), Val(D))), Space{D, T}(ntuple(_ -> T(-Inf), Val(D)))
+    for I in CartesianIndices(ntuple(_ -> 0:1, Val(D)))
+        y = body_to_world(p.motion, Space{D, T}(ntuple(d -> I[d] == 0 ? mins[d] : maxs[d], Val(D))))
+        lo, hi = min.(lo, y), max.(hi, y)
+    end
+    return (lo, hi)
+end
+shape_volume(p::Posed; kwargs...) = shape_volume(p.shape; kwargs...)
+
+# The static methods of a moving piece evaluate it at t = 0
+for f in (:_inside, :signed_distance, :boundary_normal, :boundary_tag)
+    @eval $f(m::Moving{D, T}, x::Space{D, T}) where {D, T} = $f(Posed(m, zero(T)), x)
+end
+@inline _probe(m::Moving{D, T}, x) where {D, T} = _probe(Posed(m, zero(T)), x)
+bounding_box(m::Moving{D, T}) where {D, T} = bounding_box(Posed(m, zero(T)))
+shape_volume(m::Moving; kwargs...) = shape_volume(m.shape; kwargs...)
+
+"""
+    at_time(shape, t) -> shape
+
+The shape with every [`Moving`](@ref) piece frozen at its pose at time `t` (a static shape: all functions
+apply). Static shapes are returned as they are.
+"""
+at_time(s::AbstractShape, t) = s
+at_time(m::Moving, t) = Posed(m, t)
+at_time(u::UnionShape{D, T}, t) where {D, T} = (sh = map(s -> at_time(s, t), u.shapes); UnionShape{D, T, typeof(sh)}(sh))
+at_time(u::IntersectionShape{D, T}, t) where {D, T} = (sh = map(s -> at_time(s, t), u.shapes); IntersectionShape{D, T, typeof(sh)}(sh))
+at_time(c::ComplementShape, t) = complement(at_time(c.shape, t))
+at_time(g::Tagged, t) = Tagged(at_time(g.shape, t), g.tag)
+at_time(g::Translated, t) = Translated(at_time(g.shape, t), g.offset)
+at_time(g::Rotated, t) = Rotated(at_time(g.shape, t), g.R; center = g.center)
+
+"""
+    moving_pieces(shape) -> Tuple
+
+The [`Moving`](@ref) pieces of a shape, in the order of the tree.
+"""
+moving_pieces(::AbstractShape) = ()
+moving_pieces(m::Moving) = (m,)
+moving_pieces(u::Union{UnionShape, IntersectionShape}) = (Iterators.flatten(map(moving_pieces, u.shapes))...,)
+moving_pieces(g::Union{ComplementShape, Tagged, Translated, Rotated}) = moving_pieces(g.shape)
+
+"""
+    wall_velocity(shape, x, t) -> Space{D, T}
+
+The velocity of the boundary piece of `shape` nearest to `x` at time `t` (zero for a static piece).
+"""
+function wall_velocity(s::AbstractShape{D, T}, x::Space{D, T}, t) where {D, T}
+    _, _, _, pc = _probe(at_time(s, t), x)
+    pc === nothing && return zero(Space{D, T})
+    return body_velocity(pose(pc, t), x)
 end
