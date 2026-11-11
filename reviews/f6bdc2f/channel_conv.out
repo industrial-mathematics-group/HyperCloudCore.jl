@@ -1,0 +1,10 @@
+MUSCL3 Outflow    errs 4.28e-01 2.03e-01 9.19e-02 EOC 1.08 1.15
+MUSCL3 Mirror1 b  errs 2.08e-01 1.72e-01 1.70e-01 EOC 0.27 0.02
+MUSCL3 Mirror2 b  errs 2.27e-01 1.94e-01 2.48e-01 EOC 0.22 -0.35
+MUSCL3 Mirror2 u  errs 2.71e-01 1.95e-01 2.76e-01 EOC 0.48 -0.50
+MUSCL3 Mirror3 b  errs 2.32e-01 1.94e-01 2.31e-01 EOC 0.25 -0.25
+MUSCL5 Outflow    errs 8.10e-01 5.42e-01 2.64e-01 EOC 0.58 1.04
+MUSCL5 Mirror1 b  errs 2.90e-01 1.70e-01 2.32e-01 EOC 0.77 -0.45
+MUSCL5 Mirror2 b  errs 3.07e-01 2.14e-01 3.02e-01 EOC 0.52 -0.50
+MUSCL5 Mirror2 u  errs 4.04e-01 2.06e-01 1.12e+00 EOC 0.97 -2.44
+MUSCL5 Mirror3 b  errs 3.18e-01 3.65e-01 2.89e-01 EOC -0.20 0.34

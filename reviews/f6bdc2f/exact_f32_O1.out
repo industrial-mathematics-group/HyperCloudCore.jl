@@ -1,0 +1,8 @@
+Float32  D=2 q=2 R=2.5 jit=0.20 ext per=0: ghosts=  287  max rel err=1.22e-03  #>0.001: 1
+Float32  D=2 q=3 R=3.5 jit=0.20 ext per=0: ghosts=  408  max rel err=9.10e-02  #>0.001: 186
+Float32  D=2 q=2 R=2.5 jit=0.20 mir per=0: ghosts=  287  max rel err=2.51e-05  #>0.001: 0
+Float32  D=2 q=3 R=3.5 jit=0.20 mir per=0: ghosts=  408  max rel err=3.89e-05  #>0.001: 0
+Float32  D=3 q=1 R=2.5 jit=0.20 ext per=0: ghosts= 3079  max rel err=2.03e-05  #>0.001: 0
+Float32  D=3 q=2 R=2.5 jit=0.20 ext per=0: ghosts= 3079  max rel err=2.88e-03  #>0.001: 56
+Float32  D=3 q=1 R=2.5 jit=0.20 mir per=0: ghosts= 3079  max rel err=2.49e-06  #>0.001: 0
+Float32  D=3 q=2 R=2.5 jit=0.20 mir per=0: ghosts= 3079  max rel err=2.67e-05  #>0.001: 0

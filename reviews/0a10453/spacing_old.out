@@ -1,0 +1,54 @@
+ERROR: LoadError: UndefVarError: `Shapes` not defined in `HyperCloudCore`
+Suggestion: check for spelling errors or missing imports.
+Stacktrace:
+ [1] getproperty
+   @ ./Base_compiler.jl:50 [inlined]
+ [2] top-level scope
+   @ /tmp/brev_d/probes/spacing.jl:46
+ [3] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [4] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [5] _start()
+   @ Base ./client.jl:577
+in expression starting at /tmp/brev_d/probes/spacing.jl:31
+disc r=1 h=0.1 j=0.0                           Nint    313  min all 1.000h  min int 1.000h (φ -0.94/-1.00 h)  min ghost φ 0.000h  on wall 8
+disc r=1 h=0.037 j=0.0                         Nint   2297  min all 1.000h  min int 1.000h (φ -1.04/-0.12 h)  min ghost φ 0.000h  on wall 0
+disc r=0.13 h=0.05 (small) j=0.0               Nint     20  min all 1.000h  min int 1.000h (φ -0.34/-0.89 h)  min ghost φ 0.031h  on wall 0
+box 1.03 j=0.0                                 Nint    441  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.400h  on wall 61
+box minus disc j=0.0                           Nint    792  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.128h  on wall 120
+step 0.61/0.213 j=0.0                          Nint   1041  min all 1.000h  min int 1.000h (φ -0.74/-0.74 h)  min ghost φ 0.260h  on wall 108
+wedge 30 j=0.0                                 Nint    132  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.026h  on wall 32
+rot plate j=0.0                                Nint   3296  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.032h  on wall 240
+L notch (reflex) j=0.0                         Nint    341  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.940h  on wall 61
+union discs j=0.0                              Nint    714  min all 1.000h  min int 1.000h (φ -0.66/-0.88 h)  min ghost φ 0.010h  on wall 0
+disc r=1 h=0.1 j=0.2                           Nint    318  min all 0.616h  min int 0.649h (φ -2.23/-1.61 h)  min ghost φ 0.006h  on wall 0
+disc r=1 h=0.037 j=0.2                         Nint   2308  min all 0.610h  min int 0.610h (φ -8.70/-8.90 h)  min ghost φ 0.009h  on wall 0
+disc r=0.13 h=0.05 (small) j=0.2               Nint     21  min all 0.647h  min int 0.647h (φ -0.03/-0.21 h)  min ghost φ 0.043h  on wall 0
+box 1.03 j=0.2                                 Nint    441  min all 0.613h  min int 0.617h (φ -5.60/-5.56 h)  min ghost φ 0.203h  on wall 0
+box minus disc j=0.2                           Nint    794  min all 0.613h  min int 0.613h (φ -1.53/-0.94 h)  min ghost φ 0.048h  on wall 0
+step 0.61/0.213 j=0.2                          Nint   1041  min all 0.610h  min int 0.610h (φ -1.80/-1.19 h)  min ghost φ 0.081h  on wall 0
+wedge 30 j=0.2                                 Nint    132  min all 0.649h  min int 0.674h (φ -1.62/-1.11 h)  min ghost φ 0.002h  on wall 0
+rot plate j=0.2                                Nint   3298  min all 0.613h  min int 0.613h (φ -4.96/-4.95 h)  min ghost φ 0.047h  on wall 0
+L notch (reflex) j=0.2                         Nint    341  min all 0.616h  min int 0.665h (φ -0.06/-0.08 h)  min ghost φ 0.778h  on wall 0
+union discs j=0.2                              Nint    722  min all 0.613h  min int 0.641h (φ -2.43/-1.98 h)  min ghost φ 0.014h  on wall 0
+disc r=1 h=0.1 j=0.3                           Nint    318  min all 0.435h  min int 0.475h (φ -2.15/-1.69 h)  min ghost φ 0.011h  on wall 0
+disc r=1 h=0.037 j=0.3                         Nint   2312  min all 0.415h  min int 0.415h (φ -8.74/-8.87 h)  min ghost φ 0.012h  on wall 0
+disc r=0.13 h=0.05 (small) j=0.3               Nint     21  min all 0.478h  min int 0.478h (φ -0.02/-0.22 h)  min ghost φ 0.036h  on wall 0
+box 1.03 j=0.3                                 Nint    441  min all 0.420h  min int 0.428h (φ -5.61/-5.54 h)  min ghost φ 0.104h  on wall 0
+box minus disc j=0.3                           Nint    794  min all 0.420h  min int 0.420h (φ -1.43/-1.02 h)  min ghost φ 0.008h  on wall 0
+step 0.61/0.213 j=0.3                          Nint   1045  min all 0.418h  min int 0.418h (φ -1.70/-1.29 h)  min ghost φ 0.007h  on wall 0
+wedge 30 j=0.3                                 Nint    134  min all 0.475h  min int 0.545h (φ -0.27/-0.40 h)  min ghost φ 0.075h  on wall 0
+rot plate j=0.3                                Nint   3298  min all 0.420h  min int 0.420h (φ -4.94/-4.92 h)  min ghost φ 0.036h  on wall 0
+L notch (reflex) j=0.3                         Nint    341  min all 0.435h  min int 0.498h (φ -0.13/-0.15 h)  min ghost φ 0.697h  on wall 0
+union discs j=0.3                              Nint    725  min all 0.420h  min int 0.467h (φ -1.33/-1.55 h)  min ghost φ 0.036h  on wall 0
+disc r=1 h=0.1 j=0.45                          Nint    320  min all 0.220h  min int 0.220h (φ -2.03/-1.81 h)  min ghost φ 0.008h  on wall 0
+disc r=1 h=0.037 j=0.45                        Nint   2315  min all 0.124h  min int 0.124h (φ -8.80/-8.83 h)  min ghost φ 0.003h  on wall 0
+disc r=0.13 h=0.05 (small) j=0.45              Nint     21  min all 0.198h  min int 0.198h (φ -0.23/-0.10 h)  min ghost φ 0.029h  on wall 0
+box 1.03 j=0.45                                Nint    443  min all 0.133h  min int 0.166h (φ -5.61/-5.51 h)  min ghost φ 0.057h  on wall 0
+box minus disc j=0.45                          Nint    796  min all 0.133h  min int 0.133h (φ -1.28/-1.15 h)  min ghost φ 0.096h  on wall 0
+step 0.61/0.213 j=0.45                         Nint   1050  min all 0.133h  min int 0.133h (φ -2.62/-2.66 h)  min ghost φ 0.009h  on wall 0
+wedge 30 j=0.45                                Nint    135  min all 0.220h  min int 0.341h (φ -0.40/-0.54 h)  min ghost φ 0.118h  on wall 1
+rot plate j=0.45                               Nint   3300  min all 0.133h  min int 0.133h (φ -4.88/-4.92 h)  min ghost φ 0.009h  on wall 0
+L notch (reflex) j=0.45                        Nint    341  min all 0.220h  min int 0.249h (φ -0.22/-0.25 h)  min ghost φ 0.553h  on wall 0
+union discs j=0.45                             Nint    729  min all 0.133h  min int 0.216h (φ -1.44/-1.48 h)  min ghost φ 0.010h  on wall 0

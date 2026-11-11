@@ -1,0 +1,7 @@
+α=3°: outside 4966, max rel err 0.496, >1e-6: 2436, mean 141.9 us, worst 0.3 ms
+α=5°: outside 4943, max rel err 0.142, >1e-6: 2408, mean 141.0 us, worst 0.38 ms
+α=7°: outside 4927, max rel err 0.0217, >1e-6: 2392, mean 140.5 us, worst 0.3 ms
+α=9°: outside 4910, max rel err 0.00176, >1e-6: 2372, mean 139.8 us, worst 0.3 ms
+α=11°: outside 4892, max rel err 7.53e-5, >1e-6: 2351, mean 139.0 us, worst 0.35 ms
+α=13°: outside 4873, max rel err 1.69e-6, >1e-6: 1323, mean 138.9 us, worst 0.33 ms
+α=15°: outside 4854, max rel err 1.96e-8, >1e-6: 0, mean 123.4 us, worst 0.27 ms

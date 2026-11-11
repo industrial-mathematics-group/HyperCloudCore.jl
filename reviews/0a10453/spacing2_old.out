@@ -1,0 +1,45 @@
+ERROR: LoadError: BoundsError: attempt to access 0-element Vector{Vector{Float64}} at index [1]
+Stacktrace:
+ [1] throw_boundserror(A::Vector{Vector{Float64}}, I::Tuple{Int64})
+   @ Base ./essentials.jl:14
+ [2] checkbounds
+   @ ./essentials.jl:389 [inlined]
+ [3] getindex
+   @ ./essentials.jl:974 [inlined]
+ [4] cellpairs(P::Vector{Vector{Float64}}, r::Float64)
+   @ Main /tmp/brev_d/probes/spacing2.jl:8
+ [5] top-level scope
+   @ /tmp/brev_d/probes/spacing2.jl:55
+ [6] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [7] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [8] _start()
+   @ Base ./client.jl:577
+in expression starting at /tmp/brev_d/probes/spacing2.jl:49
+F=Float64 disc helper h=0.05 j=0.0             Nint   1253  min all 1.000h  min int 1.000h (φ -0.97/-0.90 h)  min ghost φ 0.000h  on wall 8
+F=Float64 ball 3-D h=0.1 j=0.0                 Nint   4157  min all 1.000h  min int 1.000h (φ -0.05/-0.10 h)  min ghost φ 0.000h  on wall 18
+F=Float64 1-D 1.03 j=0.0                       Nint     21  min all 1.000h  min int 1.000h (φ -9.00/-10.00 h)  min ghost φ 0.400h  on wall 1
+F=Float64 box 3-D off-lattice j=0.0            Nint   1210  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.200h  on wall 310
+F=Float64 box minus disc j=0.0                 Nint    792  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.128h  on wall 120
+F=Float64 3-D box minus ball j=0.0             Nint   2484  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.064h  on wall 1002
+F=Float64 disc helper h=0.05 j=0.3             Nint   1263  min all 0.420h  min int 0.420h (φ -5.79/-6.12 h)  min ghost φ 0.018h  on wall 0
+F=Float64 ball 3-D h=0.1 j=0.3                 Nint   4258  min all 0.419h  min int 0.419h (φ -2.90/-2.89 h)  min ghost φ 0.000h  on wall 0
+F=Float64 1-D 1.03 j=0.3                       Nint     21  min all 0.414h  min int 0.414h (φ -5.30/-4.89 h)  min ghost φ 0.314h  on wall 0
+F=Float64 box 3-D off-lattice j=0.3            Nint   1227  min all 0.439h  min int 0.450h (φ -1.28/-1.71 h)  min ghost φ 0.001h  on wall 0
+F=Float64 box minus disc j=0.3                 Nint    794  min all 0.420h  min int 0.420h (φ -1.43/-1.02 h)  min ghost φ 0.008h  on wall 0
+F=Float64 3-D box minus ball j=0.3             Nint   2495  min all 0.419h  min int 0.419h (φ -0.17/-0.08 h)  min ghost φ 0.021h  on wall 0
+F=Float32 disc helper h=0.05 j=0.0             Nint   1255  min all 1.000h  min int 1.000h (φ -1.00/0.00 h)  min ghost φ 0.000h  on wall 6
+F=Float32 ball 3-D h=0.1 j=0.0                 Nint   4157  min all 1.000h  min int 1.000h (φ -0.10/-0.05 h)  min ghost φ 0.000h  on wall 18
+F=Float32 1-D 1.03 j=0.0                       Nint     21  min all 1.000h  min int 1.000h (φ -10.00/-9.60 h)  min ghost φ 0.400h  on wall 1
+F=Float32 box 3-D off-lattice j=0.0            Nint   1210  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.200h  on wall 310
+F=Float32 box minus disc j=0.0                 Nint    792  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.128h  on wall 120
+F=Float32 3-D box minus ball j=0.0             Nint   2484  min all 1.000h  min int 1.000h (φ 0.00/0.00 h)  min ghost φ 0.064h  on wall 1002
+F=Float32 disc helper h=0.05 j=0.3             Nint   1267  min all 0.447h  min int 0.466h (φ -1.27/-0.91 h)  min ghost φ 0.007h  on wall 0
+F=Float32 ball 3-D h=0.1 j=0.3                 Nint   4260  min all 0.416h  min int 0.440h (φ -1.79/-1.85 h)  min ghost φ 0.000h  on wall 0
+F=Float32 1-D 1.03 j=0.3                       Nint     21  min all 0.493h  min int 0.552h (φ -4.16/-4.71 h)  min ghost φ 0.563h  on wall 0
+F=Float32 box 3-D off-lattice j=0.3            Nint   1228  min all 0.414h  min int 0.440h (φ -0.28/-0.71 h)  min ghost φ 0.000h  on wall 0
+F=Float32 box minus disc j=0.3                 Nint    796  min all 0.459h  min int 0.459h (φ -0.93/-1.05 h)  min ghost φ 0.049h  on wall 0
+F=Float32 3-D box minus ball j=0.3             Nint   2493  min all 0.430h  min int 0.430h (φ -0.15/-0.07 h)  min ghost φ 0.026h  on wall 0
+disc anisotropic 0.1x0.025 (h=min)             Nint   1244  min all 1.000h  min int 1.000h (φ -1.79/-2.46 h)  min ghost φ 0.000h  on wall 7
+closest pair [1.037661076251009, -0.023355779540705272] [1.0428488036873027, -0.02461282891007382] d/h 0.13344635876988237 φ/h 1.3678237256325414 1.5011798323108603 isb truetrue

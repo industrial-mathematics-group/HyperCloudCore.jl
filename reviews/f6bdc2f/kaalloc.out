@@ -1,0 +1,14 @@
+KA CPU FixedDirichlet       M=1 N=695: 304 bytes per launch
+KA CPU FixedDirichlet       M=2 N=695: 304 bytes per launch
+KA CPU OutflowBC            M=1 N=695: 1280 bytes per launch
+KA CPU OutflowBC            M=2 N=695: 1280 bytes per launch
+KA CPU ExtrapolationBC(0)   M=1 N=695: 880 bytes per launch
+KA CPU ExtrapolationBC(0)   M=2 N=695: 1072 bytes per launch
+KA CPU ExtrapolationBC(1)   M=1 N=695: 880 bytes per launch
+KA CPU ExtrapolationBC(1)   M=2 N=695: 1072 bytes per launch
+KA CPU MirrorBC(0)          M=1 N=695: 880 bytes per launch
+KA CPU MirrorBC(0)          M=2 N=695: 1072 bytes per launch
+KA CPU MirrorBC(1)          M=1 N=695: 880 bytes per launch
+KA CPU MirrorBC(1)          M=2 N=695: 1072 bytes per launch
+KA CPU MirrorBC(negate;2)   M=1 N=695: 880 bytes per launch
+KA CPU MirrorBC(negate;2)   M=2 N=695: 1072 bytes per launch

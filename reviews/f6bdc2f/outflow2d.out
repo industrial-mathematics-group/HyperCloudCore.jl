@@ -1,0 +1,4 @@
+N=20 MUSCL3 t=2 max err: Outflow 2.41e-06, Extrap1 2.41e-06, Extrap2 3.01e-05
+N=20 MUSCL5 t=2 max err: Outflow 2.97e-06, Extrap1 2.97e-06, Extrap2 1.82e+10
+N=40 MUSCL3 t=2 max err: Outflow 3.92e-06, Extrap1 3.92e-06, Extrap2 3.25e-01
+N=40 MUSCL5 t=2 max err: Outflow 4.03e-06, Extrap1 4.03e-06, Extrap2 3.77e+02

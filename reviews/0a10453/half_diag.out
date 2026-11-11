@@ -1,0 +1,18 @@
+frac 0.50 Mirror2 b    N= 40  max err 1.433e-01 at (y-wall)/h = 0.50, x = 0.650   static ghost err 2.94e-03
+frac 0.50 Mirror2 b    N= 80  max err 1.250e-01 at (y-wall)/h = 0.50, x = 0.600   static ghost err 2.22e-04
+frac 0.50 Mirror2 b    N=160  max err 1.063e-01 at (y-wall)/h = 0.50, x = 0.600   static ghost err 1.45e-05
+frac 0.50 Mirror2 unb  N= 40  max err 1.433e-01 at (y-wall)/h = 0.50, x = 0.650   static ghost err 2.94e-03
+frac 0.50 Mirror2 unb  N= 80  max err 1.250e-01 at (y-wall)/h = 0.50, x = 0.600   static ghost err 2.22e-04
+frac 0.50 Mirror2 unb  N=160  max err 1.063e-01 at (y-wall)/h = 0.50, x = 0.600   static ghost err 1.45e-05
+frac 0.50 Outflow      N= 40  max err 1.426e-01 at (y-wall)/h = 0.50, x = 0.450   static ghost err 1.70e-01
+frac 0.50 Outflow      N= 80  max err 8.560e-02 at (y-wall)/h = 0.50, x = 0.413   static ghost err 4.57e-02
+frac 0.50 Outflow      N=160  max err 5.916e-02 at (y-wall)/h = 0.50, x = 0.400   static ghost err 1.16e-02
+frac 0.10 Mirror2 b    N= 40  max err 9.530e-02 at (y-wall)/h = 0.00, x = 0.475   static ghost err 1.86e-03
+frac 0.10 Mirror2 b    N= 80  max err 2.451e-02 at (y-wall)/h = 0.00, x = 0.400   static ghost err 1.31e-04
+frac 0.10 Mirror2 b    N=160  max err 1.785e-02 at (y-wall)/h = 0.00, x = 0.381   static ghost err 8.43e-06
+frac 0.10 Mirror2 unb  N= 40  max err 9.530e-02 at (y-wall)/h = 0.00, x = 0.475   static ghost err 1.86e-03
+frac 0.10 Mirror2 unb  N= 80  max err 2.451e-02 at (y-wall)/h = 0.00, x = 0.400   static ghost err 1.31e-04
+frac 0.10 Mirror2 unb  N=160  max err 1.785e-02 at (y-wall)/h = 0.00, x = 0.381   static ghost err 8.43e-06
+frac 0.10 Outflow      N= 40  max err 9.789e-02 at (y-wall)/h = 0.00, x = 0.450   static ghost err 2.59e-01
+frac 0.10 Outflow      N= 80  max err 6.135e-02 at (y-wall)/h = 0.00, x = 0.400   static ghost err 7.23e-02
+frac 0.10 Outflow      N=160  max err 4.291e-02 at (y-wall)/h = 0.00, x = 0.394   static ghost err 1.86e-02

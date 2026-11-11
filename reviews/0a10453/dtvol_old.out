@@ -1,0 +1,12 @@
+disc r=1             j=0.00  dt/h 0.1392   interior V/h^D min 0.706 max 0.761   ΣV_int/|Ω| 0.7065
+disc r=1             j=0.30  dt/h 0.0890   interior V/h^D min 0.630 max 0.788   ΣV_int/|Ω| 0.7036
+disc r=1             j=0.45  dt/h 0.0673   interior V/h^D min 0.585 max 0.809   ΣV_int/|Ω| 0.7070
+box minus disc       j=0.00  dt/h 0.1392   interior V/h^D min 0.542 max 0.600   ΣV_int/|Ω| 0.5889
+box minus disc       j=0.30  dt/h 0.0916   interior V/h^D min 0.475 max 0.619   ΣV_int/|Ω| 0.5878
+box minus disc       j=0.45  dt/h 0.0673   interior V/h^D min 0.451 max 0.638   ΣV_int/|Ω| 0.5964
+union discs          j=0.00  dt/h 0.1392   interior V/h^D min 0.633 max 0.679   ΣV_int/|Ω| 0.6287
+union discs          j=0.30  dt/h 0.0915   interior V/h^D min 0.560 max 0.720   ΣV_int/|Ω| 0.6247
+union discs          j=0.45  dt/h 0.0740   interior V/h^D min 0.530 max 0.735   ΣV_int/|Ω| 0.6248
+3-D box off-lattice  j=0.00  dt/h 0.0561   interior V/h^D min 0.201 max 0.235   ΣV_int/|Ω| 0.2426
+3-D box off-lattice  j=0.30  dt/h 0.0422   interior V/h^D min 0.177 max 0.239   ΣV_int/|Ω| 0.2392
+3-D box off-lattice  j=0.45  dt/h 0.0363   interior V/h^D min 0.177 max 0.242   ΣV_int/|Ω| 0.2450

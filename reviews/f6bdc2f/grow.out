@@ -1,0 +1,8 @@
+Exact N=40        t=0.25 err 4.43e-02 max 0.988 ghost err 0.00e+00 | t=0.50 err 6.09e-02 max 0.948 ghost err 0.00e+00 | t=1.00 err 6.93e-02 max 0.984 ghost err 0.00e+00
+Outflow N=40      t=0.25 err 2.03e-01 max 0.966 ghost err 2.55e-01 | t=0.50 err 1.21e-01 max 0.855 ghost err 3.23e-01 | t=1.00 err 4.17e-01 max 0.747 ghost err 3.95e-01
+Mirror1 b N=40    t=0.25 err 1.72e-01 max 0.918 ghost err 1.54e-01 | t=0.50 err 2.68e-01 max 0.864 ghost err 2.96e-01 | t=1.00 err 4.44e-01 max 0.833 ghost err 4.30e-01
+Mirror2 b N=40    t=0.25 err 1.94e-01 max 0.958 ghost err 1.81e-01 | t=0.50 err 3.17e-01 max 0.883 ghost err 3.68e-01 | t=1.00 err 5.36e-01 max 0.773 ghost err 4.91e-01
+Exact N=80        t=0.25 err 3.37e-02 max 0.998 ghost err 0.00e+00 | t=0.50 err 2.59e-02 max 0.999 ghost err 0.00e+00 | t=1.00 err 3.17e-02 max 0.990 ghost err 0.00e+00
+Outflow N=80      t=0.25 err 9.19e-02 max 0.967 ghost err 1.54e-01 | t=0.50 err 2.27e-01 max 0.948 ghost err 2.37e-01 | t=1.00 err 1.51e-01 max 0.880 ghost err 1.93e-01
+Mirror1 b N=80    t=0.25 err 1.70e-01 max 0.966 ghost err 1.65e-01 | t=0.50 err 3.12e-01 max 0.947 ghost err 3.12e-01 | t=1.00 err 5.33e-01 max 0.904 ghost err 5.58e-01
+Mirror2 b N=80    t=0.25 err 2.48e-01 max 0.974 ghost err 2.51e-01 | t=0.50 err 3.47e-01 max 0.941 ghost err 3.57e-01 | t=1.00 err 5.95e-01 max 0.853 ghost err 5.77e-01

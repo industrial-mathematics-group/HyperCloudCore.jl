@@ -1,0 +1,27 @@
+F=Float64 disc helper h=0.05 j=0.0             Nint   1313  min all 0.617h  min int 0.617h (φ -0.58/-0.00 h)  min ghost φ 0.518h  on wall 68
+F=Float64 ball 3-D h=0.1 j=0.0                 Nint   4945  min all 0.555h  min int 0.555h (φ -0.46/-0.00 h)  min ghost φ 0.630h  on wall 806
+F=Float64 1-D 1.03 j=0.0                       Nint     22  min all 0.600h  min int 0.600h (φ -0.60/0.00 h)  min ghost φ 1.000h  on wall 2
+F=Float64 box 3-D off-lattice j=0.0            Nint   1331  min all 0.800h  min int 0.800h (φ 0.00/0.00 h)  min ghost φ 0.700h  on wall 431
+F=Float64 box minus disc j=0.0                 Nint    812  min all 0.550h  min int 0.550h (φ -0.50/-0.00 h)  min ghost φ 0.600h  on wall 140
+F=Float64 3-D box minus ball j=0.0             Nint   2514  min all 0.700h  min int 0.700h (φ -0.70/-0.00 h)  min ghost φ 0.568h  on wall 1032
+F=Float64 disc helper h=0.05 j=0.3             Nint   1317  min all 0.360h  min int 0.360h (φ -0.00/-0.22 h)  min ghost φ 0.520h  on wall 54
+F=Float64 ball 3-D h=0.1 j=0.3                 Nint   4849  min all 0.255h  min int 0.255h (φ -0.02/0.00 h)  min ghost φ 0.500h  on wall 591
+F=Float64 1-D 1.03 j=0.3                       Nint     22  min all 0.414h  min int 0.414h (φ -5.30/-4.89 h)  min ghost φ 1.223h  on wall 1
+F=Float64 box 3-D off-lattice j=0.3            Nint   1339  min all 0.257h  min int 0.257h (φ 0.00/-0.17 h)  min ghost φ 0.500h  on wall 112
+F=Float64 box minus disc j=0.3                 Nint    810  min all 0.420h  min int 0.420h (φ -1.43/-1.02 h)  min ghost φ 0.500h  on wall 16
+F=Float64 3-D box minus ball j=0.3             Nint   2517  min all 0.419h  min int 0.419h (φ -0.17/-0.08 h)  min ghost φ 0.544h  on wall 22
+F=Float32 disc helper h=0.05 j=0.0             Nint   1313  min all 0.617h  min int 0.617h (φ -0.58/0.00 h)  min ghost φ 0.518h  on wall 32
+F=Float32 ball 3-D h=0.1 j=0.0                 Nint   4945  min all 0.554h  min int 0.554h (φ -0.46/-0.00 h)  min ghost φ 0.630h  on wall 618
+F=Float32 1-D 1.03 j=0.0                       Nint     22  min all 0.600h  min int 0.600h (φ -0.60/0.00 h)  min ghost φ 1.000h  on wall 2
+F=Float32 box 3-D off-lattice j=0.0            Nint   1331  min all 0.800h  min int 0.800h (φ 0.00/0.00 h)  min ghost φ 0.700h  on wall 431
+F=Float32 box minus disc j=0.0                 Nint    812  min all 0.550h  min int 0.550h (φ -0.00/-0.50 h)  min ghost φ 0.600h  on wall 137
+F=Float32 3-D box minus ball j=0.0             Nint   2514  min all 0.700h  min int 0.700h (φ -0.70/-0.00 h)  min ghost φ 0.568h  on wall 1024
+F=Float32 disc helper h=0.05 j=0.3             Nint   1323  min all 0.257h  min int 0.257h (φ -0.00/-0.12 h)  min ghost φ 0.500h  on wall 26
+F=Float32 ball 3-D h=0.1 j=0.3                 Nint   4859  min all 0.252h  min int 0.252h (φ 0.00/-0.18 h)  min ghost φ 0.500h  on wall 427
+F=Float32 1-D 1.03 j=0.3                       Nint     21  min all 0.493h  min int 0.552h (φ -4.16/-4.71 h)  min ghost φ 0.563h  on wall 0
+F=Float32 box 3-D off-lattice j=0.3            Nint   1345  min all 0.282h  min int 0.282h (φ 0.00/-0.21 h)  min ghost φ 0.500h  on wall 116
+F=Float32 box minus disc j=0.3                 Nint    810  min all 0.459h  min int 0.459h (φ -0.93/-1.05 h)  min ghost φ 0.543h  on wall 13
+F=Float32 3-D box minus ball j=0.3             Nint   2516  min all 0.430h  min int 0.430h (φ -0.15/-0.07 h)  min ghost φ 0.502h  on wall 15
+disc anisotropic 0.1x0.025 (h=min)             Nint   1293  min all 0.725h  min int 0.725h (φ -0.00/-0.60 h)  min ghost φ 0.608h  on wall 56
+closest pair [1.037661076251009, -0.023355779540705272] [1.0428488036873027, -0.02461282891007382] d/h 0.13344635876988237 φ/h 1.3678237256325414 1.5011798323108603 isb truetrue
+min spacing among exact on-wall points 0.47278454536686665

@@ -1,0 +1,13 @@
+ERROR: LoadError: ArgumentError: GeometricDomain: mins/maxs (0.0 on axis 1) crop the shape (extent -1.0 .. 1.0); intersect the shape with a Cuboid to cut it
+Stacktrace:
+ [1] GeometricDomain(shape::Ball{2, Float64}; bc_map::Dict{Int64, AbstractBoundaryCondition}, is_periodic::Bool, mins::Tuple{Float64, Float64}, maxs::Tuple{Float64, Float64}, label::Val{:shape}, volume::Nothing)
+   @ HyperCloudCore /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/boundary-fixes/src/Grid/Domains.jl:73
+ [2] top-level scope
+   @ /tmp/brev_a/probes/probe_crop.jl:3
+ [3] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [4] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [5] _start()
+   @ Base ./client.jl:577
+in expression starting at /tmp/brev_a/probes/probe_crop.jl:3

@@ -1,0 +1,9 @@
+α=5.7° θ=0.0: outside samples 19875, max rel err 0.07703376107805526 at [-0.8756832500863856, -0.08831185174653], >1e-6: 6326, worst call 40468.3 us
+α=5.7° θ=0.7: outside samples 19890, max rel err 0.07703378501178888 at [-0.5803862939826985, -0.8176087540613199], >1e-6: 4341, worst call 27305.2 us
+α=17.2° θ=0.0: outside samples 19633, max rel err 6.919262963256042e-11 at [-0.32206150254136845, 0.0001743055195124743], >1e-6: 0, worst call 412.5 us
+α=17.2° θ=0.7: outside samples 19633, max rel err 6.91924905977218e-11 at [-0.27361128942530066, -0.7034485702788396], >1e-6: 0, worst call 372.6 us
+α=57.3° θ=0.0: outside samples 18474, max rel err 538.3414017445323 at [0.9596425303502583, 1.4928633689881168], >1e-6: 4639, worst call 87.9 us
+α=57.3° θ=0.7: outside samples 18489, max rel err 6872.7634689639335 at [-0.10762958012824986, 1.5813531037252302], >1e-6: 3212, worst call 75.7 us
+box h=1/200 jitter 0.2: ParticleGrid 0.07 s, N = 84237
+wedge 17° h=1/200 jitter 0.2: ParticleGrid 0.01 s, N = 7829
+wedge 6° h=1/200 jitter 0.2: ParticleGrid 0.01 s, N = 3446

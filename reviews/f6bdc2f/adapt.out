@@ -1,0 +1,4 @@
+D=1: moved interior particles with stale wall geometry before adapt: 20; inserted 0, removed 0; inserted with wrong geometry: 0
+   after reorder: particles whose geometry moved away from them: 0 of 26
+D=2: moved interior particles with stale wall geometry before adapt: 391; inserted 3, removed 0; inserted with wrong geometry: 0
+   after reorder: particles whose geometry moved away from them: 0 of 680

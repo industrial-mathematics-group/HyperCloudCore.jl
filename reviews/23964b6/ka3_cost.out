@@ -1,0 +1,20 @@
+OutflowBC                N=42835 ghosts=2434  allocated 0 B, time 0.167 ms (all 4 tags, -t 2)
+FixedDirichlet           N=42835 ghosts=2434  allocated 0 B, time 0.024 ms (all 4 tags, -t 2)
+ExtrapolationBC(1)       N=42835 ghosts=2434  allocated 0 B, time 0.339 ms (all 4 tags, -t 2)
+MirrorBC(1)              N=42835 ghosts=2434  allocated 0 B, time 0.466 ms (all 4 tags, -t 2)
+MirrorBC(negate; 2)      N=42835 ghosts=2434  allocated 0 B, time 0.768 ms (all 4 tags, -t 2)
+OutflowBC R3.5           N=43661 ghosts=3260  allocated 0 B, time 0.188 ms (all 4 tags, -t 2)
+ExtrapolationBC(3) R3.5  N=43661 ghosts=3260  allocated 0 B, time 2.118 ms (all 4 tags, -t 2)
+MirrorBC(3) R3.5         N=43661 ghosts=3260  allocated 0 B, time 3.025 ms (all 4 tags, -t 2)
+┌ Warning: Assignment to `pg` in soft scope is ambiguous because a global variable by the same name exists: `pg` will be treated as a new local. Disambiguate by using `local pg` to suppress this warning or `global pg` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:39
+┌ Warning: Assignment to `eq` in soft scope is ambiguous because a global variable by the same name exists: `eq` will be treated as a new local. Disambiguate by using `local eq` to suppress this warning or `global eq` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:40
+┌ Warning: Assignment to `pg` in soft scope is ambiguous because a global variable by the same name exists: `pg` will be treated as a new local. Disambiguate by using `local pg` to suppress this warning or `global pg` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:54
+┌ Warning: Assignment to `eq` in soft scope is ambiguous because a global variable by the same name exists: `eq` will be treated as a new local. Disambiguate by using `local eq` to suppress this warning or `global eq` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:55
+┌ Warning: Assignment to `buf` in soft scope is ambiguous because a global variable by the same name exists: `buf` will be treated as a new local. Disambiguate by using `local buf` to suppress this warning or `global buf` to assign to the existing global variable.
+└ @ /tmp/brev_c/probes/ka3.jl:56
+KA launch allocates 17181712 B
+tag order independence (Mirror, Extrap, Outflow, Dirichlet; 3 orders): true

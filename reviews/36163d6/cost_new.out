@@ -1,0 +1,6 @@
+2-D box 400^2 minus disc j=0             N   155580  build median 0.101 s   get_points median 0.0127 s
+2-D box 400^2 minus disc j=0.3           N   155562  build median 0.110 s   get_points median 0.0135 s
+2-D disc 400^2 j=0.3                     N   129997  build median 0.083 s   get_points median 0.0077 s
+3-D box 64^3 on lattice j=0.3            N   354935  build median 0.505 s   get_points median 0.0380 s
+3-D box 64^3 off lattice (1.003) j=0.3   N   355019  build median 0.504 s   get_points median 0.0406 s
+3-D ball 64^3 j=0.3                      N   186355  build median 0.289 s   get_points median 0.0315 s

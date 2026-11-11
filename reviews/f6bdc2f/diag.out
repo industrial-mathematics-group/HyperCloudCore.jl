@@ -1,0 +1,56 @@
+== Float32 extrapolation: error vs ghost wall distance (q=2, 3-D; q=3, 2-D)
+D=3 q=2 φ/dx in (0,1]: n= 665  max err at degree q: 8.65e-01  median 2.73e-06; at degree q-1: 3.57e-01
+D=3 q=2 φ/dx in (1,2]: n= 882  max err at degree q: 1.60e+00  median 3.07e-05; at degree q-1: 9.20e-01
+D=3 q=2 φ/dx in (2,3]: n=1110  max err at degree q: 7.05e-01  median 1.80e-04; at degree q-1: 5.13e-01
+D=3 q=2 φ/dx in (3,10]: n= 422  max err at degree q: 8.20e-01  median 3.66e-04; at degree q-1: 2.72e-01
+  same in Float64: max err 4.01e-12
+D=2 q=3 φ/dx in (0,1]: n=  76  max err at degree q: 7.13e-04  median 1.53e-05; at degree q-1: 2.09e-04
+D=2 q=3 φ/dx in (1,2]: n=  98  max err at degree q: 6.29e-03  median 3.04e-04; at degree q-1: 2.26e-03
+D=2 q=3 φ/dx in (2,3]: n=  90  max err at degree q: 2.17e-02  median 1.42e-03; at degree q-1: 1.08e-02
+D=2 q=3 φ/dx in (3,10]: n= 144  max err at degree q: 1.78e-01  median 6.27e-03; at degree q-1: 8.25e-02
+  same in Float64: max err 3.02e-10
+D=2 q=2 φ/dx in (0,1]: n=  95  max err at degree q: 9.90e-05  median 2.51e-06; at degree q-1: 1.07e-04
+D=2 q=2 φ/dx in (1,2]: n=  81  max err at degree q: 4.29e-04  median 1.59e-05; at degree q-1: 3.19e-04
+D=2 q=2 φ/dx in (2,3]: n=  76  max err at degree q: 5.38e-04  median 6.20e-05; at degree q-1: 8.45e-04
+D=2 q=2 φ/dx in (3,10]: n=  35  max err at degree q: 5.51e-04  median 1.34e-04; at degree q-1: 1.02e-03
+  same in Float64: max err 1.90e-12
+== degree actually reached in 1-D (exactness by degree), ExtrapolationBC/MirrorBC(Q), R/dx sweep
+1-D Q=3 R=2.5dx ext: degrees reached per ghost [1, 1, 1, 1, 1, 1]
+1-D Q=3 R=2.5dx mir: degrees reached per ghost [2, 2, 1, 1, 1, 1]
+1-D Q=3 R=3.5dx ext: degrees reached per ghost [3, 3, 3, 3, 3, 3, 3, 3]
+1-D Q=3 R=3.5dx mir: degrees reached per ghost [3, 3, 3, 3, 3, 3, 3, 3]
+1-D Q=3 R=4.5dx ext: degrees reached per ghost [3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+1-D Q=3 R=4.5dx mir: degrees reached per ghost [3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+1-D Q=3 R=5.5dx ext: degrees reached per ghost [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+1-D Q=3 R=5.5dx mir: degrees reached per ghost [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+1-D Q=4 R=2.5dx ext: degrees reached per ghost [1, 1, 1, 1, 1, 1]
+1-D Q=4 R=2.5dx mir: degrees reached per ghost [2, 2, 1, 1, 1, 1]
+1-D Q=4 R=3.5dx ext: degrees reached per ghost [1, 1, 1, 1, 1, 1, 1, 1]
+1-D Q=4 R=3.5dx mir: degrees reached per ghost [3, 3, 3, 2, 1, 1, 2, 3]
+1-D Q=4 R=4.5dx ext: degrees reached per ghost [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+1-D Q=4 R=4.5dx mir: degrees reached per ghost [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+1-D Q=4 R=5.5dx ext: degrees reached per ghost [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+1-D Q=4 R=5.5dx mir: degrees reached per ghost [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+1-D Q=5 R=2.5dx ext: degrees reached per ghost [1, 1, 1, 1, 1, 1]
+1-D Q=5 R=2.5dx mir: degrees reached per ghost [2, 2, 1, 1, 1, 1]
+1-D Q=5 R=3.5dx ext: degrees reached per ghost [1, 1, 1, 1, 1, 1, 1, 1]
+1-D Q=5 R=3.5dx mir: degrees reached per ghost [3, 3, 3, 2, 1, 1, 2, 3]
+1-D Q=5 R=4.5dx ext: degrees reached per ghost [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+1-D Q=5 R=4.5dx mir: degrees reached per ghost [5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+1-D Q=5 R=5.5dx ext: degrees reached per ghost [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4]
+1-D Q=5 R=5.5dx mir: degrees reached per ghost [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+== periodic channel (poly in y,z only)
+D=2 ext periodic: max err degree 2: 2.19e-12
+D=2 mir periodic: max err degree 2: 8.70e-15
+D=3 ext periodic: max err degree 2: 5.22e-12
+D=3 mir periodic: max err degree 2: 1.23e-14
+== InverseWeightFunction, unjittered (mirror point on a particle)
+┌ Warning: ShepardVolumes needs a kernel that is bounded at zero distance; using uniform volumes |Ω|/N.
+Float64 ext inverse weight unjittered: max err degree 2: 8.54e-13
+Float64 ext inverse weight jittered: max err degree 2: 1.41e-12
+Float64 mir inverse weight unjittered: max err degree 2: 5.29e-16
+Float64 mir inverse weight jittered: max err degree 2: 3.22e-14
+Float32 ext inverse weight unjittered: max err degree 2: 5.56e-04
+Float32 ext inverse weight jittered: max err degree 2: 9.19e-04
+Float32 mir inverse weight unjittered: max err degree 2: 1.09e-07
+Float32 mir inverse weight jittered: max err degree 2: 2.51e-05
