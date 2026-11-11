@@ -179,10 +179,10 @@ wall. The transport of the swept fluid is the equations' business, through the w
 [`WallPoint`](@ref) of the conditions; enforcing the old content on the new region instead flattened the
 solution around every insertion. Then the **topology**: each removal and insertion is the conservative remap of
 the adaptivity on the new region (`_remap_event!`): a removed particle's remaining share of the region and its
-content go to its neighbours, an inserted particle takes its share from them. The removals, then the insertions,
-run in rounds of independent events (centres at least the adaptivity's event spacing apart, `_event_spacing`),
-each round followed by the topology change and a neighbour search, so that every remap sees the particles the
-earlier ones removed and inserted. Last, the ghosts of the static walls are added where a piece uncovered their
+content go to its neighbours, an inserted particle takes its share from them. The removals run in rounds of
+independent events (centres at least the adaptivity's event spacing apart, `_event_spacing`), each round followed by
+the topology change and a neighbour search, so that every remap sees the particles the earlier ones removed; the
+insertions are remapped together in one round after them. Last, the ghosts of the static walls are added where a piece uncovered their
 band (lattice points outside a static wall, within the band of the interior, state of the nearest ghost of the
 same tag). `mass_residual` is the change of `interior_mass` over the call: the content of what was covered and
 uncovered. Nothing is renormalised to `domain_volume`, which is the volume at `t = 0`. A piece whose box reaches
@@ -232,11 +232,11 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
     ad      = ParticleAdaptivity(T; samples_per_dx = samples_per_dx)
     spacing = _event_spacing(hg)
     df      = State{M, T}[]                              # neighbour-slot scratch of the remaps, shared by the rounds
-    n_removed, n_inside = _drop_empty!(hg, max_order), -1
-    n_removed > 0 && (n_inside = n_removed)
+    n_removed = _drop_empty!(hg, max_order)
+    n_inside, first = n_removed, true
     while true
-        cand = _covered_particles(hg, geom, posed, t, inbox, clear)
-        n_inside < 0 && (n_inside = count(i -> !_is_interior(geom, hg.core.positions[i], t), cand))
+        cand = _covered_particles(hg, geom, shape_t, posed, t, inbox, clear)
+        first && (n_inside += count(i -> !_is_interior(geom, hg.core.positions[i], t), cand); first = false)
         isempty(cand) && break
         pos = hg.core.positions
         sel = _spaced(hg, [pos[i] for i in cand], spacing)
@@ -251,19 +251,14 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
               "Reported once.")
 
     # 3. Uncovered: lattice points of the canvas inside the boxes and inside the region, at least `min_gap` from
-    #    every moving piece and every particle, inserted in rounds as well (each round sees the particles the
-    #    earlier ones inserted, so a lattice point reached from both ends of a periodic axis is inserted once).
-    #    Also at least `min_gap` inside a static wall: inserted wall-row particles (on the wall, as `get_points`
-    #    makes them) got the remap's share of a half cell (0.6 h² against 0.97 h² in a generated cloud) and kept
-    #    an error of 0.07 behind a receding piston, the uncovered part being less accurate than without them.
-    n_inserted = 0
-    while true
-        cand = _uncovered_points(hg, geom, shape_t, posed, boxes, gap, R + 2dx)
-        isempty(cand) && break
-        sel = _spaced(hg, cand, spacing)
-        _sweep_round!(hg, ad, [_AdaptEvent{D, T}(cand[a], Int[], [cand[a]]) for a in sel], max_order, df)
-        n_inserted += length(sel)
-    end
+    #    every moving piece, every particle and each other (a lattice point reached from both ends of a periodic
+    #    axis is inserted once), and within reach of a moving piece.
+    #    The lattice points of a static wall lie on the wall, as in `get_points`. All insertions are remapped in one
+    #    round on the topology after the removals (in rounds, each inserted particle taking its share from the ones
+    #    inserted before, the error behind a receding piston stopped converging: 0.064 at N = 160 against 0.015).
+    cand = _uncovered_points(hg, geom, shape_t, posed, boxes, gap, R + 2dx, t)
+    isempty(cand) || _sweep_round!(hg, ad, [_AdaptEvent{D, T}(x, Int[], [x]) for x in cand], max_order, df)
+    n_inserted = length(cand)
 
     # 4. The ghosts of the static walls next to what the pieces uncovered (the initial band only covers the
     #    region at t = 0)
@@ -330,16 +325,18 @@ function _drop_empty!(hg::ParticleGrid{D, M, T}, max_order::Int) where {D, M, T}
     return n
 end
 
-# Interior particles in the boxes that a moving piece covers or comes closer to than `clear`, by the pieces' own
-# distances (the composite's nearest surface left a particle on a static wall next to an advancing face until the
-# face covered it: the static wall won the tie at distance 0)
-function _covered_particles(hg::ParticleGrid{D, M, T}, geom, posed, t::T, inbox, clear::T) where {D, M, T}
+# Interior particles in the boxes that a moving piece covers or comes closer to than `clear`: the region's surface
+# within `clear` and a moving piece's own surface too (the composite's nearest surface alone left a particle on a
+# static wall next to an advancing face until the face covered it, the static wall winning the tie at distance 0;
+# the piece's distance alone also removed particles next to parts of its surface that are no wall)
+function _covered_particles(hg::ParticleGrid{D, M, T}, geom, shape_t, posed, t::T, inbox, clear::T) where {D, M, T}
     pos, isb = hg.core.positions, hg.core.is_boundary
     out = Int[]
     for i in 1:hg.meta.N
         (isb[i] || !inbox(pos[i])) && continue
         x = pos[i]
-        (!_is_interior(geom, x, t) || any(p -> abs(signed_distance(p, x)) < clear, posed)) && push!(out, i)
+        (!_is_interior(geom, x, t) ||
+         (signed_distance(shape_t, x) > -clear && any(p -> abs(signed_distance(p, x)) < clear, posed))) && push!(out, i)
     end
     return out
 end
@@ -363,8 +360,12 @@ function _sweep_lattice(f, hg::ParticleGrid{D, M, T}, geom, box) where {D, M, T}
     wall_lo = ntuple(d -> cd.is_periodic[d] ? -1 : _wall_index(geom.mins[d], cd.canvas_mins[d], dx[d]), Val(D))
     wall_hi = ntuple(d -> cd.is_periodic[d] ? -1 : _wall_index(geom.maxs[d], cd.canvas_mins[d], dx[d]), Val(D))
     lo, hi = box
-    tol = T(1e-6)                     # (canvas_max - canvas_min) / dx = 25.999999999999996 dropped the last row
-    rng = ntuple(d -> ceil(Int, (lo[d] - cd.canvas_mins[d]) / dx[d] - tol):floor(Int, (hi[d] - cd.canvas_mins[d]) / dx[d] + tol), Val(D))
+    # index tolerance: (canvas_max - canvas_min) / dx = 25.999999999999996 dropped the last row
+    tol(r) = max(T(1e-6), 16 * eps(T) * abs(r))
+    rng = ntuple(Val(D)) do d
+        a, z = (lo[d] - cd.canvas_mins[d]) / dx[d], (hi[d] - cd.canvas_mins[d]) / dx[d]
+        ceil(Int, a - tol(a)):floor(Int, z + tol(z))
+    end
     for I in CartesianIndices(rng)
         x = Space{D, T}(ntuple(Val(D)) do d
             j = I[d]
@@ -379,14 +380,17 @@ end
 # Lattice points in the boxes that are at least `gap` inside the region and from every particle, within `reach` of
 # a moving piece (what a piece can have uncovered; holes of a jittered cloud elsewhere in a piece's box, a whole
 # canvas for a piston, are the adaptivity's business)
-function _uncovered_points(hg::ParticleGrid{D, M, T}, geom, shape_t, posed, boxes, gap::T, reach::T) where {D, M, T}
+function _uncovered_points(hg::ParticleGrid{D, M, T}, geom, shape_t, posed, boxes, gap::T, reach::T, t::T) where {D, M, T}
     out = Space{D, T}[]
     idx, dvec = Int[], Space{D, T}[]
+    L, Li = hg.domain.L_wrap, hg.domain.invL_wrap
     for b in boxes
         _sweep_lattice(hg, geom, b) do x
-            signed_distance(shape_t, x) <= -gap || return
-            any(p -> abs(signed_distance(p, x)) <= reach, posed) || return
+            _is_interior(geom, x, t) || return
+            dmin = minimum(p -> abs(signed_distance(p, x)), posed)
+            gap <= dmin <= reach || return
             _collect_near!(hg, x, gap^2, idx, dvec) == 0 || return
+            any(y -> sum(abs2, _wrapped_diff(y, x, L, Li)) < gap^2, out) && return   # a periodic seam reached twice
             push!(out, x)
         end
     end

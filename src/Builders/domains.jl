@@ -100,6 +100,9 @@ function build_domain(::Val{:rectangular}, domain_conf::Dict, context::Dict)
     return get_rectangular_domain(T, req_mins, req_maxs; bc_map = bc_map, is_periodic = is_per)
 end
 
+# `;`-separated statements parse into (nested) `:toplevel` expressions, which `eval` runs outside an enclosing `let`
+_toplevel_to_block(ex) = ex isa Expr && ex.head === :toplevel ? Expr(:block, map(_toplevel_to_block, ex.args)...) : ex
+
 function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
     haskey(domain_conf, :shape) || error("Domain :shape needs the key :shape (an AbstractShape)")
     shape = domain_conf[:shape]
@@ -108,10 +111,11 @@ function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
     # there through `using HyperCloud`/`using HyperCloudCore`); HyperCloudCore itself if `Main` doesn't know a name.
     # `T` is bound to the run's float type.
     if shape isa String
-        body = Meta.parse(shape)                          # a syntax error is thrown here, as a ParseError
-        body isa Expr && body.head in (:incomplete, :error) &&
-            throw(ArgumentError("Domain :shape: the string is not complete Julia code: $(body.args[1])"))
-        body isa Expr && body.head === :toplevel && (body = Expr(:block, body.args...))   # "a = …; Shape(…, a)"
+        body = Meta.parseall(shape)                       # statements separated by `;` or newlines
+        bad = findfirst(a -> a isa Expr && a.head in (:incomplete, :error), body.args)
+        bad === nothing ||
+            throw(ArgumentError("Domain :shape: the string is not valid Julia code: " * sprint(showerror, body.args[bad].args[1])))
+        body = _toplevel_to_block(body)
         ex = :(let T = $T; $body; end)
         shape = try
             Core.eval(Main, ex)

@@ -1006,7 +1006,7 @@ end
         face = 1 + t
         bottom = [pg.core.positions[i] for i in 1:pg.meta.N if pg.core.is_boundary[i] && pg.core.tags[i] == 3]
         @test maximum(x -> x[1], bottom) >= face - h
-        @test count(i -> abs(pg.core.positions[i][2] - h) < 1e-12 && 1 + h < pg.core.positions[i][1] < face - h, inner(pg)) >= 5
+        @test count(i -> pg.core.positions[i][2] == 0.0 && 1 + h < pg.core.positions[i][1] < face - h, inner(pg)) >= 5
         @test all(i -> pg.core.volumes[i] == 0, [i for i in 1:pg.meta.N if pg.core.is_boundary[i]])
         # a piece faster than the documented limit (1.5 spacings per sweep): particles it covered whole have no volume
         # left and go without a remap (they made the remaps divide 0 by 0: NaN up to 10 h from the face)
