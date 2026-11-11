@@ -182,11 +182,11 @@ the adaptivity on the new region (`_remap_event!`): a removed particle's remaini
 content go to its neighbours, an inserted particle takes its share from them. The removals run in rounds of
 independent events (centres at least the adaptivity's event spacing apart, `_event_spacing`), each round followed by
 the topology change and a neighbour search, so that every remap sees the particles the earlier ones removed; the
-insertions are remapped together in one round after them. Last, the ghosts of the static walls are added where a piece uncovered their
+insertions follow in rounds of their own. Last, the ghosts of the static walls are added where a piece uncovered their
 band (lattice points outside a static wall, within the band of the interior, state of the nearest ghost of the
 same tag). `mass_residual` is the change of `interior_mass` over the call: the content of what was covered and
-uncovered. Nothing is renormalised to `domain_volume`, which is the volume at `t = 0`. A piece whose box reaches
-across a periodic end is refused (pieces have no periodic images).
+uncovered. Nothing is renormalised to `domain_volume`, which is the volume at `t = 0`. A piece with points on
+a periodic end is refused (pieces have no periodic images).
 
 Requires valid neighbour lists. Returns the counts and the content change of the call; `(0, 0, 0)` on a domain
 without moving pieces.
@@ -233,10 +233,10 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
     spacing = _event_spacing(hg)
     df      = State{M, T}[]                              # neighbour-slot scratch of the remaps, shared by the rounds
     n_removed = _drop_empty!(hg, max_order)
-    n_inside, first = n_removed, true
+    n_inside, first_round = n_removed, true
     while true
         cand = _covered_particles(hg, geom, shape_t, posed, t, inbox, clear)
-        first && (n_inside += count(i -> !_is_interior(geom, hg.core.positions[i], t), cand); first = false)
+        first_round && (n_inside += count(i -> !_is_interior(geom, hg.core.positions[i], t), cand); first_round = false)
         isempty(cand) && break
         pos = hg.core.positions
         sel = _spaced(hg, [pos[i] for i in cand], spacing)
@@ -251,14 +251,18 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
               "Reported once.")
 
     # 3. Uncovered: lattice points of the canvas inside the boxes and inside the region, at least `min_gap` from
-    #    every moving piece, every particle and each other (a lattice point reached from both ends of a periodic
-    #    axis is inserted once), and within reach of a moving piece.
-    #    The lattice points of a static wall lie on the wall, as in `get_points`. All insertions are remapped in one
-    #    round on the topology after the removals (in rounds, each inserted particle taking its share from the ones
-    #    inserted before, the error behind a receding piston stopped converging: 0.064 at N = 160 against 0.015).
-    cand = _uncovered_points(hg, geom, shape_t, posed, boxes, gap, R + 2dx, t)
-    isempty(cand) || _sweep_round!(hg, ad, [_AdaptEvent{D, T}(x, Int[], [x]) for x in cand], max_order, df)
-    n_inserted = length(cand)
+    #    every moving piece and every particle, and within reach of a moving piece, inserted in rounds as well (each
+    #    round sees the particles the earlier ones inserted, so a lattice point reached from both ends of a periodic
+    #    axis is inserted once; all at once, every inserted particle took its share as if alone and the volumes
+    #    swung between 0.2 and 2.7 h²). The lattice points of a static wall lie on the wall, as in `get_points`.
+    n_inserted = 0
+    while true
+        cand = _uncovered_points(hg, geom, shape_t, posed, boxes, gap, R + 2dx, t)
+        isempty(cand) && break
+        sel = _spaced(hg, cand, spacing)
+        _sweep_round!(hg, ad, [_AdaptEvent{D, T}(cand[a], Int[], [cand[a]]) for a in sel], max_order, df)
+        n_inserted += length(sel)
+    end
 
     # 4. The ghosts of the static walls next to what the pieces uncovered (the initial band only covers the
     #    region at t = 0)
@@ -313,10 +317,11 @@ end
 # Interior particles whose volume the region pass took entirely (covered by a piece): removed without a remap
 function _drop_empty!(hg::ParticleGrid{D, M, T}, max_order::Int) where {D, M, T}
     N, isb, V = hg.meta.N, hg.core.is_boundary, hg.core.volumes
+    vmin = T(1e-12) * prod(hg.meta.dx)
     mask = hg.shared.bit_buffer
     n = 0
     @inbounds for i in 1:N
-        mask[i] = !isb[i] && iszero(V[i])
+        mask[i] = !isb[i] && V[i] <= vmin                 # (a piece beyond the speed limit left 1e-241)
         n += mask[i]
     end
     n == 0 && return 0
@@ -372,7 +377,10 @@ function _sweep_lattice(f, hg::ParticleGrid{D, M, T}, geom, box) where {D, M, T}
             j == wall_lo[d] ? geom.mins[d] : j == wall_hi[d] ? geom.maxs[d] : cd.canvas_mins[d] + j * dx[d]
         end)
         x = _wrap_point(hg, x)
-        all(cd.canvas_mins .<= x .<= cd.canvas_maxs) && f(x)
+        # the canvas end can lie an ulp below canvas_min + n dx: the outermost row is clamped onto it, not dropped
+        ε = 16 * eps(T) .* max.(abs.(cd.canvas_mins), abs.(cd.canvas_maxs), one(T))
+        all(cd.canvas_mins .- ε .<= x .<= cd.canvas_maxs .+ ε) || continue
+        f(clamp.(x, cd.canvas_mins, cd.canvas_maxs))
     end
     return nothing
 end
@@ -383,14 +391,12 @@ end
 function _uncovered_points(hg::ParticleGrid{D, M, T}, geom, shape_t, posed, boxes, gap::T, reach::T, t::T) where {D, M, T}
     out = Space{D, T}[]
     idx, dvec = Int[], Space{D, T}[]
-    L, Li = hg.domain.L_wrap, hg.domain.invL_wrap
     for b in boxes
         _sweep_lattice(hg, geom, b) do x
             _is_interior(geom, x, t) || return
             dmin = minimum(p -> abs(signed_distance(p, x)), posed)
             gap <= dmin <= reach || return
             _collect_near!(hg, x, gap^2, idx, dvec) == 0 || return
-            any(y -> sum(abs2, _wrapped_diff(y, x, L, Li)) < gap^2, out) && return   # a periodic seam reached twice
             push!(out, x)
         end
     end
