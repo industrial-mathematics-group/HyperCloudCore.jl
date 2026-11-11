@@ -408,7 +408,8 @@ end
 function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev::_AdaptEvent{D, T},
                        new_pos::Vector{Space{D, T}}, new_rho::Vector{State{M, T}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
-                       record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing) where {D, M, T}
+                       record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing,
+                       removed_mask = nothing) where {D, M, T}
     nb     = pg.neighbor
     pos    = pg.core.positions
     V      = pg.core.volumes
@@ -429,8 +430,11 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     loc_idx, loc_d = Int[], Space{D, T}[]
     n_loc = _collect_near!(pg, ev.center, (R * (1 + 2 * sqrt(T(D))) + dx)^2, loc_idx, loc_d)
     @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = l; end
-    is_removed = falses(n_loc)
-    for r in ev.removed; is_removed[lmap[r]] = true; end
+    # `removed_mask` (the sweep of moving boundaries): particles other events of the same call remove, so that no
+    # content is given to a particle that the compaction drops
+    is_removed = removed_mask === nothing ? falses(n_loc) : [removed_mask[loc_idx[l]] for l in 1:n_loc]
+    is_other   = copy(is_removed)                          # removed by another event: gone from the balance below
+    for r in ev.removed; is_removed[lmap[r]] = true; is_other[lmap[r]] = false; end
     # Boundary (ghost) particles are not remapped: their states are boundary data (`FixedDirichlet` restores them
     # from `pg.rhos`, `OutflowBC` overwrites them), so the remap must not write them. Their swept share is left out
     # of the balance below, which then puts it onto the interior particles: Σ V U over the interior is exact.
@@ -457,7 +461,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         grads[l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
     end
 
-    # 3. Quadrature over the box center ± 2R
+    # 3. Quadrature over the box center ± 2R (the region at `boundary_time`: moving pieces have been swept)
+    t_bnd = pg.meta.boundary_time
     δV  = zeros(T, n_loc + n_add)
     δm  = zeros(State{M, T}, n_loc + n_add)
     hq  = dx / ad.samples_per_dx
@@ -469,15 +474,18 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     for I in CartesianIndices(ntuple(_ -> nq, Val(D)))
         y_raw = Space{D, T}(ntuple(d -> ev.center[d] - 2R + (I[d] - T(0.5)) * hq, Val(D)))
         y = _wrap_point(pg, y_raw)
-        geom.is_interior(y) || continue
+        _is_interior(geom, y, t_bnd) || continue
         n = _collect_near!(pg, y, R_sq, qidx, qd)
         n == 0 && continue
 
         # S_old, nearest donor, S_new
+        # Ghost (fixed) particles are not part of the partition: like the volume estimators, the interior particles
+        # share the region among themselves (a ghost's share would leave the interior accounting)
         S_old = zero(T); S_new = zero(T)
         jstar, dstar = 0, T(Inf)
         @inbounds for k in 1:n
             l  = lmap[qidx[k]]
+            (l != 0 && is_fixed[l]) && continue
             d2 = sum(abs2, qd[k])
             wk = wf(d2)
             S_old += wk
@@ -500,6 +508,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
             S_new += w_add[a]
         end
         (S_old > 0 && S_new > 0) || continue
+        inv_old, inv_new = inv(S_old), inv(S_new)
 
         # Ũ(y): limited linear reconstruction of the nearest old particle
         lstar = lmap[qidx[jstar]]
@@ -512,14 +521,14 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         # Accumulate swept contributions
         @inbounds for k in 1:n
             l = lmap[qidx[k]]
-            (l == 0 || is_removed[l]) && continue
+            (l == 0 || is_removed[l] || is_fixed[l]) && continue
             wk = wf(sum(abs2, qd[k]))
-            dφ = wk / S_new - wk / S_old
+            dφ = wk * inv_new - wk * inv_old
             δV[l] += ω * dφ
             δm[l] += (ω * dφ) * u_rec
         end
         @inbounds for a in 1:n_add
-            dφ = w_add[a] / S_new
+            dφ = w_add[a] * inv_new
             δV[n_loc + a] += ω * dφ
             δm[n_loc + a] += (ω * dφ) * u_rec
         end
@@ -528,8 +537,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     # 4. New volumes and contents; exact residual correction
     V_before = zero(T); m_before = zero(State{M, T})
     @inbounds for l in 1:n_loc
-        is_fixed[l] && continue
-        j = loc_idx[l]
+        (is_fixed[l] || is_other[l]) && continue           # (other events' removals: counting them once per
+        j = loc_idx[l]                                     # overlapping event handed their volume out repeatedly)
         V_before += V[j]; m_before += V[j] * U[j]
     end
     Vn = zeros(T, n_loc + n_add)
@@ -679,7 +688,7 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
         core.tags[w]            = 0
         core.particle_orders[w] = max_order
         core.volumes[w]         = new_vol[a]
-        core.normals[w], core.wall_distances[w] = wall_geometry(pg.geometry, new_pos[a])
+        core.normals[w], core.wall_distances[w] = wall_geometry(pg.geometry, new_pos[a], pg.meta.boundary_time)
         pg.rhos[w]              = new_rho[a]
         pg.curvatures[w]        = zero(State{M, T})
         w += 1

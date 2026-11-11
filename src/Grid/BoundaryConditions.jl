@@ -139,7 +139,7 @@ export ExtrapolationBC, MirrorBC, WallPoint, requires_shape
 
 The wall as seen from a ghost particle, handed to the operator of a [`MirrorBC`](@ref): `position` (the wall
 point nearest to the ghost), the outward unit `normal` there, the `distance` of the ghost to the wall, and the
-wall `velocity` (zero for the static walls of this version; moving boundaries will fill it).
+wall `velocity` (that of a [`Moving`](@ref) piece at the wall point, zero for a static wall).
 """
 struct WallPoint{D, T}
     position::Space{D, T}
@@ -243,11 +243,11 @@ MirrorBC(op = nothing; degree::Int = 1, bounded::Bool = true) = MirrorBC{degree,
 requires_shape(::MirrorBC) = true
 
 function (::ExtrapolationBC{Q})(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t::Real) where {Q}
-    _launch_ghost_fit!(pg, rhos_buffer, tag, eq, Val(Q), nothing, Val(false), Val(false))
+    _launch_ghost_fit!(pg, rhos_buffer, tag, eq, t, Val(Q), nothing, Val(false), Val(false))
     return nothing
 end
 function (bc::MirrorBC{Q, F, B})(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t::Real) where {Q, F, B}
-    _launch_ghost_fit!(pg, rhos_buffer, tag, eq, Val(Q), _WallOp(bc.op), Val(true), Val(B))
+    _launch_ghost_fit!(pg, rhos_buffer, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B))
     return nothing
 end
 
@@ -255,14 +255,18 @@ end
 # unknowns) would take StaticArrays' allocating, host-only Cholesky inside the kernel
 _ghost_degree(::Val{Q}, ::Val{D}) where {Q, D} = Val(D == 3 ? min(Q, 3) : Q)
 
-function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, valQ::Val, op, mirror::Val, bounded::Val) where {D, M, T}
+function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     invL = one(T) / minimum(pg.meta.dx)
+    # A moving piece: the stored ghost positions and normals belong to `boundary_time`; the kernel moves them to
+    # the time of the state being built (the interior cloud does not move), and the wall point gets the velocity
+    gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
+                                           GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
     foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
         (buf, pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
          pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
-         pg.domain.L_wrap, pg.domain.invL_wrap, invL, tag, valQ, op, eq, mirror, bounded, Val(D)))
+         (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
     return nothing
 end
 
@@ -304,11 +308,12 @@ end
 
 # Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
 @inline function _ghost_fit_body!(i, buf, pos, isb, tags, normals, wdist, orders, ranges, indices, wf,
-                                  L, Li, invL, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
+                                  wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
     @inbounds begin
         (isb[i] && tags[i] == tag) || return nothing
-        x_i = pos[i]
-        n_i = normals[i]
+        L, Li, invL = wrap
+        x_i = move(gm, pos[i])
+        n_i = rotate(gm, normals[i])
         φ_i = wdist[i]
         x_t = MIRROR ? x_i - 2φ_i * n_i : x_i
         # Donor: the interior particle nearest to the target point. Its neighbour list is the stencil of the fit
@@ -370,7 +375,7 @@ end
             U = clamp.(U, lo, hi)
         end
         if MIRROR
-            wall   = WallPoint(x_i - φ_i * n_i, n_i, φ_i, zero(x_i))
+            wall   = WallPoint(x_i - φ_i * n_i, n_i, φ_i, velocity(gm, x_i))
             buf[i] = _apply_wall_op(op, eq, U, wall)
         else
             buf[i] = U

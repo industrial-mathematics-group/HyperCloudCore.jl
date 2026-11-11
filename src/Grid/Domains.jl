@@ -1,4 +1,4 @@
-export GeometricDomain, get_rectangular_domain, get_spherical_domain, wall_geometry
+export GeometricDomain, get_rectangular_domain, get_spherical_domain, wall_geometry, has_moving_pieces
 
 include("Shapes.jl")
 
@@ -6,7 +6,7 @@ include("Shapes.jl")
 # 1. THE PURE GEOMETRY LAYER
 # =========================================================================
 """
-    GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
+    GeometricDomain{GEO, D, T, F_Interior, F_Tag, S, P}
     GeometricDomain(shape::AbstractShape; bc_map, is_periodic = false, mins = nothing, maxs = nothing, label = Val(:shape))
     GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map)
 
@@ -40,9 +40,15 @@ at grid construction.
 - `get_tag::F_Tag`: A function generating integer boundary tags based on spatial location (`0` inside).
 - `bc_map::Dict{Int, AbstractBoundaryCondition}`: A mapping of integer tags to specific boundary condition evaluators.
 - `shape::S`: The [`AbstractShape`](@ref) of the region, or `nothing`.
-- `volume::T`: The volume of the region within the box (`NaN` without a shape).
+- `volume::T`: The volume of the region within the box at `t = 0` (`NaN` without a shape).
+- `pieces::P`: The [`Moving`](@ref) pieces of the shape (a tuple, empty for a static region).
+- `piece_of_tag::Vector{Int}`: For every boundary tag (index `tag + 1`) the index of the moving piece it
+  belongs to in `pieces`, `0` for a static piece; filled when the particles are generated.
+
+With moving pieces `is_interior(x, t)`, `get_tag(x, t)` and [`wall_geometry`](@ref)`(geom, x, t)` evaluate the
+shape at time `t` ([`at_time`](@ref)); the one-argument forms are `t = 0`.
 """
-struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
+struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S, P}
     label::GEO
     mins::Space{D, T}
     maxs::Space{D, T}
@@ -52,11 +58,34 @@ struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
     bc_map::Dict{Int, AbstractBoundaryCondition}
     shape::S
     volume::T
+    pieces::P
+    piece_of_tag::Vector{Int}
 end
 
 GeometricDomain(label, mins::Space{D, T}, maxs::Space{D, T}, is_periodic::SVector{D, Bool}, is_interior, get_tag,
                 bc_map::Dict{Int, AbstractBoundaryCondition}) where {D, T} =
-    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing, T(NaN))
+    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing, T(NaN), (), Int[])
+
+# The interior test and tag function of a shape-based domain, callable with and without a time
+struct _ShapeInside{S} <: Function
+    shape::S
+end
+(f::_ShapeInside)(pos) = _inside(f.shape, pos)
+(f::_ShapeInside)(pos, t) = _inside(at_time(f.shape, t), pos)
+struct _ShapeTag{S} <: Function
+    shape::S
+end
+(f::_ShapeTag)(pos) = f(pos, 0)
+function (f::_ShapeTag)(pos, t)
+    s = at_time(f.shape, t)
+    return _inside(s, pos) ? 0 : _checked_tag(boundary_tag(s, pos), pos)
+end
+
+"`true` if the domain's shape has [`Moving`](@ref) pieces."
+has_moving_pieces(geom::GeometricDomain) = !isempty(geom.pieces)
+
+# The interior test at time `t` (a domain without a shape has no time dependence)
+_is_interior(geom::GeometricDomain, pos, t) = geom.shape === nothing ? geom.is_interior(pos) : geom.is_interior(pos, t)
 
 _periodic_flags(is_periodic::Bool, ::Val{D}) where {D} = SVector{D, Bool}(ntuple(_ -> is_periodic, Val(D)))
 _periodic_flags(is_periodic::NTuple{D, Bool}, ::Val{D}) where {D} = SVector{D, Bool}(is_periodic)
@@ -82,10 +111,9 @@ function GeometricDomain(shape::AbstractShape{D, T};
         throw(ArgumentError("GeometricDomain: the shape is unbounded along some axis (bounding box $bb_lo .. $bb_hi); " *
                             "give mins/maxs, or intersect the shape with a Cuboid"))
     all(lo .<= hi) || throw(ArgumentError("GeometricDomain: mins must not exceed maxs"))
-    is_interior_func = (pos) -> _inside(shape, pos)
-    tag_func = (pos) -> _inside(shape, pos) ? 0 : _checked_tag(boundary_tag(shape, pos), pos)
     vol = volume === nothing ? _clipped_volume(shape, lo, hi) : T(volume)
-    return GeometricDomain(label, lo, hi, is_per_svec, is_interior_func, tag_func, bc_map, shape, vol)
+    pieces = moving_pieces(shape)
+    return GeometricDomain(label, lo, hi, is_per_svec, _ShapeInside(shape), _ShapeTag(shape), bc_map, shape, vol, pieces, Int[])
 end
 
 # Boundary tags are positive: `0` marks interior particles (the scheme would update such a ghost without a condition)
@@ -280,6 +308,15 @@ function get_points(
         jitter = Space{D, T}(ntuple(d -> rand_f[d] * (rand(rng, T) * 2 - 1), Val(D)))
         pos = wrap(lattice + jitter)
         if geom.is_interior(pos)
+            if geom.shape !== nothing && has_moving_pieces(geom)
+                # An interior point within h/2 of a moving piece (on its face, say) would be covered as soon as the
+                # piece moves: it becomes one of the piece's ghosts half a spacing outside instead
+                φ, _, _, pc = _probe(geom.shape, pos)
+                if pc !== nothing && φ > -h_snap
+                    push!(ghost_candidates, _push_out(geom, pos, h_snap, wrap))
+                    continue
+                end
+            end
             push!(inner_points, pos)
         elseif !iszero(jitter) && geom.is_interior(lattice)
             # The jitter carried an interior lattice point (e.g. one on a wall) across the wall: it is reflected
@@ -319,8 +356,87 @@ function get_points(
         is_boundary[i] = (tag != 0)
         normals[i], wall_distances[i] = wall_geometry(geom, pos)
     end
+    _assign_pieces!(geom, positions, tags, is_boundary)
 
     return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances
+end
+
+# Fills `geom.piece_of_tag` from the ghost particles: the moving piece each tag belongs to. A tag shared by a
+# moving piece and a static one (or two moving ones) is refused: the piece's motion is looked up by tag.
+function _assign_pieces!(geom::GeometricDomain, positions, tags, is_boundary)
+    empty!(geom.piece_of_tag)
+    has_moving_pieces(geom) || return nothing
+    max_tag = maximum(tags; init = 0)
+    resize!(geom.piece_of_tag, max_tag + 1)
+    fill!(geom.piece_of_tag, 0)
+    seen = falses(max_tag + 1)
+    for i in eachindex(positions)
+        is_boundary[i] || continue
+        _, _, _, pc = _probe(geom.shape, positions[i])
+        k = pc === nothing ? 0 : something(findfirst(p -> p === pc, geom.pieces))
+        tag = tags[i]
+        if seen[tag + 1]
+            geom.piece_of_tag[tag + 1] == k ||
+                throw(ArgumentError("boundary tag $tag belongs to a moving piece and to another piece: give each moving piece its own tags (Tagged)"))
+        else
+            seen[tag + 1] = true
+            geom.piece_of_tag[tag + 1] = k
+        end
+    end
+    # A moving piece without a single ghost particle would never move anything: its faces coincide with static
+    # ones (a piston face on the end of the canvas: the tie goes to the first piece) or it lies outside the band
+    for (k, piece) in enumerate(geom.pieces)
+        k in geom.piece_of_tag ||
+            throw(ArgumentError("moving piece $k ($(typeof(piece.shape).name.name)) has no boundary particles: its faces coincide " *
+                                "with those of a static piece (e.g. a piston face on the end of the canvas; extend the canvas beyond " *
+                                "the face) or it lies outside the particle band"))
+    end
+    return nothing
+end
+
+# The motion of the piece a tag belongs to at time `t` (the identity for static tags and domains)
+function _tag_motion(geom::GeometricDomain{GEO, D, T}, tag::Int, t) where {GEO, D, T}
+    k = tag + 1 <= length(geom.piece_of_tag) ? geom.piece_of_tag[tag + 1] : 0
+    k == 0 && return RigidMotion(Val(D), T)
+    return pose(geom.pieces[k], t)
+end
+
+"""
+    GhostMotion{D, T, L}
+
+The rigid displacement of a boundary piece between two instants, as the kernels see it: a point `x` at the
+first instant is at `move(gm, x) = c_to + R (x - c_from)` at the second, a normal `n` at `rotate(gm, n) = R n`,
+and the piece's velocity at the world point `x` at the second instant is `velocity(gm, x) = v + Ω (x - c_to)`.
+`GhostMotion(D, T)` is the identity at rest.
+"""
+struct GhostMotion{D, T, L}
+    R::SMatrix{D, D, T, L}
+    c_from::Space{D, T}
+    c_to::Space{D, T}
+    v::Space{D, T}
+    Ω::SMatrix{D, D, T, L}
+end
+GhostMotion(::Val{D}, ::Type{T}) where {D, T} =
+    GhostMotion(SMatrix{D, D, T, D * D}(I), zero(Space{D, T}), zero(Space{D, T}), zero(Space{D, T}), zero(SMatrix{D, D, T, D * D}))
+GhostMotion(from::RigidMotion{D, T, L}, to::RigidMotion{D, T, L}) where {D, T, L} =
+    GhostMotion{D, T, L}(to.R * from.R', from.c, to.c, to.v, to.Ω)
+@inline move(gm::GhostMotion, x) = gm.c_to + gm.R * (x - gm.c_from)
+@inline rotate(gm::GhostMotion, n) = gm.R * n
+@inline velocity(gm::GhostMotion, x) = gm.v + gm.Ω * (x - gm.c_to)
+
+"The displacement of the piece of `tag` from time `t_from` to `t_to` (the identity for static tags)."
+function tag_motion(geom::GeometricDomain{GEO, D, T}, tag::Int, t_from, t_to) where {GEO, D, T}
+    k = tag + 1 <= length(geom.piece_of_tag) ? geom.piece_of_tag[tag + 1] : 0
+    k == 0 && return GhostMotion(Val(D), T)
+    m = geom.pieces[k]
+    return GhostMotion(pose(m, t_from), pose(m, t_to))::GhostMotion{D, T, D * D}
+end
+
+# One `GhostMotion` per tag (index `tag + 1`), as a tuple for the kernels (bits; the tag count is small)
+function tag_motions(geom::GeometricDomain{GEO, D, T}, t_from, t_to) where {GEO, D, T}
+    K = max(1, length(geom.piece_of_tag))
+    K <= 64 || throw(ArgumentError("moving boundaries support boundary tags up to 63 (got $(K - 1))"))
+    return ntuple(k -> tag_motion(geom, k - 1, t_from, t_to), K)
 end
 
 # Points within `h_snap` = h/2 outside a wall (curved walls, obstacles and box extents off the lattice, jittered rows
@@ -363,7 +479,10 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
             any(q -> mindist2(q, s) < cell^2, get(taken, wrapkey(ntuple(d -> k[d] + off[d], Val(D))), ()))
         end
-        if !clash && geom.is_interior(s)
+        if _probe(geom.shape, pos)[4] !== nothing
+            # A point on a moving piece would be covered as soon as it moves: it becomes a ghost at h/2 instead
+            push!(ghosts, _push_out(geom, pos, h_snap, wrap))
+        elseif !clash && geom.is_interior(s)
             push!(inner, s)
             push!(get!(taken, wrapkey(k), Space{D, T}[]), s)
         else
@@ -371,6 +490,18 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         end
     end
     return nothing
+end
+
+# `pos` moved out of the region along the wall normal until it is `h_snap` outside: one push for a point on a
+# face, a second one for a point at a corner (the first push, along one face's normal, slides along the other face)
+function _push_out(geom::GeometricDomain{GEO, D, T}, pos, h_snap::T, wrap) where {GEO, D, T}
+    p = pos
+    for _ in 1:4
+        φ, n, _, _ = _probe(geom.shape, p)
+        φ >= h_snap * (1 - T(1e-6)) && break
+        p = wrap(p + (h_snap - φ) * n)
+    end
+    return p
 end
 
 # The mirror image of `pos` behind the wall (a shape-based domain), or the lattice position it was jittered from
@@ -404,6 +535,8 @@ distance is the combined signed distance (a bound for unions; no condition reads
 """
 wall_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}) where {GEO, D, T} =
     geom.shape === nothing ? (Space{D, T}(ntuple(_ -> T(NaN), Val(D))), T(NaN)) : _wall_geometry(geom.shape, x)
+wall_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}, t) where {GEO, D, T} =
+    geom.shape === nothing ? (Space{D, T}(ntuple(_ -> T(NaN), Val(D))), T(NaN)) : _wall_geometry(at_time(geom.shape, t), x)
 function _wall_geometry(shape::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
     φ0, n0, _ = _probe(shape, x)
     tol = 64 * eps(T) * max(one(T), maximum(abs, x))

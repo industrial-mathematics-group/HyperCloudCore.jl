@@ -35,6 +35,10 @@ mutable struct GridMetadata{D, T}
     # Incremented whenever neighbour lists, distances or weights change (neighbour search,
     # `refresh_geometry!`), so caches derived from the geometry can detect that they are stale.
     geometry_version::Int
+    # The time the boundary particles' positions and normals belong to (moving pieces; see `place_ghosts!`), and
+    # the time of the region the volumes near the moving pieces belong to (`sweep_boundaries!`)
+    boundary_time::T
+    sweep_time::T
 end
 
 """
@@ -53,9 +57,11 @@ struct GridMetadataView{D, T}
     interp_range_factor::T
     max_nb::Int
     geometry_version::Int
+    boundary_time::T
+    sweep_time::T
 end
 GridMetadataView(m::GridMetadata{D, T}) where {D, T} = GridMetadataView{D, T}(
-    m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version)
+    m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version, m.boundary_time, m.sweep_time)
 
 # The storage containers are parametric in their vector types, so the same structs hold host `Vector`s,
 # device arrays (`CuArray`, ...) or the device views KernelAbstractions passes into kernels. Their arrays are
@@ -194,6 +200,7 @@ include("BoundaryConditions.jl")
 include("Reordering.jl")
 include("Volumes.jl")
 include("Adaptivity.jl")
+include("MovingBoundaries.jl")
 
 export get_positions, get_weights, get_distances, get_neighbors
 
@@ -257,7 +264,7 @@ function ParticleGrid(
     N_interior = count(!, is_boundary)
     N_ghost = N - N_interior
     
-    meta = GridMetadata{D, T}(N, N_interior, N_ghost, R, max_dx, dxs_f, interp_range_factor, 0, 0)
+    meta = GridMetadata{D, T}(N, N_interior, N_ghost, R, max_dx, dxs_f, interp_range_factor, 0, 0, zero(T), zero(T))
     
     # Every per-particle array is a `Growable`, so a grid can grow on a device as well (adaptivity copies
     # its result back into the device grid in place). The reordering state stays a host object.

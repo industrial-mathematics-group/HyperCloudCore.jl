@@ -271,7 +271,9 @@ without a MOOD criterion (`NoMOOD` checks nothing).
 """
 mood_inadmissible(ts::GeneralRKTimeStepper) = ts.work.inadmissible[]
 
-@inline _is_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover)
+# The moving-grid path (position stages, a neighbour search per step) also serves a static cloud whose boundary
+# pieces move: their ghost particles are placed every stage (`place_ghosts!`), the interior keeps `grid_velocity` 0.
+@inline _is_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover) || has_moving_pieces(pg.geometry)
 
 function update_size!(ts::GeneralRKTimeStepper, N::Int, M_neighbors::Int, moving::Bool)
     ensure_capacity!(ts.rho_n, N)
@@ -523,8 +525,10 @@ end
     return nothing
 end
 
-# Switch the grid to stage geometry X (frozen topology or full search)
-function _apply_stage_geometry!(ts::GeneralRKTimeStepper, pg, X)
+# Switch the grid to stage geometry X (frozen topology or full search); the ghosts of moving pieces are placed at
+# the stage time first (X holds their positions of the step start)
+function _apply_stage_geometry!(ts::GeneralRKTimeStepper, pg, X, t_n, t_i)
+    place_ghosts!(pg, X, t_n, t_i)
     set_positions!(pg, X, ts.full_search_per_stage)
     ts.full_search_per_stage && uses_slot_buffers(ts.divergence_interpolator) && update_size!(ts.int_buffer, length(pg.neighbor.indices))
     return nothing
@@ -557,7 +561,7 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
             form_candidate!(ts, eq, pg, 1, dt, time)      # X_1 == x_n, grid already there
         else
             mood_checkpoint!(ts, eq, pg, i, dt, time)      # uses geometry of stage i-1
-            moving && _apply_stage_geometry!(ts, pg, ts.X_stages[i])
+            moving && _apply_stage_geometry!(ts, pg, ts.X_stages[i], time, time + ts.tableau.c_t[i] * dt)
         end
         ts.reset_orders_per_stage && fill!(view(orders, 1:N), max_order)
         compute_explicit_rhs!(ts, eq, pg, ts.K_E_stages[i], ts.K_X_stages[i], ts.Y_stages[i],
@@ -575,9 +579,13 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
     end
 
     if moving
+        place_ghosts!(pg, parent(ts.x_cand), time, time + dt)
         copyto!(pg.core.positions, 1, parent(ts.x_cand), 1, N)
         pg.neighbor(pg)                                    # full search + periodic wrap for the next step
-        ts.volume_estimator === nothing || update_volumes!(pg, ts.volume_estimator)
+        # Volumes are re-estimated when the interior moves; a static cloud with moving pieces keeps the volumes
+        # the remaps of `sweep_boundaries!` maintain (the region's volume changes with the pieces)
+        (ts.volume_estimator === nothing || pg.mover isa NoGridMover) || update_volumes!(pg, ts.volume_estimator)
+        has_moving_pieces(pg.geometry) && sweep_boundaries!(pg, time, time + dt, max_order)
     end
     return nothing
 end

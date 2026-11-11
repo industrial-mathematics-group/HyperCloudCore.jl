@@ -866,6 +866,179 @@ end
     end
 end
 
+@testset "Moving boundaries" begin
+    BCD = Dict{Int, AbstractBoundaryCondition}
+
+    @testset "Rigid motions, moving pieces, shapes in time" begin
+        m = translating((1.0, 0.0))
+        p = m(0.5)
+        @test p isa RigidMotion{2, Float64} && p.c == SVector(0.5, 0.0) && p.v == SVector(1.0, 0.0) && p.R == SMatrix{2, 2}(1.0, 0.0, 0.0, 1.0)
+        @test HyperCloudCore.body_to_world(p, SVector(0.1, 0.2)) == SVector(0.6, 0.2) && HyperCloudCore.body_velocity(p, SVector(3.0, 3.0)) == SVector(1.0, 0.0)
+        r = rotating(2.0; center = (1.0, 0.0))(π / 4)
+        @test HyperCloudCore.body_to_world(r, SVector(2.0, 0.0)) ≈ SVector(1.0, 1.0)            # (1,0) + R(π/2)(1,0)
+        @test HyperCloudCore.body_velocity(r, SVector(1.0, 1.0)) ≈ SVector(-2.0, 0.0)           # ω k × (x - c0)
+        r3 = rotating((0.0, 0.0, 1.0), 2.0; center = (1.0, 0.0, 0.0))(π / 4)
+        @test HyperCloudCore.body_to_world(r3, SVector(2.0, 0.0, 0.0)) ≈ SVector(1.0, 1.0, 0.0)
+        @test RigidMotion(2, Float32).R == SMatrix{2, 2, Float32}(1, 0, 0, 1)
+
+        plate = Moving(Tagged(Cuboid((-0.2, -0.05), (0.2, 0.05)), t -> t + 4), rotating(1.0))
+        chan  = Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - plate
+        @test moving_pieces(chan) === (plate,) && moving_pieces(Cuboid((0.0,), (1.0,))) === ()
+        @test signed_distance(chan, SVector(0.0, 0.0)) ≈ 0.05                                  # inside the plate at t = 0
+        s1 = at_time(chan, π / 2)
+        @test signed_distance(s1, SVector(0.0, 0.1)) > 0 && signed_distance(s1, SVector(0.1, 0.0)) < 0
+        @test boundary_tag(s1, SVector(0.0, 0.3)) == 6 && boundary_normal(s1, SVector(0.0, 0.3)) ≈ SVector(0.0, -1.0)   # the plate's x-max face, outward of the fluid
+        @test wall_velocity(chan, SVector(0.3, 0.0), 0.0) ≈ SVector(0.0, 0.3) atol = 1e-12
+        @test wall_velocity(chan, SVector(0.0, 0.45), 0.0) == SVector(0.0, 0.0)
+        @test at_time(Cuboid((0.0,), (1.0,)), 3.0) === Cuboid((0.0,), (1.0,)) || signed_distance(at_time(Cuboid((0.0,), (1.0,)), 3.0), SVector(0.5)) == -0.5
+        @test shape_volume(plate) ≈ 0.04 && bounding_box(at_time(plate, π / 2))[2] ≈ SVector(0.05, 0.2)
+        @test_throws ArgumentError Moving(chan, translating((1.0, 0.0)))                        # nested moving piece
+        @test_throws ArgumentError Moving(Ball((0.0, 0.0), 1.0), t -> 1.0)                       # not a RigidMotion
+    end
+
+    @testset "Grid: pieces by tag, ghost motions, exact placement, KA parity" begin
+        plate = Moving(Tagged(Cuboid((-0.2, -0.04), (0.2, 0.04)), t -> t + 4), rotating(1.0))
+        chan  = Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - plate
+        geom  = GeometricDomain(chan; is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5),
+                                bc_map = BCD(t => MirrorBC(; degree = 1) for t in (3, 4, 5, 6, 7, 8)))
+        @test has_moving_pieces(geom) && !has_moving_pieces(get_rectangular_domain(Float64, (0.0,), (1.0,)))
+        h  = 1 / 40
+        pg = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        @test geom.piece_of_tag == [0, 0, 0, 0, 0, 1, 1, 1, 1]
+        gm = HyperCloudCore.tag_motion(geom, 5, 0.0, 0.1)
+        @test HyperCloudCore.move(gm, SVector(0.2, 0.0)) ≈ SVector(0.2cos(0.1), 0.2sin(0.1))
+        @test HyperCloudCore.rotate(gm, SVector(1.0, 0.0)) ≈ SVector(cos(0.1), sin(0.1))
+        @test HyperCloudCore.velocity(gm, SVector(0.0, 0.2)) ≈ SVector(-0.2, 0.0)
+        @test HyperCloudCore.tag_motion(geom, 3, 0.0, 0.1) == HyperCloudCore.GhostMotion(Val(2), Float64)
+        # a tag shared by a moving and a static piece is refused
+        bad = Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - Moving(Tagged(Cuboid((-0.2, -0.04), (0.2, 0.04)), 3), rotating(1.0))
+        @test_throws ArgumentError ParticleGrid(GeometricDomain(bad; is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5)),
+                                                (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        # a moving piece without ghosts of its own (a piston face on the end of the canvas: the tie goes to the
+        # static piece) is refused
+        flush_face = intersect(Tagged(Cuboid((0.0,), (1.0,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((-0.5,))))
+        @test_throws ArgumentError ParticleGrid(GeometricDomain(flush_face; mins = (0.0,), maxs = (1.0,)), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1)
+        # no interior particle within h/2 of a moving piece at t = 0 (the lattice point on the face is a ghost at h/2)
+        tube = intersect(Tagged(Cuboid((0.0,), (1.5,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((-0.5,))))
+        pgt = ParticleGrid(GeometricDomain(tube; mins = (0.0,), maxs = (1.5,)), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1)
+        @test all(i -> pgt.core.is_boundary[i] || pgt.core.positions[i][1] <= 1 - 0.025 + 1e-12, 1:pgt.meta.N)
+        @test any(i -> pgt.core.is_boundary[i] && pgt.core.tags[i] == 2 && pgt.core.positions[i][1] ≈ 1.025, 1:pgt.meta.N)
+
+        # 200 RK3 steps: the plate's ghosts are on the exactly rotated lattice, the normals unit, boundary_time = t;
+        # the fluid at rest (velocity 0) so only the sweeps act: the scalar stays within its initial range
+        eq0 = LinearAdvection(((0.0,), (0.0,)), Float64)
+        u0(x) = 1 + exp(-(x[1]^2 + x[2]^2) / 0.05)
+        for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i])); end
+        ghost0 = [pg.core.positions[i] for i in 1:pg.meta.N if pg.core.is_boundary[i] && pg.core.tags[i] >= 5]
+        ts  = GeneralRKTimeStepper(eq0, MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux()), MOOD(), RK3_SSP_Tableau(Float64))
+        dt  = 0.005; t = 0.0
+        for _ in 1:200; ts(eq0, pg, t, dt); t += dt; end
+        Rθ = SMatrix{2, 2}(cos(t), sin(t), -sin(t), cos(t))
+        gh = [i for i in 1:pg.meta.N if pg.core.is_boundary[i] && pg.core.tags[i] >= 5]
+        @test length(gh) == length(ghost0) && pg.meta.boundary_time ≈ t && pg.meta.sweep_time ≈ t
+        @test maximum(minimum(norm(pg.core.positions[i] - Rθ * x0) for i in gh) for x0 in ghost0) < 1e-12
+        @test all(i -> abs(norm(pg.core.normals[i]) - 1) < 1e-12, gh)
+        sh = at_time(chan, t)
+        inner = [i for i in 1:pg.meta.N if !pg.core.is_boundary[i]]
+        @test all(i -> maximum(abs, pg.core.positions[i]) > 0.3 || signed_distance(sh, pg.core.positions[i]) <= -0.25h + 1e-12, inner)
+        @test minimum(sqrt(minimum(sum(abs2, pg.neighbor.distances[k]) for k in pg.neighbor.ranges[i])) for i in inner) >= 0.5h - 1e-12
+        @test all(i -> 1 - 1e-9 <= pg.rhos[i][1] <= 2 + 1e-9, inner)
+        # the KA CPU backend places the ghosts the same way
+        pgk = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        Xk  = copy(view(pgk.core.positions, 1:pgk.meta.N))
+        place_ghosts!(pgk, Xk, 0.0, 0.3)
+        nk  = copy(view(pgk.core.normals, 1:pgk.meta.N))
+        pgp = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        Xp  = copy(view(pgp.core.positions, 1:pgp.meta.N))
+        try
+            set_backend!(KABackend(HyperCloudCore.KA.CPU(); workgroupsize = 32))
+            place_ghosts!(pgp, Xp, 0.0, 0.3)
+        finally
+            set_backend!(PolyesterBackend())
+        end
+        @test maximum(norm(Xk[i] - Xp[i]) for i in 1:pgp.meta.N) < 1e-14
+        @test maximum(norm(nk[i] - pgp.core.normals[i]) for i in 1:pgp.meta.N) < 1e-14
+        # sweeping needs the ghosts at the new time
+        @test_throws ArgumentError sweep_boundaries!(pgk, 0.0, 0.5, 3)
+        @test sweep_boundaries!(ParticleGrid(get_rectangular_domain(Float64, (0.0,), (1.0,)), (0.1,), ExponentialWeightFunction(1.0, 0.25), 1), 0.0, 0.1, 3) ==
+              (inserted = 0, removed = 0, mass_residual = State{1, Float64}(0.0))
+    end
+
+    @testset "A plate translating with the flow: the solution translates (order 2)" begin
+        eq = LinearAdvection(((1.0,), (0.0,)), Float64)
+        u0(x, t) = 1 + exp(-((mod(x[1] - t + 1, 2.0) - 0.5)^2 + (x[2] - 0.2)^2) / 0.02)
+        function run(N)
+            h = 1 / N
+            plate_shape = Tagged(Cuboid((-0.2, -0.05), (0.2, 0.05)), t -> t + 4)
+            chan  = Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - Moving(plate_shape, translating((1.0, 0.0)))
+            geom  = GeometricDomain(chan; is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5),
+                                    bc_map = BCD(t => MirrorBC(; degree = 1) for t in (3, 4, 5, 6, 7, 8)))
+            pg = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i], 0.0)); end
+            interp = MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux())
+            ts = GeneralRKTimeStepper(eq, interp, MOOD(), RK3_SSP_Tableau(Float64))
+            dt = 0.5 * get_time_step(pg, eq, interp); t = 0.0
+            while t < 0.25 - 1e-12
+                d = min(dt, 0.25 - t); ts(eq, pg, t, d); t += d
+            end
+            inner = [i for i in 1:pg.meta.N if !pg.core.is_boundary[i]]
+            gh = [i for i in 1:pg.meta.N if pg.core.is_boundary[i] && pg.core.tags[i] >= 5]
+            @test all(i -> signed_distance(plate_shape, pg.core.positions[i] - SVector(t, 0.0)) < 0, gh)   # ghosts inside the translated plate
+            @test all(i -> 0.95 <= pg.rhos[i][1] <= 2.05, inner)                  # (the unlimited scheme undershoots by 2e-3)
+            return maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i], t)) for i in inner)
+        end
+        e20, e40 = run(20), run(40)
+        @test e40 < 0.5 * e20 && e40 < 0.08                                    # measured 0.22 / 0.065 at t = 0.5
+    end
+
+    @testset "1-D pistons: receding at the flow speed (exact), advancing into a fluid at rest (sweep)" begin
+        function tube(N, w, bc_face)
+            h = 1 / N
+            piston = Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((w,)))
+            geom   = GeometricDomain(intersect(Tagged(Cuboid((0.0,), (2.0,)), 1), piston); mins = (0.0,), maxs = (2.0,),
+                                     bc_map = BCD(1 => FixedDirichlet(), 2 => bc_face))
+            return ParticleGrid(geom, (h,), ExponentialWeightFunction(1.0, 2.5h), 1), h
+        end
+        # receding at the flow speed: u(x - t) is exact, the content grows by the inflow
+        eq = LinearAdvection(((1.0,),), Float64)
+        u0(x, t) = 1 + exp(-((x - 0.8 - t) / 0.08)^2)
+        function recede(N)
+            pg, h = tube(N, 1.0, MirrorBC(; degree = 1))
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i][1], 0.0)); end
+            interp = MUSCL(Float64, 1, 1, 3, NoLimiter(), RusanovFlux())
+            ts = GeneralRKTimeStepper(eq, interp, MOOD(), RK3_SSP_Tableau(Float64))
+            dt = 0.4 * get_time_step(pg, eq, interp); t = 0.0
+            m0 = interior_mass(pg)[1]
+            while t < 0.5 - 1e-12
+                d = min(dt, 0.5 - t); ts(eq, pg, t, d); t += d
+            end
+            inner = [i for i in 1:pg.meta.N if !pg.core.is_boundary[i]]
+            xs = [pg.core.positions[i][1] for i in inner]
+            @test maximum(xs) <= 1.5 - 0.25h + 1e-12 && maximum(xs) >= 1.5 - 1.5h        # the cloud reaches the face
+            @test abs(interior_mass(pg)[1] - m0 - 0.5) < 0.02                              # the inflow, 1 per unit time
+            return maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i][1], t)) for i in inner)
+        end
+        e50, e100 = recede(50), recede(100)
+        @test e100 < 0.4 * e50 && e100 < 0.1                                                # measured 0.19 / 0.060
+        # advancing into a fluid at rest: particles are removed, none closer than h/4, the volume follows the face,
+        # the content of the swept part is gone (the sweep interpolates, it does not conserve)
+        pg, h = tube(100, -0.5, ExtrapolationBC(1))
+        f(x) = 1 + 0.5 * sin(2π * x)
+        for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(f(pg.core.positions[i][1])); end
+        eq0 = LinearAdvection(((0.0,),), Float64)
+        ts  = GeneralRKTimeStepper(eq0, MUSCL(Float64, 1, 1, 3, NoLimiter(), RusanovFlux()), MOOD(), RK3_SSP_Tableau(Float64))
+        t = 0.0
+        for _ in 1:200; ts(eq0, pg, t, 0.005); t += 0.005; end
+        inner = [i for i in 1:pg.meta.N if !pg.core.is_boundary[i]]
+        xs = sort([pg.core.positions[i][1] for i in inner])
+        @test 48 <= length(inner) <= 51 && xs[end] <= 0.5 - 0.25h + 1e-12 && maximum(diff(xs)) <= 1.5h + 1e-12
+        @test abs(sum(pg.core.volumes[i] for i in inner) - 0.5) < 5h
+        swept = 0.5 - 0.5 / π                                                                 # ∫_{0.5}^{1} f
+        @test abs(interior_mass(pg)[1] - (1.0 - swept)) < 5h
+        @test all(i -> 0.5 - 1e-9 <= pg.rhos[i][1] <= 1.5 + 1e-9, inner)
+    end
+end
+
 @testset "Particle volumes" begin
     @testset "Uniform periodic cloud: every V equals dx" begin
         pg = make_pg_1d(50)

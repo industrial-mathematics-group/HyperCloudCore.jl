@@ -8,6 +8,8 @@ On moving grids, boundary particles keep their positions (their grid velocity is
 
 ## Built-in conditions
 
+On a domain with [moving pieces](@ref "Moving Boundaries") the ghost particles of a piece follow it; the fit-based conditions below evaluate them at the time of the state they build and hand the wall velocity to their operator.
+
 - **`FixedDirichlet`** sets every boundary particle with the given tag back to its value in `pg.rhos`. Because boundary particles are never advanced, this is their initial state.
 - **`OutflowBC`** is a zero-gradient (transmissive) condition using a nearest-donor sweep. Interior particles act as donors; in up to five passes, each unresolved boundary particle with the tag copies the state of its nearest already-resolved neighbour. A boundary particle that finds no donor keeps its initial state.
 - **`ExtrapolationBC(degree)`** is the transmissive condition of polynomial degree `degree` (0–5): the boundary particle takes the value *at its own position* of a one-sided MLS fit through the interior (see below). Degree 0 is the weighted average of the data (the donor and its interior neighbours), close to the donor copy of `OutflowBC`; degree `q` keeps the first `q` derivatives of the interior solution continuous across the boundary. It needs no wall geometry.
