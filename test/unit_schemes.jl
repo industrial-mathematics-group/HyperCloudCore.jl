@@ -914,6 +914,15 @@ end
         bad = Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - Moving(Tagged(Cuboid((-0.2, -0.04), (0.2, 0.04)), 3), rotating(1.0))
         @test_throws ArgumentError ParticleGrid(GeometricDomain(bad; is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5)),
                                                 (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        # a moving piece without ghosts of its own (a piston face on the end of the canvas: the tie goes to the
+        # static piece) is refused
+        flush_face = intersect(Tagged(Cuboid((0.0,), (1.0,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((-0.5,))))
+        @test_throws ArgumentError ParticleGrid(GeometricDomain(flush_face; mins = (0.0,), maxs = (1.0,)), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1)
+        # no interior particle within h/2 of a moving piece at t = 0 (the lattice point on the face is a ghost at h/2)
+        tube = intersect(Tagged(Cuboid((0.0,), (1.5,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((-0.5,))))
+        pgt = ParticleGrid(GeometricDomain(tube; mins = (0.0,), maxs = (1.5,)), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1)
+        @test all(i -> pgt.core.is_boundary[i] || pgt.core.positions[i][1] <= 1 - 0.025 + 1e-12, 1:pgt.meta.N)
+        @test any(i -> pgt.core.is_boundary[i] && pgt.core.tags[i] == 2 && pgt.core.positions[i][1] ≈ 1.025, 1:pgt.meta.N)
 
         # 200 RK3 steps: the plate's ghosts are on the exactly rotated lattice, the normals unit, boundary_time = t;
         # the fluid at rest (velocity 0) so only the sweeps act: the scalar stays within its initial range

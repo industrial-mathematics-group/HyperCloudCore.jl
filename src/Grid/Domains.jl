@@ -308,6 +308,15 @@ function get_points(
         jitter = Space{D, T}(ntuple(d -> rand_f[d] * (rand(rng, T) * 2 - 1), Val(D)))
         pos = wrap(lattice + jitter)
         if geom.is_interior(pos)
+            if geom.shape !== nothing && has_moving_pieces(geom)
+                # An interior point within h/2 of a moving piece (on its face, say) would be covered as soon as the
+                # piece moves: it becomes one of the piece's ghosts half a spacing outside instead
+                φ, _, _, pc = _probe(geom.shape, pos)
+                if pc !== nothing && φ > -h_snap
+                    push!(ghost_candidates, _push_out(geom, pos, h_snap, wrap))
+                    continue
+                end
+            end
             push!(inner_points, pos)
         elseif !iszero(jitter) && geom.is_interior(lattice)
             # The jitter carried an interior lattice point (e.g. one on a wall) across the wall: it is reflected
@@ -373,6 +382,14 @@ function _assign_pieces!(geom::GeometricDomain, positions, tags, is_boundary)
             seen[tag + 1] = true
             geom.piece_of_tag[tag + 1] = k
         end
+    end
+    # A moving piece without a single ghost particle would never move anything: its faces coincide with static
+    # ones (a piston face on the end of the canvas: the tie goes to the first piece) or it lies outside the band
+    for (k, piece) in enumerate(geom.pieces)
+        k in geom.piece_of_tag ||
+            throw(ArgumentError("moving piece $k ($(typeof(piece.shape).name.name)) has no boundary particles: its faces coincide " *
+                                "with those of a static piece (e.g. a piston face on the end of the canvas; extend the canvas beyond " *
+                                "the face) or it lies outside the particle band"))
     end
     return nothing
 end
@@ -462,9 +479,10 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
             any(q -> mindist2(q, s) < cell^2, get(taken, wrapkey(ntuple(d -> k[d] + off[d], Val(D))), ()))
         end
-        # A point on a moving piece would be covered as soon as it moves: it becomes a ghost at h/2 instead
-        clash = clash || _probe(geom.shape, pos)[4] !== nothing
-        if !clash && geom.is_interior(s)
+        if _probe(geom.shape, pos)[4] !== nothing
+            # A point on a moving piece would be covered as soon as it moves: it becomes a ghost at h/2 instead
+            push!(ghosts, _push_out(geom, pos, h_snap, wrap))
+        elseif !clash && geom.is_interior(s)
             push!(inner, s)
             push!(get!(taken, wrapkey(k), Space{D, T}[]), s)
         else
@@ -472,6 +490,18 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         end
     end
     return nothing
+end
+
+# `pos` moved out of the region along the wall normal until it is `h_snap` outside: one push for a point on a
+# face, a second one for a point at a corner (the first push, along one face's normal, slides along the other face)
+function _push_out(geom::GeometricDomain{GEO, D, T}, pos, h_snap::T, wrap) where {GEO, D, T}
+    p = pos
+    for _ in 1:4
+        φ, n, _, _ = _probe(geom.shape, p)
+        φ >= h_snap * (1 - T(1e-6)) && break
+        p = wrap(p + (h_snap - φ) * n)
+    end
+    return p
 end
 
 # The mirror image of `pos` behind the wall (a shape-based domain), or the lattice position it was jittered from
