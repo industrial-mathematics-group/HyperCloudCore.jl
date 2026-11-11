@@ -90,6 +90,9 @@ one reduction per call.
 function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int) where {D, M, T}
     nothing_done = (inserted = 0, removed = 0, mass_residual = zero(State{M, T}))
     pg.meta.N == 0 && return nothing_done
+    (ad.volume_estimator !== nothing && has_moving_pieces(pg.geometry)) &&
+        throw(ArgumentError("adapt_particles!: a volume estimator together with moving pieces is not supported (the " *
+                            "estimators integrate the region at t = 0, the pieces have moved it); use volume_estimator = nothing"))
     _has_adapt_candidates(pg, ad) || return nothing_done
     mass0 = interior_mass(pg)
 

@@ -113,7 +113,21 @@ function GeometricDomain(shape::AbstractShape{D, T};
     all(lo .<= hi) || throw(ArgumentError("GeometricDomain: mins must not exceed maxs"))
     vol = volume === nothing ? _clipped_volume(shape, lo, hi) : T(volume)
     pieces = moving_pieces(shape)
+    _check_moving_frames(shape)
     return GeometricDomain(label, lo, hi, is_per_svec, _ShapeInside(shape), _ShapeTag(shape), bc_map, shape, vol, pieces, Int[])
+end
+
+# The ghosts of a moving piece and its wall velocity use the piece's pose in world coordinates: under `Translated` or
+# `Rotated` the pose is in the wrapper's frame (the ghosts rotated about the world origin, 6 spacings off the body).
+_check_moving_frames(::AbstractShape) = nothing
+_check_moving_frames(u::Union{UnionShape, IntersectionShape}) = foreach(_check_moving_frames, u.shapes)
+_check_moving_frames(g::Union{ComplementShape, Tagged}) = _check_moving_frames(g.shape)
+function _check_moving_frames(g::Union{Translated, Rotated})
+    isempty(moving_pieces(g.shape)) ||
+        throw(ArgumentError("GeometricDomain: a Moving piece inside $(nameof(typeof(g))) is not supported (its motion would be " *
+                            "applied in the wrapper's frame); put the transformation inside Moving, e.g. " *
+                            "Moving(Translated(shape, offset), motion)"))
+    return nothing
 end
 
 # Boundary tags are positive: `0` marks interior particles (the scheme would update such a ghost without a condition)
@@ -394,12 +408,6 @@ function _assign_pieces!(geom::GeometricDomain, positions, tags, is_boundary)
     return nothing
 end
 
-# The motion of the piece a tag belongs to at time `t` (the identity for static tags and domains)
-function _tag_motion(geom::GeometricDomain{GEO, D, T}, tag::Int, t) where {GEO, D, T}
-    k = tag + 1 <= length(geom.piece_of_tag) ? geom.piece_of_tag[tag + 1] : 0
-    k == 0 && return RigidMotion(Val(D), T)
-    return pose(geom.pieces[k], t)
-end
 
 """
     GhostMotion{D, T, L}

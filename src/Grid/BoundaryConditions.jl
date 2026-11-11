@@ -375,7 +375,8 @@ end
             U = clamp.(U, lo, hi)
         end
         if MIRROR
-            wall   = WallPoint(x_i - φ_i * n_i, n_i, φ_i, velocity(gm, x_i))
+            x_w    = x_i - φ_i * n_i                     # the wall point: the body's velocity there, not at the ghost
+            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w))
             buf[i] = _apply_wall_op(op, eq, U, wall)
         else
             buf[i] = U

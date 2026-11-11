@@ -532,7 +532,8 @@ end
 `t = 0` the motion should be the identity). A domain built from a shape with moving pieces moves their ghost
 particles with them every stage, removes interior particles they cover and refills the region they leave
 (see the docs on moving boundaries). The static methods (`signed_distance(m, x)` etc.) evaluate the piece at
-`t = 0`; [`at_time`](@ref) gives the shape at a time. A moving piece must not contain another one.
+`t = 0`; [`at_time`](@ref) gives the shape at a time. A moving piece must not contain another one. A motion in
+another float type than the shape (`rotating(1.0)` on a Float32 shape) is converted to the shape's type.
 """
 struct Moving{D, T, S <: AbstractShape{D, T}, F} <: AbstractShape{D, T}
     shape::S
@@ -544,7 +545,24 @@ struct Moving{D, T, S <: AbstractShape{D, T}, F} <: AbstractShape{D, T}
         return new{D, T, S, F}(shape, motion)
     end
 end
-Moving(shape::AbstractShape{D, T}, motion) where {D, T} = Moving{D, T, typeof(shape), typeof(motion)}(shape, motion)
+function Moving(shape::AbstractShape{D, T}, motion) where {D, T}
+    m0 = motion(zero(T))
+    if m0 isa RigidMotion{D} && !(m0 isa RigidMotion{D, T})
+        motion = _MotionIn{T}(motion)          # e.g. the Float64 default centre of `rotating` on a Float32 shape
+    end
+    return Moving{D, T, typeof(shape), typeof(motion)}(shape, motion)
+end
+
+# A motion converted to the float type `T` of its shape
+struct _MotionIn{T, F}
+    motion::F
+end
+_MotionIn{T}(motion::F) where {T, F} = _MotionIn{T, F}(motion)
+function (m::_MotionIn{T})(t) where {T}
+    r = m.motion(t)
+    D = length(r.c)
+    return RigidMotion(Space{D, T}(r.c), SMatrix{D, D, T, D * D}(r.R), Space{D, T}(r.v), SMatrix{D, D, T, D * D}(r.Ω))
+end
 
 "The pose of the moving piece `m` at time `t`."
 @inline pose(m::Moving{D, T}, t) where {D, T} = m.motion(T(t))::RigidMotion{D, T, D * D}
@@ -615,6 +633,7 @@ moving_pieces(g::Union{ComplementShape, Tagged, Translated, Rotated}) = moving_p
 The velocity of the boundary piece of `shape` nearest to `x` at time `t` (zero for a static piece).
 """
 function wall_velocity(s::AbstractShape{D, T}, x::Space{D, T}, t) where {D, T}
+    _check_moving_frames(s)                   # a pose under Translated/Rotated is in the wrapper's frame
     _, _, _, pc = _probe(at_time(s, t), x)
     pc === nothing && return zero(Space{D, T})
     return body_velocity(pose(pc, t), x)

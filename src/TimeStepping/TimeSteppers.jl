@@ -275,6 +275,54 @@ mood_inadmissible(ts::GeneralRKTimeStepper) = ts.work.inadmissible[]
 # pieces move: their ghost particles are placed every stage (`place_ghosts!`), the interior keeps `grid_velocity` 0.
 @inline _is_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover) || has_moving_pieces(pg.geometry)
 
+# A step starts with the ghosts of the moving pieces and the region at the step's time: a grid is generated at the
+# pieces' poses at t = 0, so a run that starts later (or resumes) first places the ghosts and sweeps the cloud to
+# `t` (the ghosts used to move from `t` by one step only and stay behind their piece for the rest of the run).
+# Moving pieces need a static interior: the volume estimators integrate the region at t = 0, so a grid mover's
+# re-estimated volumes would lose what the pieces uncovered.
+function _sync_boundaries!(pg::ParticleGrid{D, M, T}, t::T, max_order::Int) where {D, M, T}
+    pg.mover isa NoGridMover ||
+        throw(ArgumentError("moving pieces need a static interior cloud (NoGridMover), got $(nameof(typeof(pg.mover))): " *
+                            "the volume estimators integrate the region at t = 0"))
+    tol = 8 * eps(T) * max(one(T), abs(t))
+    (abs(pg.meta.boundary_time - t) <= tol && abs(pg.meta.sweep_time - t) <= tol) && return nothing
+    # In sub-intervals over which no piece moves more than a quarter spacing (the sweep's clearance): one sweep over
+    # a long way lost the uncovered region farther than R from every particle (Σ V 1.9535 for 1.96 after 6 spacings)
+    t0 = pg.meta.boundary_time
+    n  = _sync_substeps(pg, t0, t)
+    for k in 1:n
+        tk = k == n ? t : t0 + (t - t0) * T(k) / T(n)
+        place_ghosts!(pg, pg.core.positions, pg.meta.boundary_time, tk)
+        pg.neighbor(pg)
+        sweep_boundaries!(pg, pg.meta.sweep_time, tk, max_order)
+    end
+    return nothing
+end
+
+# Number of equal sub-intervals of [t0, t] over each of which every piece moves at most a quarter spacing (the
+# displacement of the rigid map, at the canvas corners)
+function _sync_substeps(pg::ParticleGrid{D, M, T}, t0::T, t::T) where {D, M, T}
+    geom, cd = pg.geometry, pg.domain
+    lim = minimum(pg.meta.dx) / 4
+    corners = [Space{D, T}(ntuple(d -> I[d] == 0 ? cd.canvas_mins[d] : cd.canvas_maxs[d], Val(D)))
+               for I in CartesianIndices(ntuple(_ -> 0:1, Val(D)))]
+    function moves(ta, tb)
+        dmax = zero(T)
+        for piece in geom.pieces
+            ma, mb = pose(piece, ta), pose(piece, tb)
+            for x in corners
+                dmax = max(dmax, sqrt(sum(abs2, mb.c + mb.R * (ma.R' * (x - ma.c)) - x)))
+            end
+        end
+        return dmax
+    end
+    n = 1
+    while n < 2^20 && any(k -> moves(t0 + (t - t0) * T(k - 1) / T(n), t0 + (t - t0) * T(k) / T(n)) > lim, 1:n)
+        n *= 2
+    end
+    return n
+end
+
 function update_size!(ts::GeneralRKTimeStepper, N::Int, M_neighbors::Int, moving::Bool)
     ensure_capacity!(ts.rho_n, N)
     ensure_capacity!(ts.rho_cand, N)
@@ -539,6 +587,7 @@ end
 # =========================================================================
 
 function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid, time::Real, dt::T) where {D, M, T}
+    has_moving_pieces(pg.geometry) && _sync_boundaries!(pg, T(time), _extract_order(ts.divergence_interpolator))
     N      = pg.meta.N
     s      = ts.num_stages
     interp = ts.divergence_interpolator
