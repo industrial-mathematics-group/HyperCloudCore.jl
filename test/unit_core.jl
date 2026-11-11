@@ -972,6 +972,32 @@ end
         end
         eo40, eo80 = run_off(40), run_off(80)
         @test eo80 < 0.6 * eo40 && eo80 < 0.025
+        # Ghost gradients: boundary particles take part in the gather pass, so both sides of a wall pair are
+        # reconstructed. With the ghost side piecewise constant the wall rows were first order, and the mirror fed
+        # that back: exact ghost values 4.1e-2 -> 1.4e-2 (N = 40 -> 80, t = 0.5, order 1.5) and the mirror 1.9x the
+        # exact-ghost error; now 4.7e-2 -> 8.7e-3 (order 2.4) and the mirror within 1.2x
+        struct ExactGhosts <: AbstractBoundaryCondition end
+        function (::ExactGhosts)(pg, buf, tag, ts, eq, t)
+            for i in 1:pg.meta.N
+                (pg.core.is_boundary[i] && pg.core.tags[i] == tag) && (buf[i] = State{1, Float64}(u0(pg.core.positions[i], t)))
+            end
+            return nothing
+        end
+        function run_lattice(bc, N)
+            h    = 1 / N
+            geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = (true, false),
+                                          bc_map = Dict{Int, AbstractBoundaryCondition}(3 => bc, 4 => bc))
+            pg   = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i], 0.0)); end
+            interp = MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux())
+            ts = GeneralRKTimeStepper(eqx, interp, MOOD(), RK3_SSP_Tableau(Float64))
+            dt = 0.5 * get_time_step(pg, eqx, interp); t = 0.0
+            while t < 0.5 - 1e-12; d = min(dt, 0.5 - t); ts(eqx, pg, t, d); t += d; end
+            return maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i], t)) for i in interior_indices(pg))
+        end
+        ex40, ex80 = run_lattice(ExactGhosts(), 40), run_lattice(ExactGhosts(), 80)
+        @test ex80 < 0.25 * ex40
+        @test run_lattice(MirrorBC(; degree = 2), 80) < 1.3 * ex80
     end
 
     @testset "Jitter does not push interior points across a wall" begin

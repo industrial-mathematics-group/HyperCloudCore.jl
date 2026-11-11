@@ -326,8 +326,14 @@ function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K
 end
 
 # Kernel bodies of the right-hand side (see Backend.jl): the scheme's pre-pass (cached gradients), then the flux pass.
+# Boundary particles take part in the full gather: their reconstruction gradients enter the interface states of
+# every wall pair. Skipped (gradient zero), the ghost side of a wall pair was piecewise constant and the wall rows
+# first order, and a condition that mirrors the numerical solution fed that error back (a channel wall, MUSCL3,
+# N = 80/160, t = 1: exact ghosts 1.5e-2/7.8e-3 and MirrorBC 3.8e-2/2.9e-2; gathered: 1.6e-2/2.4e-3 and
+# 2.0e-2/2.6e-3). A partial pass (MOOD re-form, same states, changed orders) does not need them: ghost orders
+# never change.
 @inline function _rhs_gather!(p, Y, is_boundary, nb_slices, ib, interp, pg, grad_mask, full)
-    (is_boundary[p] || !(full || grad_mask[p])) && return nothing
+    (full || grad_mask[p]) || return nothing
     fi = Y[p]; nb = nb_slices[p]
     update_content!(interp, p, fi, nb, pg, Y, ib)
     return nothing
