@@ -25,13 +25,14 @@ export VolumeEstimator, ShepardVolumes, MLSVolumes, update_volumes!, interior_ma
 #                    every step).
 #
 # Bounded regions: only the interior particles carry volume, Σ_interior V = |Ω| exactly, and the ghost particles
-# outside Ω get none (V = 0), so Σ V U is the content of the region. Up to 0.9 the ghosts got volumes as well and
+# outside Ω get none (V = 0), so Σ V U is the content of the region. Up to 0.8 the ghosts got volumes as well and
 # the renormalisation ran over all particles, so the interior volumes summed to less than |Ω| by the ghosts'
 # share (4 % in 1-D at h = 1/160, 30-40 % on a 2-D box at N = 20) and the quadrature over the interior was off
-# by that much. Shepard's interior quadrature is first order on a box (a particle on the wall gets a whole cell,
-# 2e-3 in 1-D and 2e-4 in 2-D at N = 40); MLS forms its partition from the interior particles only, so its
-# reproduction holds up to the wall (orders 2 in 1-D, the lattice's midpoint rule, and 3-4 in 2-D). Measured
-# against ∫_Ω f (R = 2.5Δx, docs/src/particle_grids/volumes.md).
+# by that much. Shepard's interior quadrature is first order on a box (a particle on the wall gets a whole cell:
+# about 0.1-0.5 h relative, 4.4e-3 for exp(x + y) on the unit square at N = 40); MLS forms its partition from the
+# interior particles only, so its reproduction holds up to the wall, and the quadrature is of order 2 for every P
+# in 1-D and 2-D (the lattice's midpoint rule). Measured against ∫_Ω f for non-harmonic f (R = 2.5Δx,
+# docs/src/particle_grids/volumes.md; a harmonic f such as exp(x) cos(y) cancels the leading terms).
 
 abstract type VolumeEstimator end
 
@@ -45,7 +46,8 @@ Requires a kernel that is finite at zero distance (`ExponentialWeightFunction`; 
 not suitable).
 
 Exact (`V_i = Δx^D`) on a uniform periodic lattice. On a bounded box the quadrature `Σ V_i f(x_i)` over the
-interior is first order (a particle on the wall gets a whole cell: 2e-3 in 1-D, 2e-4 in 2-D at N = 40). On a jittered
+interior is first order (a particle on the wall gets a whole cell: relative errors of about 0.1-0.5 h, e.g.
+1.4e-2 for `x²` on [0, 1] and 4.4e-3 for `exp(x + y)` on the unit square at N = 40). On a jittered
 periodic cloud it does not converge reliably (error about 2e-3 for N = 40…320 at 30 % jitter). On a cloud
 whose spacing varies smoothly (a moving grid) `S_i` is a
 lattice sum over a fixed number of neighbours, which is not proportional to the local density, so
@@ -53,7 +55,7 @@ lattice sum over a fixed number of neighbours, which is not proportional to the 
 (−2e-3 for a smooth profile on a grid stretched by ±50 %, at every N); use [`MLSVolumes`](@ref) where the
 discrete mass of a moving grid matters, at a higher cost per update.
 
-(Up to 0.9 the ghosts got volumes too and the renormalisation ran over all particles, so the interior volumes
+(Up to 0.8 the ghosts got volumes too and the renormalisation ran over all particles, so the interior volumes
 summed to less than `|Ω|` by the ghosts' share: 4 % in 1-D at h = 1/160, 30-40 % on a 2-D box at N = 20.)
 """
 struct ShepardVolumes <: VolumeEstimator
@@ -71,8 +73,10 @@ lattice is not stored). `P = 0` is the background-integrated Shepard partition.
 The shape functions reproduce polynomials of degree `P`, and on periodic clouds the quadrature `Σ V_i f(x_i)`
 converges at about order `P + 1` for `P ≥ 1`, also on jittered and moving clouds (the discrete mass of a moving
 grid converges; `P = 0` is first order on jittered clouds). On a bounded region the partition is formed by the
-interior particles only (ghosts get no volume), so the reproduction holds up to the wall: measured orders 2 in
-1-D (the lattice's midpoint rule) and 3–4 in 2-D, interior volumes summing to `|Ω|` exactly. The lattice sweep
+interior particles only (ghosts get no volume), so the reproduction holds up to the wall, and the interior
+volumes sum to `|Ω|` exactly. The quadrature is then limited by the lattice's midpoint rule: order 2 in 1-D and
+2-D for every `P` (unit square, `exp(x + y)`, N = 20 → 80: `P = 0` 6.3e-4 → 3.8e-5, `P = 1` 3.0e-3 → 2.0e-4,
+`P = 2` 5.1e-5 → 3.3e-6; `P = 1` is the least accurate on a box). The lattice sweep
 is a serial host loop: as the re-estimation of a moving grid it costs about 3 (1-D) to 20 (2-D) explicit time
 steps of a low-order scheme. On a device grid it runs on a host copy (only the volumes are copied back).
 """
