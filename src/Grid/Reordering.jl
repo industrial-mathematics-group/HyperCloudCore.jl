@@ -46,7 +46,7 @@ Executes a proximity-optimized spatial reordering of the entire particle grid to
 # Details
 - Normalizes the domain coordinates and sorts the permutation buffer using Morton Z-order curves for 2D/3D grids, or simple lexicographical sorting for 1D grids.
 - Bypasses the memory mutation entirely if the permutation buffer is already sorted.
-- Permutes the active range `1:N` of the positions, boundary flags, tags, orders, state vectors, curvatures and volumes
+- Permutes the active range `1:N` of the positions, boundary flags, tags, orders, state vectors, curvatures, volumes and wall geometry
   (the buffers may be longer than `N` after growth), and bumps `pg.meta.geometry_version`.
 - Host only. The neighbour lists are stale afterwards: run `pg.neighbor(pg)` before the next step. Per-particle data
   outside the grid, such as a stepper's `mood_flags`, keep the old order until they are next written.
@@ -91,7 +91,7 @@ function (rd::ReorderData{D})(pg::ParticleGrid{D}) where {D}
     #    adaptivity, or the permutation longer than the grid after `reserve!`), so only `1:N` takes part.
     perm = view(p, 1:N)
     for x in (pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.particle_orders, pg.rhos, pg.curvatures,
-              pg.core.volumes)
+              pg.core.volumes, pg.core.normals, pg.core.wall_distances)
         @assert length(x) >= N "per-particle buffer shorter than the particle count"
         v = view(parent(x), 1:N)
         v .= v[perm]

@@ -28,7 +28,7 @@ The constructor generates the point cloud, reorders the particles along a space-
 | Field | Type | Contents |
 |---|---|---|
 | `pg.meta` | `GridMetadata` | `N`, `N_interior`, `N_ghost`, cutoff `R`, `dx`, largest neighbourhood `max_nb` |
-| `pg.core` | `ParticleGridCore` | `positions`, `is_boundary`, `tags`, `volumes` (partition-of-unity weights, see [Particle Volumes and Adaptivity](@ref)), `particle_orders` |
+| `pg.core` | `ParticleGridCore` | `positions`, `is_boundary`, `tags`, `volumes` (partition-of-unity weights, see [Particle Volumes and Adaptivity](@ref)), `particle_orders`, `normals` and `wall_distances` (wall geometry from the domain's shape, see [Geometric Domains](@ref)) |
 | `pg.neighbor` | `NeighborData` | Weight function and CSR-style lists: `ranges[i]` indexes `indices`, `weights`, `distances` |
 | `pg.bins` | `GlobalBins` | Coarse spatial hash (bin size ≥ `R`) and linked lists for the search |
 | `pg.reorder` | `ReorderData` | Permutation buffers for the Morton reordering |
@@ -54,7 +54,7 @@ A particle is never its own neighbour. For moving grids, `refresh_geometry!` rec
 
 ## Reordering
 
-`pg.reorder(pg)` sorts particles along a Morton Z-curve (2-D/3-D) or by coordinate (1-D) to improve cache locality, then permutes the active range `1:N` of `positions`, `is_boundary`, `tags`, `particle_orders`, `volumes`, `rhos` and `curvatures` in place (the buffers may be longer after growth) and bumps `pg.meta.geometry_version`. It is skipped when the permutation is already the identity. Reordering invalidates the neighbour lists and every per-particle buffer held by a time stepper, so call it **between** time steps and run `pg.neighbor(pg)` afterwards.
+`pg.reorder(pg)` sorts particles along a Morton Z-curve (2-D/3-D) or by coordinate (1-D) to improve cache locality, then permutes the active range `1:N` of `positions`, `is_boundary`, `tags`, `particle_orders`, `volumes`, `normals`, `wall_distances`, `rhos` and `curvatures` in place (the buffers may be longer after growth) and bumps `pg.meta.geometry_version`. It is skipped when the permutation is already the identity. Reordering invalidates the neighbour lists and every per-particle buffer held by a time stepper, so call it **between** time steps and run `pg.neighbor(pg)` afterwards.
 
 ## CFL time step
 

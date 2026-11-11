@@ -55,9 +55,11 @@ end
 
 - `:rectangular`: [`get_rectangular_domain`](@ref) on the box `:mins`, `:maxs`;
 - `:spherical`: [`get_spherical_domain`](@ref) with the midpoint of the box as centre and half its first
-  extent as radius (needs `context[:D]`).
+  extent as radius (needs `context[:D]`);
+- `:shape`: the [`AbstractShape`](@ref) in `:shape` (an instance, or a string of Julia code that evaluates to
+  one), with `:mins`/`:maxs` where the shape is unbounded (optional otherwise).
 
-Both read `:periodic` (`Bool` or `NTuple{D, Bool}`, default `false`) and the boundary conditions
+All read `:periodic` (`Bool` or `NTuple{D, Bool}`, default `false`) and the boundary conditions
 (`:bc`, see [`parse_bc`](@ref)). A [`GeometricDomain`](@ref) among the values of `domain_conf` is returned
 as it is, so a pre-built domain can be passed through the configuration.
 """
@@ -93,6 +95,20 @@ function build_domain(::Val{:rectangular}, domain_conf::Dict, context::Dict)
     req_maxs = Tuple(T.(domain_conf[:maxs]))
     
     return get_rectangular_domain(T, req_mins, req_maxs; bc_map = bc_map, is_periodic = is_per)
+end
+
+function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
+    haskey(domain_conf, :shape) || error("Domain :shape needs the key :shape (an AbstractShape)")
+    shape = domain_conf[:shape]
+    shape isa String && (shape = eval(Meta.parse(shape)))
+    shape isa AbstractShape || error("Domain :shape: :shape must be an AbstractShape, got $(typeof(shape))")
+    T = real_type(context)
+    eltype(shape) == T || @warn "Domain :shape: the shape has element type $(eltype(shape)), the run uses $T"
+    bc_map = parse_bc(domain_conf)
+    is_per = get(domain_conf, :periodic, false)
+    mins = haskey(domain_conf, :mins) ? Tuple(T.(domain_conf[:mins])) : nothing
+    maxs = haskey(domain_conf, :maxs) ? Tuple(T.(domain_conf[:maxs])) : nothing
+    return GeometricDomain(shape; bc_map = bc_map, is_periodic = is_per, mins = mins, maxs = maxs)
 end
 
 function build_domain(::Val{:spherical}, domain_conf::Dict, context::Dict)

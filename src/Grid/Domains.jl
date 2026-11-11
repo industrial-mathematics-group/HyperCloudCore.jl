@@ -1,23 +1,43 @@
-export GeometricDomain, get_rectangular_domain, get_spherical_domain
+export GeometricDomain, get_rectangular_domain, get_spherical_domain, wall_geometry
+
+include("Shapes.jl")
 
 # =========================================================================
 # 1. THE PURE GEOMETRY LAYER
 # =========================================================================
 """
-    GeometricDomain{GEO, D, T, F_Interior, F_Tag}
+    GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
+    GeometricDomain(shape::AbstractShape; bc_map, is_periodic = false, mins = nothing, maxs = nothing, label = Val(:shape))
+    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map)
 
-A pure mathematical abstraction representing the physical shape and boundary regions of the problem space. 
+The physical region of a problem and its boundary pieces: the bounding box, which points are inside, how
+boundary points are tagged, which axes are periodic, and which boundary condition belongs to which tag.
+
+The first constructor describes the region by a signed-distance [`AbstractShape`](@ref) (built-in boxes, balls
+and half spaces, their unions, intersections and differences, translated and rotated copies). Points with
+`signed_distance(shape, x) <= 0` are interior; the others get `boundary_tag(shape, x)`. Every particle of a grid
+built on such a domain stores its outward wall normal and signed wall distance (`pg.core.normals`,
+`pg.core.wall_distances`), which the higher-order conditions [`ExtrapolationBC`](@ref) and [`MirrorBC`](@ref)
+use. The bounding box is that of the shape; along an axis where it is unbounded (open box axes, i.e. periodic
+axes, or shapes cut from half spaces) `mins`/`maxs` must be given. A shape used on a periodic axis must be
+open along it (its ends are no boundary; `Cuboid(...; open = ...)`).
+
+The second constructor takes the interior test `is_interior(x)` and tag function `get_tag(x)` directly (no
+shape; `shape === nothing`). Such a domain has no wall normals (`NaN`), so conditions that need them refuse it
+at grid construction.
 
 # Fields
-- `label::GEO`: The geometric identifier (e.g., `Val(:rectangular)` or `Val(:spherical)`).
+- `label::GEO`: The geometric identifier (e.g., `Val(:rectangular)`, `Val(:spherical)`, `Val(:shape)`), used
+  to dispatch [`domain_volume`](@ref).
 - `mins::Space{D, T}`: The minimal bounding box coordinates.
 - `maxs::Space{D, T}`: The maximal bounding box coordinates.
 - `is_periodic::SVector{D, Bool}`: Periodic boundary flags for each spatial dimension.
-- `is_interior::F_Interior`: A function evaluating whether a given coordinate resides strictly within the geometry.
-- `get_tag::F_Tag`: A function generating integer boundary tags based on spatial location.
+- `is_interior::F_Interior`: A function evaluating whether a given coordinate resides within the geometry.
+- `get_tag::F_Tag`: A function generating integer boundary tags based on spatial location (`0` inside).
 - `bc_map::Dict{Int, AbstractBoundaryCondition}`: A mapping of integer tags to specific boundary condition evaluators.
+- `shape::S`: The [`AbstractShape`](@ref) of the region, or `nothing`.
 """
-struct GeometricDomain{GEO, D, T, F_Interior, F_Tag}
+struct GeometricDomain{GEO, D, T, F_Interior, F_Tag, S}
     label::GEO
     mins::Space{D, T}
     maxs::Space{D, T}
@@ -25,13 +45,38 @@ struct GeometricDomain{GEO, D, T, F_Interior, F_Tag}
     is_interior::F_Interior
     get_tag::F_Tag
     bc_map::Dict{Int, AbstractBoundaryCondition}
+    shape::S
+end
+
+GeometricDomain(label, mins::Space{D, T}, maxs::Space{D, T}, is_periodic::SVector{D, Bool}, is_interior, get_tag,
+                bc_map::Dict{Int, AbstractBoundaryCondition}) where {D, T} =
+    GeometricDomain(label, mins, maxs, is_periodic, is_interior, get_tag, bc_map, nothing)
+
+_periodic_flags(is_periodic::Bool, ::Val{D}) where {D} = SVector{D, Bool}(ntuple(_ -> is_periodic, Val(D)))
+_periodic_flags(is_periodic::NTuple{D, Bool}, ::Val{D}) where {D} = SVector{D, Bool}(is_periodic)
+
+function GeometricDomain(shape::AbstractShape{D, T};
+                         bc_map::Dict{Int, AbstractBoundaryCondition} = Dict{Int, AbstractBoundaryCondition}(),
+                         is_periodic::Union{Bool, NTuple{D, Bool}} = false,
+                         mins = nothing, maxs = nothing, label = Val(:shape)) where {D, T}
+    is_per_svec = _periodic_flags(is_periodic, Val(D))
+    bb_lo, bb_hi = bounding_box(shape)
+    lo = Space{D, T}(ntuple(d -> mins === nothing ? bb_lo[d] : T(mins[d]), Val(D)))
+    hi = Space{D, T}(ntuple(d -> maxs === nothing ? bb_hi[d] : T(maxs[d]), Val(D)))
+    (all(isfinite, lo) && all(isfinite, hi)) ||
+        throw(ArgumentError("GeometricDomain: the shape is unbounded along some axis (bounding box $bb_lo .. $bb_hi); " *
+                            "give mins/maxs, or intersect the shape with a Cuboid"))
+    all(lo .<= hi) || throw(ArgumentError("GeometricDomain: mins must not exceed maxs"))
+    is_interior_func = (pos) -> signed_distance(shape, pos) <= zero(T)
+    tag_func = (pos) -> signed_distance(shape, pos) <= zero(T) ? 0 : boundary_tag(shape, pos)
+    return GeometricDomain(label, lo, hi, is_per_svec, is_interior_func, tag_func, bc_map, shape)
 end
 
 """
-    get_rectangular_domain(::Type{T}, mins, maxs; bc_map)
+    get_rectangular_domain(::Type{T}, mins, maxs; bc_map, is_periodic = false)
 
-Generates a rectangular `GeometricDomain` instance. 
-- Constructs an interior evaluation function enforcing strict Cartesian bounding box constraints.
+Generates a rectangular `GeometricDomain` instance (the [`Cuboid`](@ref) `mins ≤ x ≤ maxs`, open along the periodic
+axes).
 - Tags every boundary point with the face it lies outside of: `2d - 1` for the lower and `2d` for the upper face
   of axis `d`, i.e. 1-D: 1 left, 2 right; 2-D: 1 left, 2 right, 3 bottom, 4 top; 3-D: 1/2 at `x = min/max`, 3/4 at
   `y`, 5/6 at `z`. Outside several faces (edges and corners of the ghost band) the one it is farthest outside of
@@ -51,56 +96,18 @@ function get_rectangular_domain(
     is_periodic::Union{Bool, NTuple{D, Bool}} = false
 ) where {D, T}
     
-    mins_f = Space{D, T}(mins...)
-    maxs_f = Space{D, T}(maxs...)
-
-    is_per_svec = isa(is_periodic, Bool) ? SVector{D, Bool}(ntuple(_ -> is_periodic, Val(D))) : SVector{D, Bool}(is_periodic)
-    
-    is_interior_func = (pos) -> begin
-        for d in 1:D
-            if pos[d] < mins_f[d] || pos[d] > maxs_f[d]
-                return false
-            end
-        end
-        return true
-    end
-
-    # The face the point lies outside of, `2d - 1` (lower) / `2d` (upper) for axis `d`; outside several (edges and
-    # corners of the ghost band), the one it is farthest outside of, the first one on ties. Measuring the distance to
-    # the nearest face *plane* instead (also from inside the box, the former 2-D rule) gave a ghost outside only the
-    # right wall the bottom tag when it was close to the bottom plane. The faces of a periodic axis are no boundary:
-    # ignored (a channel periodic in x used to tag the ghosts near the seam 1/2, which no bc_map entry covered).
-    tag_func = (pos) -> begin
-        if is_interior_func(pos); return 0; end
-        best_tag, best_out = 0, zero(T)
-        for d in 1:D
-            is_per_svec[d] && continue
-            o_lo = mins_f[d] - pos[d]
-            o_hi = pos[d] - maxs_f[d]
-            o_lo > best_out && (best_tag = 2d - 1; best_out = o_lo)
-            o_hi > best_out && (best_tag = 2d; best_out = o_hi)
-        end
-        best_tag > 0 && return best_tag
-        # not outside a non-periodic face (only possible outside a periodic axis): the nearest face plane
-        best_tag, best_d = 1, T(Inf)
-        for d in 1:D
-            is_per_svec[d] && continue
-            d_lo = abs(pos[d] - mins_f[d])
-            d_hi = abs(pos[d] - maxs_f[d])
-            d_lo < best_d && (best_tag = 2d - 1; best_d = d_lo)
-            d_hi < best_d && (best_tag = 2d; best_d = d_hi)
-        end
-        return best_tag
-    end
-
-    return GeometricDomain(Val(:rectangular),mins_f, maxs_f, is_per_svec, is_interior_func, tag_func, bc_map)
+    is_per = _periodic_flags(is_periodic, Val(D))
+    # The box is open along the periodic axes: their ends are no boundary (the former tag function ignored them).
+    # The tag rule of `Cuboid` is the former one: the face the point is farthest outside of, the lower tag on ties.
+    box = Cuboid{D, T}(mins, maxs; open = Tuple(is_per))
+    return GeometricDomain(box; bc_map = bc_map, is_periodic = Tuple(is_per), mins = mins, maxs = maxs,
+                           label = Val(:rectangular))
 end
 
 """
     get_spherical_domain(::Type{T}, center, radius; bc_map)
 
-Generates a spherical (or circular) `GeometricDomain` instance.
-- Employs a squared-distance interior evaluation against the defined center point and radius.
+Generates a spherical (or circular) `GeometricDomain` instance (the [`Ball`](@ref) of `center` and `radius`).
 - Assigns a uniform boundary tag of 1 to all exterior points.
 """
 function get_spherical_domain(
@@ -111,18 +118,7 @@ function get_spherical_domain(
     is_periodic::Union{Bool, NTuple{D, Bool}} = false
 ) where {D, T}
 
-    is_per_svec = isa(is_periodic, Bool) ? SVector{D, Bool}(ntuple(_ -> is_periodic, Val(D))) : SVector{D, Bool}(is_periodic)
-    
-    c_svec = Space{D, T}(center...)
-    r_T = T(radius)
-    
-    mins_f = c_svec .- r_T
-    maxs_f = c_svec .+ r_T
-    
-    is_interior_func = (pos) -> sum(abs2, pos - c_svec) <= r_T^2
-    tag_func = (pos) -> is_interior_func(pos) ? 0 : 1 
-    
-    return GeometricDomain(Val(:spherical), mins_f, maxs_f, is_per_svec, is_interior_func, tag_func, bc_map)
+    return GeometricDomain(Ball{D, T}(center, radius); bc_map = bc_map, is_periodic = is_periodic, label = Val(:spherical))
 end
 
 """
@@ -157,10 +153,10 @@ struct ComputationalDomain{D, T}
 end
 
 function ComputationalDomain(
-    geom::GeometricDomain{GEO, D, T, FI, FT}, 
-    nominal_dx::NTuple{D, Real}, 
+    geom::GeometricDomain{GEO, D, T},
+    nominal_dx::NTuple{D, Real},
     interp_range_factor::Real
-) where {D, T, FI, FT, GEO}
+) where {D, T, GEO}
     
     is_per_svec = geom.is_periodic
     dxs_f = Space{D, T}(nominal_dx...)
@@ -215,17 +211,18 @@ Generates a universal narrow-band particle grid utilizing the spatial canvas def
 - Generates a baseline Cartesian point cloud separated by `nominal_dx`, applying optional random positional offsets.
 - Sorts generated points into interior candidates and ghost candidates using the underlying geometry's `is_interior` functor.
 - Filters exterior ghosts aggressively using a cutoff distance dictated by the `interp_range_factor`, yielding an optimized narrow-band boundary layer rather than filling the entire canvas.
-- Outputs the filtered particle positions alongside their respective boundary booleans, tags, volumes, and effective spacing.
+- Outputs the filtered particle positions alongside their respective boundary booleans, tags, volumes, effective
+  spacing, outward wall normals and signed wall distances (the last two `NaN` for a domain without a shape).
 """
 function get_points(
     cd::ComputationalDomain{D, T},
-    geom::GeometricDomain{GEO, D, T, FI, FT};
-    nominal_dx::NTuple{D, Real}, 
+    geom::GeometricDomain{GEO, D, T};
+    nominal_dx::NTuple{D, Real},
     interp_range_factor::Real,
     randomness::Tuple = ntuple(i -> zero(T), D),
     rng = Random.default_rng(),
-    kwargs... 
-) where {D, T, FI, FT, GEO}
+    kwargs...
+) where {D, T, GEO}
     
     dxs_f = Space{D, T}(nominal_dx...)
     rand_f = Space{D, T}(randomness...)
@@ -275,15 +272,54 @@ function get_points(
     is_boundary = zeros(Bool, N)
     tags = zeros(Int, N)
     volumes = fill(prod(dxs_f), N)
-    
+    normals = Vector{Space{D, T}}(undef, N)
+    wall_distances = Vector{T}(undef, N)
+
     for i in 1:N
         pos = positions[i]
         tag = geom.get_tag(pos)
         tags[i] = tag
         is_boundary[i] = (tag != 0)
+        normals[i], wall_distances[i] = wall_geometry(geom, pos)
     end
-    
-    return positions, is_boundary, tags, volumes, Tuple(dxs_f)
+
+    return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances
+end
+
+"""
+    wall_geometry(geom::GeometricDomain, x) -> (normal, distance)
+
+Outward unit wall normal and signed wall distance (negative inside the region) of the point `x`, from the
+domain's shape; `NaN`s for a domain without a shape. Stored per particle in `pg.core.normals` and
+`pg.core.wall_distances` when a grid is built or particles are inserted.
+
+The signed distance of a combined shape (`max`/`min` of its pieces) is only a bound where several pieces are
+active at once: behind a corner formed by two pieces (outside the floor *and* inside the step of a channel) the
+nearest piece is not the nearest point of the region. The wall point is therefore found by projecting `x` onto
+the active piece and repeating from there until the projection lies on the boundary (at most eight steps);
+the normal is the direction from that point to `x` and the distance its length. For a point whose first
+projection already lies on the boundary (every point of a primitive shape, most points of a combination) the
+shape's own normal and distance are returned unchanged.
+"""
+wall_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}) where {GEO, D, T} =
+    geom.shape === nothing ? (Space{D, T}(ntuple(_ -> T(NaN), Val(D))), T(NaN)) : _wall_geometry(geom.shape, x)
+function _wall_geometry(shape::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
+    φ0, n0, _ = _probe(shape, x)
+    tol = 64 * eps(T) * max(one(T), maximum(abs, x))
+    (abs(φ0) <= tol || !isfinite(φ0)) && return (n0, φ0)     # on the boundary, or no boundary at all (all axes open)
+    p = x - φ0 * n0
+    φp, np, _ = _probe(shape, p)
+    abs(φp) <= tol && return (n0, φ0)            # the projection is on the boundary: the piece's values are exact
+    for _ in 1:7
+        p = p - φp * np
+        φp, np, _ = _probe(shape, p)
+        abs(φp) <= tol && break
+    end
+    d = x - p
+    dist = sqrt(sum(abs2, d))
+    dist <= tol && return (n0, φ0)
+    sgn = φ0 < zero(T) ? -one(T) : one(T)
+    return (sgn * d / dist, sgn * dist)
 end
 
 # Boundary particles whose tag has no condition keep their state (the stage predictor copies `pg.rhos`), and a

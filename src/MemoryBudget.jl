@@ -27,6 +27,7 @@ fixed_arrays(::Any) = ()
 particle_buffers(pg::ParticleGrid, ::Bool) = (
     pg.rhos, pg.curvatures,
     pg.core.positions, pg.core.is_boundary, pg.core.volumes, pg.core.tags, pg.core.particle_orders,
+    pg.core.normals, pg.core.wall_distances,
     pg.shared.rho_buffer, pg.shared.pos_buffer, pg.shared.float_buffer, pg.shared.float_buffer2,
     pg.shared.bit_buffer, pg.shared.int_buffer,
     pg.neighbor.counts, pg.neighbor.offsets, pg.bins.cell_particles, pg.bins.bin_of)
