@@ -449,6 +449,15 @@ end
         @test rm.mixed.pairs == length(nb.ranges[N ÷ 2]) && rm.degree[N ÷ 2] == 1
         @test rm.mixed.rel > 1 > rm.equal.rel && rm.mixed.rel > 2 * rm.equal.rel
         fill!(view(pg.core.particle_orders, 1:N), 0)                         # as constructed
+        # bounded lattice: interior–ghost slots are boundary fluxes (the ghosts carry no volume), counted apart;
+        # the interior pairs of the lattice nearly cancel (measured 4.7e-3, 0.17 when the ghost slots counted)
+        hb  = 0.05
+        box = ParticleGrid(get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0)), (hb, hb), ExponentialWeightFunction(1.0, 2.5hb), 2)
+        fill!(view(box.core.particle_orders, 1:box.meta.N), 3)
+        rb  = HyperCloudCore.conservation_defect(m, box)
+        @test rb.wall.pairs > 0 && rb.onesided.pairs == 0 && rb.total.rel < 1e-2
+        @test all(i -> !box.core.is_boundary[i] || rb.particle[i] == 0, 1:box.meta.N)
+        @test maximum(rb.particle[i] for i in 1:box.meta.N if all(x -> abs(x - 0.5) < 0.5 - 3hb, box.core.positions[i])) < 1e-10
     end
 
     @testset "Conditional regularisation of degenerate stencils" begin
