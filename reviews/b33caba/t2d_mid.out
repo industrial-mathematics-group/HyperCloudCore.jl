@@ -1,0 +1,2 @@
+Float64: ΣV_int 0.5627960 ghosts0 false | Shepard 4.323e-01 (<1.2e-2 false) MLS1 5.205e-02 (<4e-3 false) MLS2 N20 7.239e-03 (<1e-4 false) N40 3.593e-03 ratio 0.496 (<0.3 false) | total 3.729458 interior 2.977439 (≈3 false, == false)
+Float32: ΣV_int 0.5627950 ghosts0 false | Shepard 4.323e-01 (<1.2e-2 false) MLS1 5.205e-02 (<4e-3 false) MLS2 N20 7.239e-03 (<1e-4 false) N40 3.592e-03 ratio 0.496 (<0.3 false) | total 3.729460 interior 2.977443 (≈3 false, == false)

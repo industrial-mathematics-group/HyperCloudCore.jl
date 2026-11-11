@@ -1,0 +1,18 @@
+== /tmp/brev3/r1/old
+u2 1e-4  Mirror2  N=40: err 2.089e-01  drops bottom rows 600 (4.17/step) top 0 far 0  steps 144  test(<0.1 && 0) false
+u2 1e-4  Mirror2  N=80: err 7.429e-02  drops bottom rows 1679 (5.83/step) top 0 far 0  steps 288  test(<0.1 && 0) false
+u2 1e-4  Exact    N=40: err 4.892e-02  drops bottom rows 81 (0.56/step) top 0 far 0  steps 144  test(<0.1 && 0) false
+u2 1e-4  Exact    N=80: err 1.412e-02  drops bottom rows 230 (0.80/step) top 0 far 0  steps 288  test(<0.1 && 0) false
+u1 1e-4  Mirror2  N=40: err 2.088e-01  drops bottom rows 601 (4.17/step) top 0 far 0  steps 144  test(<0.1 && 0) false
+u1 1e-4  Exact    N=40: err 4.892e-02  drops bottom rows 81 (0.56/step) top 0 far 0  steps 144  test(<0.1 && 0) false
+u2 1e-5  Mirror2  N=40: err 2.097e-01  drops bottom rows 1029 (7.15/step) top 0 far 493  steps 144  test(<0.1 && 0) false
+u2 1e-5  Exact    N=40: err 4.843e-02  drops bottom rows 338 (2.35/step) top 0 far 449  steps 144  test(<0.1 && 0) false
+== /tmp/brev3/rr2/trees/new
+u2 1e-4  Mirror2  N=40: err 6.827e-02  drops bottom rows 0 (0.00/step) top 0 far 0  steps 144  test(<0.1 && 0) true
+u2 1e-4  Mirror2  N=80: err 1.033e-02  drops bottom rows 0 (0.00/step) top 0 far 0  steps 288  test(<0.1 && 0) true
+u2 1e-4  Exact    N=40: err 4.743e-02  drops bottom rows 0 (0.00/step) top 0 far 0  steps 144  test(<0.1 && 0) true
+u2 1e-4  Exact    N=80: err 8.687e-03  drops bottom rows 0 (0.00/step) top 0 far 0  steps 288  test(<0.1 && 0) true
+u1 1e-4  Mirror2  N=40: err 2.128e-01  drops bottom rows 564 (3.92/step) top 0 far 0  steps 144  test(<0.1 && 0) false
+u1 1e-4  Exact    N=40: err 5.355e-02  drops bottom rows 49 (0.34/step) top 0 far 0  steps 144  test(<0.1 && 0) false
+u2 1e-5  Mirror2  N=40: err 6.827e-02  drops bottom rows 262 (1.82/step) top 0 far 489  steps 144  test(<0.1 && 0) false
+u2 1e-5  Exact    N=40: err 4.743e-02  drops bottom rows 208 (1.44/step) top 0 far 491  steps 144  test(<0.1 && 0) false

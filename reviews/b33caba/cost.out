@@ -1,0 +1,36 @@
+threads: 8  tree: /tmp/brev3/r1/old/src/HyperCloudCore.jl
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %, unread 656)  min 2.79 med 2.81 ms/step  chk 1.608493762973016e+03
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %, unread 336)  min 3.18 med 3.20 ms/step  chk 4.021233999723541e+02
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %, unread 3458)  min 9.60 med 9.71 ms/step  chk 1.259942857590590e+02
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %, unread 7778)  min 38.00 med 38.23 ms/step  chk 5.160833248803062e+02
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %, unread 896)  min 29.45 med 29.71 ms/step  chk 6.449350526035343e+01
+threads: 8  tree: /tmp/brev3/rr2/trees/new/src/HyperCloudCore.jl
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %, unread 656)  min 2.66 med 2.67 ms/step  chk 1.608493788570853e+03
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %, unread 336)  min 3.25 med 3.28 ms/step  chk 4.021233851736365e+02
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %, unread 3458)  min 9.92 med 10.12 ms/step  chk 1.259939212280348e+02
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %, unread 7778)  min 40.74 med 41.90 ms/step  chk 5.160835010820832e+02
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %, unread 896)  min 35.33 med 35.74 ms/step  chk 6.449284357345996e+01
+threads: 8  tree: /tmp/brev3/rr2/trees/mask/src/HyperCloudCore.jl
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %, unread 656)  min 3.09 med 3.05 ms/step  chk 1.608493788570853e+03
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %, unread 336)  min 3.22 med 3.94 ms/step  chk 4.021233851736365e+02
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %, unread 3458)  min 9.77 med 9.90 ms/step  chk 1.259939212280348e+02
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %, unread 7778)  min 39.09 med 39.62 ms/step  chk 5.160835010820832e+02
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %, unread 896)  min 34.28 med 34.83 ms/step  chk 6.449284357345996e+01
+threads: 8  tree: /tmp/brev3/rr2/trees/new/src/HyperCloudCore.jl
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %, unread 656)  min 2.77 med 2.85 ms/step  chk 1.608493788570853e+03
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %, unread 336)  min 3.19 med 3.34 ms/step  chk 4.021233851736365e+02
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %, unread 3458)  min 9.95 med 10.24 ms/step  chk 1.259939212280348e+02
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %, unread 7778)  min 39.04 med 39.97 ms/step  chk 5.160835010820832e+02
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %, unread 896)  min 34.73 med 35.11 ms/step  chk 6.449284357345996e+01
+threads: 8  tree: /tmp/brev3/rr2/trees/mask/src/HyperCloudCore.jl
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %, unread 656)  min 2.74 med 2.75 ms/step  chk 1.608493788570853e+03
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %, unread 336)  min 3.21 med 3.26 ms/step  chk 4.021233851736365e+02
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %, unread 3458)  min 9.83 med 9.96 ms/step  chk 1.259939212280348e+02
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %, unread 7778)  min 38.76 med 39.46 ms/step  chk 5.160835010820832e+02
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %, unread 896)  min 33.82 med 34.19 ms/step  chk 6.449284357345996e+01
+threads: 8  tree: /tmp/brev3/r1/old/src/HyperCloudCore.jl
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %, unread 656)  min 2.65 med 2.67 ms/step  chk 1.608493762973016e+03
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %, unread 336)  min 3.07 med 3.11 ms/step  chk 4.021233999723541e+02
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %, unread 3458)  min 9.22 med 9.34 ms/step  chk 1.259942857590590e+02
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %, unread 7778)  min 38.10 med 38.19 ms/step  chk 5.160833248803062e+02
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %, unread 896)  min 29.54 med 30.02 ms/step  chk 6.449350526035343e+01

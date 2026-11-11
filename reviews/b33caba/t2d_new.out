@@ -1,0 +1,2 @@
+Float64: ΣV_int 1.0000000 ghosts0 true | Shepard 8.740e-03 (<1.2e-2 true) MLS1 3.020e-03 (<4e-3 true) MLS2 N20 5.123e-05 (<1e-4 true) N40 1.296e-05 ratio 0.253 (<0.3 true) | total 3.000000 interior 3.000000 (≈3 true, == true)
+Float32: ΣV_int 0.9999973 ghosts0 true | Shepard 8.740e-03 (<1.2e-2 true) MLS1 3.021e-03 (<4e-3 true) MLS2 N20 5.136e-05 (<1e-4 true) N40 1.349e-05 ratio 0.263 (<0.3 true) | total 3.000002 interior 3.000002 (≈3 true, == true)

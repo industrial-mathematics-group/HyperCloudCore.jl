@@ -1,0 +1,9 @@
+diff -r /tmp/brev3/rr2/trees/new/src/TimeStepping/TimeSteppers.jl src/TimeStepping/TimeSteppers.jl
+339a340,346
+>     if is_boundary[p]                      # REVIEW PROBE: skip ghosts that no interior particle reads
+>         used = false
+>         @inbounds for k in nb
+>             used |= !is_boundary[pg.neighbor.indices[k]]
+>         end
+>         used || return nothing
+>     end

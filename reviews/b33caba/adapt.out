@@ -1,0 +1,10 @@
+== /tmp/brev3/r1/mid
+D=1 est=none     events 4  |Δtotal - residual| 0.00e+00 (bound 1.53e-13, pass true)  total==interior false
+D=1 est=Shepard  events 4  |Δtotal - residual| 1.17e-03 (bound 1.53e-13, pass false)  total==interior false
+D=2 est=none     events 3  |Δtotal - residual| 6.66e-16 (bound 1.98e-13, pass true)  total==interior false
+D=2 est=Shepard  events 3  |Δtotal - residual| 2.12e-03 (bound 1.98e-13, pass false)  total==interior false
+== /tmp/brev3/rr2/trees/new
+D=1 est=none     events 4  |Δtotal - residual| 0.00e+00 (bound 1.56e-13, pass true)  total==interior true
+D=1 est=Shepard  events 4  |Δtotal - residual| 0.00e+00 (bound 1.56e-13, pass true)  total==interior true
+D=2 est=none     events 3  |Δtotal - residual| 0.00e+00 (bound 2.06e-13, pass true)  total==interior true
+D=2 est=Shepard  events 3  |Δtotal - residual| 0.00e+00 (bound 2.06e-13, pass true)  total==interior true
