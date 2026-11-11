@@ -1,0 +1,6 @@
+u1 1e-3  Exact     N=40: err 5.309e-02 drops/step near 0.3 far 0.0 | N=80: err 9.146e-03 near 0.2 far 0.0
+u1 1e-3  Mirror2   N=40: err 1.241e-01 drops/step near 1.2 far 0.0 | N=80: err 1.035e-02 near 0.0 far 0.0
+u2 1e-3  Exact     N=40: err 4.743e-02 drops/step near 0.0 far 0.0 | N=80: err 8.687e-03 near 0.0 far 0.0
+u2 1e-3  Mirror2   N=40: err 6.827e-02 drops/step near 0.0 far 0.0 | N=80: err 1.033e-02 near 0.0 far 0.0
+u2 1e-4  Exact     N=40: err 4.743e-02 drops/step near 0.0 far 0.0 | N=80: err 8.687e-03 near 0.0 far 0.0
+u2 1e-4  Mirror2   N=40: err 6.827e-02 drops/step near 0.0 far 0.0 | N=80: err 1.033e-02 near 0.0 far 0.0

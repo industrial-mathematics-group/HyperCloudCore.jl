@@ -1,0 +1,26 @@
+== 1-D linear advection a = 1, Gaussian at 0.5; left FixedDirichlet (0), right outflow condition
+MUSCL3 none Outflow   err t=0.4 (pulse at 0.9) N=80/160: 1.072e-01 2.627e-02 | residual max|u| t=1.2: 1.367e-06 2.296e-14
+MUSCL3 none Extrap2   err t=0.4 (pulse at 0.9) N=80/160: 1.072e-01 2.627e-02 | residual max|u| t=1.2: 1.256e-06 1.588e-14
+MUSCL3 bj   Outflow   err t=0.4 (pulse at 0.9) N=80/160: 1.264e-01 3.670e-02 | residual max|u| t=1.2: 1.023e-09 7.789e-17
+MUSCL3 bj   Extrap2   err t=0.4 (pulse at 0.9) N=80/160: 1.264e-01 3.670e-02 | residual max|u| t=1.2: 6.647e-11 5.948e-17
+MUSCL5 none Outflow   err t=0.4 (pulse at 0.9) N=80/160: 1.281e-02 9.615e-03 | residual max|u| t=1.2: 4.373e-09 1.171e-22
+MUSCL5 none Extrap2   err t=0.4 (pulse at 0.9) N=80/160: 1.132e-02 4.879e-04 | residual max|u| t=1.2: 3.246e-09 9.196e-23
+MUSCL5 bj   Outflow   err t=0.4 (pulse at 0.9) N=80/160: 9.763e-02 3.073e-02 | residual max|u| t=1.2: 4.953e-11 6.913e-19
+MUSCL5 bj   Extrap2   err t=0.4 (pulse at 0.9) N=80/160: 9.750e-02 3.073e-02 | residual max|u| t=1.2: 1.202e-11 4.501e-19
+== 1-D inflow step: ghost state 1 at x < 0 (FixedDirichlet), interior 0, a = 1, t = 0.5: max(u) - 1, min(u), err vs step smeared (L1)
+MUSCL3 none  overshoot 1.095e-01  undershoot -9.453e-03  L1 2.049e-02
+MUSCL3 bj    overshoot 4.465e-02  undershoot 5.173e-29  L1 1.701e-02
+MUSCL5 none  overshoot 8.398e-02  undershoot -4.760e-02  L1 1.222e-02
+MUSCL5 bj    overshoot 6.073e-03  undershoot -5.599e-03  L1 8.936e-03
+== 1-D Burgers: u = 1 for x < 0.6, 0 after (shock speed 0.5, leaves at t = 0.8); left Dirichlet 1, right outflow; t = 0.4 and 1.0
+MUSCL3 none Outflow   t=0.4 max 1.2651 min -0.0012 L1 8.037e-03 | t=1.0 max|u-1| 5.233e-05
+MUSCL3 none Extrap2   t=0.4 max 1.2651 min -0.0012 L1 8.037e-03 | t=1.0 max|u-1| NaN
+MUSCL3 bj   Outflow   t=0.4 max 1.0851 min 0.0000 L1 4.595e-03 | t=1.0 max|u-1| 1.217e-06
+MUSCL3 bj   Extrap2   t=0.4 max 1.0851 min 0.0000 L1 4.595e-03 | t=1.0 max|u-1| NaN
+MUSCL5 none Outflow   t=0.4 max 1.3297 min -0.0063 L1 7.583e-03 | t=1.0 max|u-1| 1.747e-05
+MUSCL5 none Extrap2   t=0.4 max 1.3297 min -0.0063 L1 7.583e-03 | t=1.0 max|u-1| NaN
+MUSCL5 bj   Outflow   t=0.4 max 1.0908 min -0.0442 L1 4.426e-03 | t=1.0 max|u-1| 1.904e-07
+MUSCL5 bj   Extrap2   t=0.4 max 1.0908 min -0.0442 L1 4.426e-03 | t=1.0 max|u-1| NaN
+== 2-D: Gaussian moving with (1, 0.5) out of the unit box, all walls OutflowBC / ExtrapolationBC(2), N = 40/80
+Outflow  err t=0.4 (pulse at the wall) N=40/80: 2.051e-01 4.307e-02 | t=1.0 (gone): 1.279e-04 4.444e-08
+Extrap2  err t=0.4 (pulse at the wall) N=40/80: 8.899e+03 2.474e+17 | t=1.0 (gone): 8.270e+24 4.628e+59

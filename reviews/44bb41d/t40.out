@@ -1,0 +1,4 @@
+mid: 1-D: ΣV≈2 true, Shepard ghosts 0 false, MLS ghosts 0 false, err_mls 0.00181 (<2e-5: false), err_shepard 0.145, |quad x| 0.000215 (<2e-5: false)
+mid: 2-D: Σ_int V 0.5628 | Shepard rel f1 0.437 (<5e-4: false), exp(x+y) 0.432 | MLS1 rel f1 0.0497 (<1e-4: false), exp(x+y) 0.0521 | total_mass 2.9999999999999876
+new: 1-D: ΣV≈2 true, Shepard ghosts 0 true, MLS ghosts 0 true, err_mls 6.51e-6 (<2e-5: true), err_shepard 0.0155, |quad x| 8.85e-17 (<2e-5: true)
+new: 2-D: Σ_int V 1.0 | Shepard rel f1 0.000164 (<5e-4: true), exp(x+y) 0.00874 | MLS1 rel f1 2.26e-5 (<1e-4: true), exp(x+y) 0.00302 | total_mass 2.9999999999999964
