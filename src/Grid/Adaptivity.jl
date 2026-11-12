@@ -312,10 +312,12 @@ end
 Radius around an accepted event centre within which no particle may start another event in the same call:
 `R (2 + 2√D) + dx`. Events are remapped one after the other on the old topology, so two remaps are only
 independent if neither sees a particle that the other removes or adds. The remap of an event at `c'` reads
-every particle within `R (1 + 2√D) + dx` of `c'` (its local set: the support of its quadrature box of
-half-width `2R`) and gives a share of its swept content to each of them; a particle that an earlier event
-removed would take that share with it when the particle set is compacted. The changed particles of an event
-lie within `R/2` of its centre, and a later event's centre lies within `R/2` of the particle that starts it,
+every particle within `(R + r_ev) √D + R + dx` of `c'` (its local set: the support of its quadrature box of
+half-width `R + r_ev`, `r_ev ≤ R/2` the reach of the event's particles; the former box of half-width `2R` gave
+`R (1 + 2√D) + dx`, which this spacing keeps) and gives a share of its swept content to each of them; a particle
+that an earlier event removed would take that share with it when the particle set is compacted. The changed
+particles of an event lie within `R/2` of its centre, and a later event's centre lies within `R/2` of the particle
+that starts it,
 hence the extra `R`. Periodic axes wrap (`_collect_near!`). In 1-D this is close to the former `4R`; in 2-D and
 3-D the former `4R` let the local sets of events about `3.5R` apart overlap, which is where calls with
 several events were not exactly conservative.
@@ -408,11 +410,15 @@ end
 #
 # `record` (optional) collects `(index, lo, hi)` for every particle the remap wrote, with the local bounds of
 # its DMP repair: the old index of a survivor, `-a` for the `a`-th entry of `new_pos`.
+# `point_values` (the sweep of moving boundaries): the survivors' volumes follow the event, their states do not (they
+# are point values of a collocation scheme; the conservative update is a cell-average operation that perturbs them by
+# O(h) per event). The new particles take the reconstruction averaged over their share, clipped to the bounds of the
+# old states within R; nothing is redistributed, so the remap is not conservative in this mode.
 function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev::_AdaptEvent{D, T},
                        new_pos::Vector{Space{D, T}}, new_rho::Vector{State{M, T}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
                        record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing,
-                       removed_mask = nothing) where {D, M, T}
+                       removed_mask = nothing, point_values::Bool = false) where {D, M, T}
     nb     = pg.neighbor
     pos    = pg.core.positions
     V      = pg.core.volumes
@@ -428,10 +434,16 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     fill!(view(lmap, 1:pg.meta.N), 0)                 # the neighbour search leaves prefix sums in here
     n_add  = length(ev.added)
 
-    # 1. Local set: every old particle whose shape function can change (within R of the
-    #    quadrature box, whose half-width is 2R)
+    # 1. Local set: every old particle whose shape function can change. The partition changes only within R of a
+    #    removed or added particle, so the quadrature box has the half-width R + r_ev (r_ev: the event's farthest
+    #    particle from its centre; 0 for the sweep's single-particle events, which were integrated over ± 2R: 8× the
+    #    points and local sets of radius 12 h in 3-D) and the local set reaches R beyond the box's corners
+    r_ev = zero(T)
+    for r in ev.removed; r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(pos[r], ev.center, L, Li)))); end
+    for a in ev.added;   r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(a, ev.center, L, Li)))); end
+    half = R + r_ev
     loc_idx, loc_d = Int[], Space{D, T}[]
-    n_loc = _collect_near!(pg, ev.center, (R * (1 + 2 * sqrt(T(D))) + dx)^2, loc_idx, loc_d)
+    n_loc = _collect_near!(pg, ev.center, (half * sqrt(T(D)) + R + dx)^2, loc_idx, loc_d)
     @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = l; end
     # `removed_mask` (the sweep of moving boundaries): particles other events of the same call remove, so that no
     # content is given to a particle that the compaction drops
@@ -464,18 +476,18 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         grads[l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
     end
 
-    # 3. Quadrature over the box center ± 2R (the region at `boundary_time`: moving pieces have been swept)
+    # 3. Quadrature over the box center ± half (the region at `boundary_time`: moving pieces have been swept)
     t_bnd = pg.meta.boundary_time
     δV  = zeros(T, n_loc + n_add)
     δm  = zeros(State{M, T}, n_loc + n_add)
     hq  = dx / ad.samples_per_dx
-    nq  = ceil(Int, 4R / hq)
+    nq  = ceil(Int, 2half / hq)
     ω   = hq^D
     qidx, qd = Int[], Space{D, T}[]
     w_add = zeros(T, n_add)
 
     for I in CartesianIndices(ntuple(_ -> nq, Val(D)))
-        y_raw = Space{D, T}(ntuple(d -> ev.center[d] - 2R + (I[d] - T(0.5)) * hq, Val(D)))
+        y_raw = Space{D, T}(ntuple(d -> ev.center[d] - half + (I[d] - T(0.5)) * hq, Val(D)))
         y = _wrap_point(pg, y_raw)
         _is_interior(geom, y, t_bnd) || continue
         n = _collect_near!(pg, y, R_sq, qidx, qd)
@@ -589,13 +601,18 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
             end
         end
     end
-    _dmp_repair!(Un, [Vn[l] for l in aff], lo_a, hi_a)
+    if point_values
+        for p in eachindex(aff); Un[p] = math_max.(lo_a[p], math_min.(hi_a[p], Un[p])); end
+    else
+        _dmp_repair!(Un, [Vn[l] for l in aff], lo_a, hi_a)
+    end
 
     # 6. Write back
     for (p, l) in enumerate(aff)
         if l <= n_loc
             j = loc_idx[l]
-            V[j] = Vn[l]; U[j] = Un[p]
+            V[j] = Vn[l]
+            point_values || (U[j] = Un[p])
             record === nothing || push!(record, (j, lo_a[p], hi_a[p]))
         else
             push!(new_pos, ev.added[l - n_loc]); push!(new_rho, Un[p]); push!(new_vol, Vn[l])

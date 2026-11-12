@@ -10,11 +10,12 @@ const _WARNED_SWEEP = Ref(false)
 #   * its ghost particles are placed at the piece's pose at every stage time (`place_ghosts!`, exact rigid
 #     motion of the positions and normals from the step start: no drift);
 #   * after each step the region's volumes follow the pieces (what they covered leaves the interior particles,
-#     what they uncovered joins them with the reconstructed state), then the interior particles a piece has
-#     covered, or come closer to than a quarter spacing, are removed and the region it has left is refilled with
-#     the lattice points of the canvas that are at least half a spacing inside and half a spacing from every
-#     particle, through the conservative remap of the adaptivity in rounds of independent events; the static
-#     walls' ghosts are added where a piece uncovered their band (`sweep_boundaries!`).
+#     what they uncovered joins them), then the interior particles a piece has covered, or come closer to than a
+#     quarter spacing, are removed and the region it has left is refilled with the lattice points of the canvas that
+#     are at least half a spacing inside and half a spacing from every particle, through the remap of the adaptivity
+#     in rounds of independent events, with the states of the remaining particles untouched (point values; the
+#     inserted ones get the local reconstruction); the static walls' ghosts are added where a piece uncovered their
+#     band (`sweep_boundaries!`).
 # The boundary conditions see the ghosts at the time of the state they build (`tag_motion`), with the wall
 # velocity in the `WallPoint`.
 
@@ -49,19 +50,19 @@ end
 end
 
 # The region changed between `t_old` and `t`: the lattice points (spacing dx / samples_per_dx) a piece has covered
-# leave the interior particles that shared them, volume and content alike (the content there is the limited linear
-# reconstruction of the nearest interior particle), and the points it has uncovered join them with the reconstructed
-# state. Once per sweep over the union of the boxes, before the events, so that no point is counted twice (the
-# remaps of neighbouring events overlap). The partition is that of the interior particles (ghosts excluded, as in
-# the volume estimators). A particle whose whole share is gone keeps its state; it is removed right after.
+# leave the volumes of the interior particles that shared them, the points it has uncovered join them. Once per sweep
+# over the union of the boxes, before the events, so that no point is counted twice (the remaps of neighbouring events
+# overlap). The partition is that of the interior particles (ghosts excluded, as in the volume estimators). The states
+# are point values and are left alone: blending them with the reconstructed content of the swept points (a cell-average
+# operation) perturbed every particle within R of a face at every step, and the scheme amplified the perturbations into
+# an error behind a receding face that did not converge (0.06 at N = 40 ... 160; 0.03 / 0.018 / 0.018 without the
+# blending, see `sweep_boundaries!`). A particle whose whole share is gone is removed right after.
 function _update_region!(hg::ParticleGrid{D, M, T}, geom, t_old::T, t::T, boxes, samples_per_dx::Int) where {D, M, T}
     N    = hg.meta.N
-    nb   = hg.neighbor
     pos  = hg.core.positions
     isb  = hg.core.is_boundary
     V    = hg.core.volumes
-    U    = hg.rhos
-    wf   = nb.weight_func
+    wf   = hg.neighbor.weight_func
     R_sq = hg.meta.R^2
     dx   = minimum(hg.meta.dx)
     hq   = dx / samples_per_dx
@@ -97,64 +98,27 @@ function _update_region!(hg::ParticleGrid{D, M, T}, geom, t_old::T, t::T, boxes,
     local_id = hg.shared.int_buffer
     fill!(view(local_id, 1:N), 0)
     for (l, i) in enumerate(near); local_id[i] = l; end
-    # Limited linear reconstruction of the interior particles in the boxes (as the remap does for its local set)
-    n_near = length(near)
-    grads  = Vector{SVector{D, State{M, T}}}(undef, n_near)
-    lo     = Vector{State{M, T}}(undef, n_near)
-    hi     = Vector{State{M, T}}(undef, n_near)
-    df     = Vector{State{M, T}}(undef, length(nb.indices))
-    for (l, j) in enumerate(near)
-        sl = nb.ranges[j]
-        mn, mx = U[j], U[j]
-        for k in sl
-            uk = U[nb.indices[k]]
-            df[k] = uk - U[j]
-            mn = math_min.(mn, uk); mx = math_max.(mx, uk)
-        end
-        lo[l], hi[l] = mn, mx
-        g = isempty(sl) ? zero(SVector{D, State{M, T}}) : Interpolator{D, 1, 1}()(sl, nb.distances, nb.weights, df; scale = dx)
-        grads[l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
-    end
-    δV = zeros(T, n_near)
-    δm = zeros(State{M, T}, n_near)
+    δV = zeros(T, length(near))
     idx, dvec = Int[], Space{D, T}[]
     for (y, in_new) in changed
         n = _collect_near!(hg, y, R_sq, idx, dvec)
         S = zero(T)
-        jstar, dstar = 0, T(Inf)
         @inbounds for k in 1:n
-            l = local_id[idx[k]]
-            l == 0 && continue
-            d2 = sum(abs2, dvec[k])
-            S += wf(d2)
-            d2 < dstar && (jstar = k; dstar = d2)
+            local_id[idx[k]] == 0 || (S += wf(sum(abs2, dvec[k])))
         end
-        (S > 0 && jstar != 0) || continue
-        lstar = local_id[idx[jstar]]
-        u_rec = U[near[lstar]]
-        @inbounds for d in 1:D
-            u_rec -= dvec[jstar][d] * grads[lstar][d]          # dvec = x_j − y
-        end
-        u_rec = math_max.(lo[lstar], math_min.(hi[lstar], u_rec))
+        S > 0 || continue
         sgn = in_new ? one(T) : -one(T)
         @inbounds for k in 1:n
             l = local_id[idx[k]]
             l == 0 && continue
-            dφ = sgn * ω * wf(sum(abs2, dvec[k])) / S
-            δV[l] += dφ
-            δm[l] += dφ * u_rec
+            δV[l] += sgn * ω * wf(sum(abs2, dvec[k])) / S
         end
     end
     for (l, j) in enumerate(near)
         Vn = V[j] + δV[l]
-        if Vn > T(1e-12) * V[j]
-            U[j] = math_max.(lo[l], math_min.(hi[l], (V[j] * U[j] + δm[l]) / Vn))
-            V[j] = Vn
-        else
-            V[j] = zero(T)          # its whole share is covered: it is removed below and hands out nothing (keeping
-        end                         # the old volume put region that no longer exists back onto its neighbours)
-    end
-    fill!(view(local_id, 1:N), 0)
+        V[j] = Vn > T(1e-12) * V[j] ? Vn : zero(T)   # its whole share is covered: it is removed below and hands out
+    end                                              # nothing (keeping the old volume put region that no longer exists back
+    fill!(view(local_id, 1:N), 0)                    # onto its neighbours)
     return nothing
 end
 
@@ -169,19 +133,22 @@ now covers, or that lie closer than `clearance` spacings to it, are removed; lat
 inside the region, at least `min_gap` spacings from every moving piece and from every remaining particle are
 inserted (the lattice points of a static wall lie on the wall, as in the initial cloud).
 
-Two steps. First the **region**: on a lattice with `samples_per_dx` points per spacing, the points a piece has
-covered since the last sweep (`pg.meta.sweep_time`) leave the interior particles that shared them, volume and
-content alike (the content there is the limited linear reconstruction of the nearest interior particle), and the
-points it has uncovered join them with the reconstructed state. The particle volumes therefore follow the region
-(the interior volumes sum to its volume up to the quadrature), the content of the covered part is gone and the
-uncovered part appears with the local state: a consistent interpolation, as a collocation scheme needs at a moving
-wall. The transport of the swept fluid is the equations' business, through the wall velocity in the
-[`WallPoint`](@ref) of the conditions; enforcing the old content on the new region instead flattened the
-solution around every insertion. Then the **topology**: each removal and insertion is the conservative remap of
-the adaptivity on the new region (`_remap_event!`): a removed particle's remaining share of the region and its
-content go to its neighbours, an inserted particle takes its share from them. The removals run in rounds of
-independent events (centres at least the adaptivity's event spacing apart, `_event_spacing`), each round followed by
-the topology change and a neighbour search, so that every remap sees the particles the earlier ones removed; the
+Two steps, and the interior particles' states are point values that neither touches: a particle that stays keeps
+its state (the sweep rewrote it, as the volume-weighted blend with the reconstructed content of the swept points,
+and the scheme amplified the perturbations into an error behind a receding face that did not converge). First the
+**region**: on a lattice with `samples_per_dx` points per spacing, the points a piece has covered since the last
+sweep (`pg.meta.sweep_time`) leave the volumes of the interior particles that shared them and the points it has
+uncovered join them, so that the particle volumes follow the region (the interior volumes sum to its volume up to
+the quadrature). Then the **topology**: each removal and insertion is the remap of the adaptivity on the new region
+(`_remap_event!` with `point_values = true`): a removed particle's remaining share of the region goes to its
+neighbours, an inserted particle takes its share from them and its state is the limited linear reconstruction of
+its neighbourhood averaged over that share, clipped to the old states within `R`; the states of the others stay.
+The content of what a piece covered is gone, what it uncovered appears with the local state: an interpolation,
+as a collocation scheme needs at a moving wall; the transport of the swept fluid is the equations' business,
+through the wall velocity in the [`WallPoint`](@ref) of the conditions (enforcing the old content on the new region,
+a conservative remap, flattened the solution around every insertion). The removals run in rounds of independent
+events (centres at least the adaptivity's event spacing apart, `_event_spacing`), each round followed by the
+topology change and a neighbour search, so that every remap sees the particles the earlier ones removed; the
 insertions follow in rounds of their own. Last, the ghosts of the static walls are added where a piece uncovered their
 band (lattice points outside a static wall, within the band of the interior, state of the nearest ghost of the
 same tag). `mass_residual` is the change of `interior_mass` over the call: the content of what was covered and
@@ -434,7 +401,7 @@ function _sweep_round!(hg::ParticleGrid{D, M, T}, ad, events::Vector{_AdaptEvent
     new_pos, new_rho, new_vol = Space{D, T}[], State{M, T}[], T[]
     length(df) < length(hg.neighbor.indices) && resize!(df, length(hg.neighbor.indices))
     for ev in events
-        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask)
+        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask, point_values = true)
     end
     _apply_topology!(hg, mask, new_pos, new_rho, new_vol, max_order)
     hg.neighbor(hg)
