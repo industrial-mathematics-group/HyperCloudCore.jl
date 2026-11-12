@@ -1,0 +1,12 @@
+== MUSCL3, R = 2.5h; per N: max err at t = 0.25/0.5/1 [ (y-wall)/h of the max at t=1 | max err for y-wall > 5h at t = 1 ]
+frac 0.00 Exact    N= 40  2.667e-02 4.005e-02 5.753e-02  [ 1.95 | 2.693e-02 ]
+frac 0.00 Exact    N= 80  1.394e-02 1.417e-02 1.395e-02  [ 0.00 | 1.070e-02 ]
+frac 0.00 Exact    N=160  7.545e-03 9.159e-03 1.065e-02  [ 0.12 | 2.360e-03 ]
+frac 0.00 Mirror2  N= 40  3.608e-02 6.228e-02 9.918e-02  [ 0.07 | 2.803e-02 ]
+frac 0.00 Mirror2  N= 80  2.144e-02 2.288e-02 2.725e-02  [ 0.06 | 1.041e-02 ]
+frac 0.00 Mirror2  N=160  1.271e-02 1.952e-02 3.526e-02  [ 0.09 | 3.050e-03 ]
+frac 0.00 Outflow  N= 40  5.223e-02 8.548e-02 1.119e-01  [ 0.17 | 3.018e-02 ]
+frac 0.00 Outflow  N= 80  3.070e-02 3.221e-02 4.031e-02  [ 0.00 | 1.227e-02 ]
+frac 0.00 Outflow  N=160  1.802e-02 3.677e-02 6.279e-02  [ 0.12 | 4.842e-03 ]
+┌ Warning: bc_map and boundary tags do not match: no boundary particle carries tag(s) [3], so their condition is never applied; the boundary particles carry tag(s) [4] (boxes tag the face `2d - 1` / `2d` of axis `d`; up to 0.7.9 1-D and 3-D boxes tagged every boundary particle 1, see get_rectangular_domain).
+└ @ HyperCloudCore /tmp/brev3/r1/old/src/Grid/Domains.jl:468

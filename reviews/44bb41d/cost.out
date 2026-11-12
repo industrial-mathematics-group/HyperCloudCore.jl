@@ -1,0 +1,16 @@
+== old
+threads: 8
+2D N= 80 MUSCL3  particles   7557 ghosts   996 (13 %)  0.98 ms/step
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %)  3.67 ms/step
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %)  3.00 ms/step
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %)  9.27 ms/step
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %)  38.00 ms/step
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %)  29.20 ms/step
+== mid
+threads: 8
+2D N= 80 MUSCL3  particles   7557 ghosts   996 (13 %)  0.76 ms/step
+2D N=160 MUSCL3  particles  27877 ghosts  1956 (7 %)  4.05 ms/step
+2D N= 80 MUSCL5  particles   7557 ghosts   996 (13 %)  3.16 ms/step
+3D N= 20 MUSCL3  particles  18799 ghosts  9538 (51 %)  9.58 ms/step
+3D N= 32 MUSCL3  particles  58003 ghosts 22066 (38 %)  39.70 ms/step
+3D N= 16 MUSCL5  particles  11883 ghosts  6970 (59 %)  35.56 ms/step

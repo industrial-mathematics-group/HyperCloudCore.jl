@@ -1,0 +1,18 @@
+== par
+box lattice (test)           total 1.719e-01 (pairs 6610) equal 1.711e-01 mixed 2.000e+00 (764) onesided 0 wall -1 | max near 6.607e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+box lattice, drops at wall   total 2.193e-01 (pairs 6610) equal 1.353e-01 mixed 1.671e+00 (1334) onesided 0 wall -1 | max near 1.141e+00 deep 0.000e+00 ghost 0.000e+00 nan 0
+box jitter 0.3               total 6.194e-01 (pairs 6225) equal 6.172e-01 mixed 2.000e+00 (753) onesided 0 wall -1 | max near 9.646e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+periodic jitter 0.3          total 4.998e-01 (pairs 3812) equal 4.998e-01 mixed 0.000e+00 (0) onesided 0 wall -1 | max near 8.322e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+channel (periodic x)         total 8.724e-02 (pairs 5180) equal 8.724e-02 mixed 0.000e+00 (320) onesided 0 wall -1 | max near 3.936e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+disc n=40                    total 1.115e-01 (pairs 16402) equal 1.112e-01 mixed 2.000e+00 (1060) onesided 0 wall -1 | max near 6.010e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+disc n=40 jitter 0.3         total 5.524e-01 (pairs 15727) equal 5.513e-01 mixed 2.000e+00 (1162) onesided 0 wall -1 | max near 9.137e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+1-D [0,1] N=40               total 8.041e-02 (pairs 91) equal 8.041e-02 mixed 0.000e+00 (4) onesided 0 wall -1 | max near 5.236e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+== new
+box lattice (test)           total 4.669e-03 (pairs 3958) equal 4.669e-03 mixed 0.000e+00 (0) onesided 0 wall 904 | max near 7.549e-02 deep 0.000e+00 ghost 0.000e+00 nan 0
+box lattice, drops at wall   total 6.245e-02 (pairs 3958) equal 4.379e-03 mixed 1.497e+00 (221) onesided 0 wall 904 | max near 1.167e+00 deep 0.000e+00 ghost 0.000e+00 nan 0
+box jitter 0.3               total 4.985e-01 (pairs 3807) equal 4.985e-01 mixed 0.000e+00 (0) onesided 0 wall 800 | max near 9.075e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+periodic jitter 0.3          total 4.998e-01 (pairs 3812) equal 4.998e-01 mixed 0.000e+00 (0) onesided 0 wall 0 | max near 8.322e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+channel (periodic x)         total 2.177e-03 (pairs 3980) equal 2.177e-03 mixed 0.000e+00 (0) onesided 0 wall 440 | max near 1.729e-02 deep 0.000e+00 ghost 0.000e+00 nan 0
+disc n=40                    total 2.170e-02 (pairs 12406) equal 2.170e-02 mixed 0.000e+00 (0) onesided 0 wall 1432 | max near 1.933e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+disc n=40 jitter 0.3         total 4.862e-01 (pairs 11889) equal 4.862e-01 mixed 0.000e+00 (0) onesided 0 wall 1315 | max near 9.077e-01 deep 0.000e+00 ghost 0.000e+00 nan 0
+1-D [0,1] N=40               total 2.509e-03 (pairs 79) equal 2.509e-03 mixed 0.000e+00 (0) onesided 0 wall 6 | max near 4.722e-02 deep 0.000e+00 ghost 0.000e+00 nan 0

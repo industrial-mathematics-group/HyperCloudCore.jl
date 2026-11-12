@@ -1,0 +1,9 @@
+disc r=1         none    ins  8 rem  4  mass_residual -3.6e-15  Δtotal -3.6e-15  Δinterior -3.6e-15  Vint 3.141593 -> 3.141593 (|Ω| 3.141593)  Vghost 0.000
+disc r=1         Shepard ins  8 rem  4  mass_residual -1.1e-14  Δtotal -1.1e-14  Δinterior -1.1e-14  Vint 3.141593 -> 3.141593 (|Ω| 3.141593)  Vghost 0.000
+disc r=1         MLS2    ins  8 rem  4  mass_residual 4.0e-15  Δtotal 4.0e-15  Δinterior 4.0e-15  Vint 3.141593 -> 3.141593 (|Ω| 3.141593)  Vghost 0.000
+box minus disc   none    ins  6 rem  2  mass_residual 1.1e-15  Δtotal 1.1e-15  Δinterior 1.1e-15  Vint 1.833812 -> 1.833812 (|Ω| 1.833812)  Vghost 0.000
+box minus disc   Shepard ins  6 rem  2  mass_residual 1.6e-15  Δtotal 1.6e-15  Δinterior 1.6e-15  Vint 1.833812 -> 1.833812 (|Ω| 1.833812)  Vghost 0.000
+box minus disc   MLS2    ins  6 rem  2  mass_residual -2.2e-16  Δtotal -2.2e-16  Δinterior -2.2e-16  Vint 1.833812 -> 1.833812 (|Ω| 1.833812)  Vghost 0.000
+box 1.03 x 1.01  none    ins  4 rem  0  mass_residual -2.2e-16  Δtotal -2.2e-16  Δinterior -2.2e-16  Vint 1.040300 -> 1.040300 (|Ω| 1.040300)  Vghost 0.000
+box 1.03 x 1.01  Shepard ins  4 rem  0  mass_residual 2.2e-16  Δtotal 2.2e-16  Δinterior 2.2e-16  Vint 1.040300 -> 1.040300 (|Ω| 1.040300)  Vghost 0.000
+box 1.03 x 1.01  MLS2    ins  4 rem  0  mass_residual -2.2e-16  Δtotal -2.2e-16  Δinterior -2.2e-16  Vint 1.040300 -> 1.040300 (|Ω| 1.040300)  Vghost 0.000

@@ -1,0 +1,4 @@
+par: list start 0 items: ["**No ghosts close to the wall.** A ghost much less"]
+par: list start 1 items: ["**The fit is centred at the target point** and wei", "**The degree margin** (1.5× the unknowns): an exac", "**The bound of `MirrorBC`**: the mirrored value is"]
+new: list start 0 items: ["**No ghosts close to the wall.** A ghost much less"]
+new: list start 1 items: ["**The fit is centred at the target point** and wei", "**The degree margin** (1.5× the unknowns): an exac", "**The bound of `MirrorBC`**: the mirrored value is"]

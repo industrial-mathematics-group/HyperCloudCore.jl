@@ -111,7 +111,9 @@ What it costs and what it does not do:
 weights every particle currently uses (its `particle_orders` entry, so MOOD drops are included) and reports
 the relative antisymmetry defect $\sum |S_{ij} + S_{ji}| / \sum |S_{ij}|$ of the face vectors
 $S_{ij} = 2 V_i c_{ij}$, per particle and split into pairs of equal degree, pairs of different degree and
-one-sided pairs. On a lattice the equal-degree defect is round-off; on a jittered cloud it grows with the
+one-sided pairs. Only pairs of interior particles count: a slot to a boundary (ghost) particle, which carries no
+volume and is not updated, is a flux through the boundary and is only counted (`wall`). On a lattice the
+equal-degree defect is round-off away from walls; on a jittered cloud it grows with the
 jitter; a pair whose particles use different degrees has a defect of order one, which is why MOOD drops
 next to full-order particles cost mass.
 

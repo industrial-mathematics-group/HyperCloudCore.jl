@@ -1,0 +1,3 @@
+2D N=80: ghosts 996, not read by any interior flux 336 (34 %)
+3D N=16: ghosts 6514, not read by any interior flux 2402 (37 %)
+3D N=32: ghosts 22066, not read by any interior flux 7778 (35 %)

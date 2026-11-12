@@ -1,0 +1,18 @@
+== /tmp/brev3/rr2/trees/new
+jit  seed 7 mirror 0.273 / 0.0631 / 0.00999
+jit  seed 7 exact  0.154 / 0.0429 / 0.00836
+jit  seed 1 mirror 0.263 / 0.0639 / 0.0103
+jit  seed 1 exact  0.166 / 0.047 / 0.00848
+jit  seed 2 mirror 0.252 / 0.0665 / 0.00967
+jit  seed 2 exact  0.159 / 0.0431 / 0.0087
+off  seed 0 mirror 0.378 / 0.115 / 0.0195
+off  seed 0 exact  0.23 / 0.0744 / 0.0158
+== /tmp/brev3/r1/old
+jit  seed 7 mirror 0.279 / 0.0602 / 0.029
+jit  seed 7 exact  0.16 / 0.0367 / 0.0149
+jit  seed 1 mirror 0.264 / 0.0524 / 0.0321
+jit  seed 1 exact  0.148 / 0.0412 / 0.0177
+jit  seed 2 mirror 0.24 / 0.0744 / 0.0232
+jit  seed 2 exact  0.145 / 0.044 / 0.0128
+off  seed 0 mirror 0.364 / 0.0953 / 0.0245
+off  seed 0 exact  0.211 / 0.0616 / 0.0126
