@@ -1,0 +1,1 @@
+max |U_KA - U_default| = 1.33e-15 ; ghost gradients: max |g| 7.81e+01, max diff 1.29e-12

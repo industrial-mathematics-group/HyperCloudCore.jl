@@ -1,0 +1,8 @@
+table 6: rows 3 cells per row [5, 5, 5]
+  last row, cell count 5; cell 6+ present: false
+table 9: rows 3 cells per row [5, 5, 5]
+  last row, cell count 5; cell 6+ present: false
+paragraph with 'Up to 0.8 the ghosts got volumes': false
+rendered contains jitter sentence: false; contains Up to 0.8 the ghosts got volumes: false
+source contains: true
+parent rendered contains jitter sentence: true

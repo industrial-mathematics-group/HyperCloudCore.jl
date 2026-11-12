@@ -1,0 +1,6 @@
+1D N=80 MUSCL5 R=2.5h: ghosts 6, lowered 4 (orders [3, 4]), of which neighbours of interior particles 2; interior lowered 0
+1D N=80 MUSCL5 R=3.5h: ghosts 8, lowered 2 (orders [4]), of which neighbours of interior particles 0; interior lowered 0
+1D N=80 MUSCL3 R=2.5h: ghosts 6, lowered 0 (orders Int64[]), of which neighbours of interior particles 0; interior lowered 0
+2D N=40 MUSCL5 R=2.5h: ghosts 516, lowered 176 (orders [4]), of which neighbours of interior particles 0; interior lowered 0
+2D N=40 MUSCL3 R=2.5h: ghosts 516, lowered 0 (orders Int64[]), of which neighbours of interior particles 0; interior lowered 0
+3D N=16 MUSCL3 R=2.5h: ghosts 6514, lowered 0 (orders Int64[]), of which neighbours of interior particles 0; interior lowered 0

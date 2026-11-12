@@ -1183,7 +1183,7 @@ end
         @test all(i -> !ghost[i] || pg.core.volumes[i] == 0, 1:N)
         @test all(v -> v >= 0, view(pg.core.volumes, 1:N))
         # The partition is formed by the interior particles, so quadratics are reproduced up to the wall (the
-        # lattice's midpoint rule is what is left). Up to 0.9 the ghosts were part of the partition and their
+        # lattice's midpoint rule is what is left). Up to 0.8 the ghosts were part of the partition and their
         # negative volumes were clamped, which cost the exactness near the boundary (errors of 1e-3).
         err_mls = abs(quad(x -> x^2) - 2 / 3)
         @test err_mls < 2e-5
@@ -1199,15 +1199,29 @@ end
         pg   = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
         N    = pg.meta.N
         inner = interior_indices(pg)
-        f(x) = exp(x[1]) * cos(x[2]); If = (exp(1) - 1) * sin(1)
+        # Not a harmonic f: for exp(x) cos(y) the leading terms of the lattice midpoint rule (∝ ∫ Δf) and Shepard's
+        # wall terms cancel, and the errors look one to two orders smaller than they are
+        f(x) = exp(x[1] + x[2]); If = (exp(1) - 1)^2
         quad = () -> sum(pg.core.volumes[i] * f(pg.core.positions[i]) for i in inner)
         @test sum(pg.core.volumes[i] for i in inner) ≈ 1.0
         @test all(i -> !pg.core.is_boundary[i] || pg.core.volumes[i] == 0, 1:N)
-        @test abs(quad() - If) / If < 5e-4                            # Shepard: 1.6e-4 (was 0.44)
+        @test abs(quad() - If) / If < 1.2e-2                          # Shepard: 8.7e-3, first order (was 0.43)
         update_volumes!(pg, MLSVolumes(1))
         @test sum(pg.core.volumes[i] for i in inner) ≈ 1.0 && all(i -> !pg.core.is_boundary[i] || pg.core.volumes[i] == 0, 1:N)
-        @test abs(quad() - If) / If < 1e-4                            # 2.3e-5
-        @test total_mass(set_ic!(pg, x -> 3.0))[1] ≈ 3.0               # the content of the region, ghosts excluded
+        @test abs(quad() - If) / If < 4e-3                            # 3.0e-3
+        update_volumes!(pg, MLSVolumes(2))
+        err20 = abs(quad() - If) / If
+        @test err20 < 1e-4                                            # 5.1e-5
+        # second order (the lattice midpoint rule) for every degree: 5.1e-5 -> 1.3e-5 at N = 40
+        pg40   = ParticleGrid(geom, (h / 2, h / 2), ExponentialWeightFunction(1.0, 1.25h), 1; volume_estimator = MLSVolumes(2))
+        inner40 = interior_indices(pg40)
+        err40  = abs(sum(pg40.core.volumes[i] * f(pg40.core.positions[i]) for i in inner40) - If) / If
+        @test err40 < 0.3 * err20
+        # the content of the region: ghosts excluded (a ghost state of 100 must not enter, also not through a
+        # renormalisation that makes the volumes of all particles sum to |Ω|)
+        set_ic!(pg, x -> 3.0)
+        for i in 1:N; pg.core.is_boundary[i] && (pg.rhos[i] = State{1, Float64}(100.0)); end
+        @test total_mass(pg)[1] ≈ 3.0 && total_mass(pg) == interior_mass(pg)
     end
 
     @testset "Quadrature order on a jittered periodic cloud (no ghosts)" begin
@@ -1387,8 +1401,9 @@ end
         @test all(i -> ghost(i) || 1 - 1e-12 <= pg.rhos[i][1] <= 2 + 1e-12, 1:pg.meta.N)
 
         # Jittered boxes with many events next to the walls, with and without the stepper's volume estimator: the
-        # estimator also changes ghost volumes, whose content change used to be put onto the interior (interior
-        # content off by ~1e-3 of the total in 1-D and 2-D); it stays with the ghosts now.
+        # estimator used to change ghost volumes, whose content change was put onto the interior (interior content
+        # off by ~1e-3 of the total in 1-D and 2-D). The ghosts carry no volume now, so total_mass is the interior
+        # content and its change is the reported residual.
         for (D, n) in ((1, 20), (2, 16)), est in (nothing, ShepardVolumes())
             bcD   = Dict{Int, AbstractBoundaryCondition}(t => FixedDirichlet() for t in 1:2D)
             geomD = get_rectangular_domain(Float64, ntuple(_ -> 0.0, D), ntuple(_ -> 1.0, D); bc_map = bcD)
@@ -1405,11 +1420,13 @@ end
             inner() = sum(i -> pgD.core.volumes[i] * pgD.rhos[i][1], filter(!gD, 1:pgD.meta.N))
             scale   = sum(i -> pgD.core.volumes[i] * abs(pgD.rhos[i][1]), 1:pgD.meta.N)
             c0  = inner()
+            m0  = total_mass(pgD)[1]
             rep = adapt_particles!(pgD, ParticleAdaptivity(Float64; volume_estimator = est), kmax)
             @test rep.inserted + rep.removed > 0
             @test Dict(pgD.core.positions[i] => pgD.rhos[i] for i in 1:pgD.meta.N if gD(i)) == states0
             @test abs(inner() - c0) < 1e-13 * scale
             @test abs(rep.mass_residual[1]) < 1e-13 * scale            # reports the interior content
+            @test abs((total_mass(pgD)[1] - m0) - rep.mass_residual[1]) < 1e-13 * scale && total_mass(pgD) == interior_mass(pgD)
         end
     end
 
