@@ -57,7 +57,10 @@ end
 - `:spherical`: [`get_spherical_domain`](@ref) with the midpoint of the box as centre and half its first
   extent as radius (needs `context[:D]`);
 - `:shape`: the [`AbstractShape`](@ref) in `:shape` (an instance, or a string of Julia code that evaluates to
-  one), with `:mins`/`:maxs` where the shape is unbounded (optional otherwise).
+  one, in which `T` is the run's float type: `"Ball((T(0), T(0)), T(0.5))"` works for Float32 and Float64), with
+  `:mins`/`:maxs` where the shape is unbounded (optional otherwise; several statements separated by `;` work, and
+  `T` shadows a global `T` of `Main`). A string is also what the parameter hash sees in full: the motion of a
+  `Moving` piece is a function, which the hash of an instance does not see.
 
 All read `:periodic` (`Bool` or `NTuple{D, Bool}`, default `false`) and the boundary conditions
 (`:bc`, see [`parse_bc`](@ref)). A [`GeometricDomain`](@ref) among the values of `domain_conf` is returned
@@ -97,13 +100,23 @@ function build_domain(::Val{:rectangular}, domain_conf::Dict, context::Dict)
     return get_rectangular_domain(T, req_mins, req_maxs; bc_map = bc_map, is_periodic = is_per)
 end
 
+# `;`-separated statements parse into (nested) `:toplevel` expressions, which `eval` runs outside an enclosing `let`
+_toplevel_to_block(ex) = ex isa Expr && ex.head === :toplevel ? Expr(:block, map(_toplevel_to_block, ex.args)...) : ex
+
 function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
     haskey(domain_conf, :shape) || error("Domain :shape needs the key :shape (an AbstractShape)")
     shape = domain_conf[:shape]
+    T = real_type(context)
     # A string is evaluated in `Main`, where the user's own shape types live (HyperCloudCore's shapes are visible
-    # there through `using HyperCloud`/`using HyperCloudCore`); HyperCloudCore itself if `Main` doesn't know a name
+    # there through `using HyperCloud`/`using HyperCloudCore`); HyperCloudCore itself if `Main` doesn't know a name.
+    # `T` is bound to the run's float type.
     if shape isa String
-        ex = Meta.parse(shape)
+        body = Meta.parseall(shape)                       # statements separated by `;` or newlines
+        bad = findfirst(a -> a isa Expr && a.head in (:incomplete, :error), body.args)
+        bad === nothing ||
+            throw(ArgumentError("Domain :shape: the string is not valid Julia code: " * sprint(showerror, body.args[bad].args[1])))
+        body = _toplevel_to_block(body)
+        ex = :(let T = $T; $body; end)
         shape = try
             Core.eval(Main, ex)
         catch e
@@ -112,7 +125,6 @@ function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
         end
     end
     shape isa AbstractShape || error("Domain :shape: :shape must be an AbstractShape, got $(typeof(shape))")
-    T = real_type(context)
     eltype(shape) == T ||
         error("Domain :shape: the shape has element type $(eltype(shape)), the run uses $T; build the shape in $T")
     haskey(context, :D) && ndims(shape) != context[:D] &&
