@@ -982,14 +982,16 @@ end
             return sweep_boundaries!(pg, pg.meta.sweep_time, t, 3)
         end
         inner(pg) = [i for i in 1:pg.meta.N if !pg.core.is_boundary[i]]
-        # one sweep that removes a whole row (20 particles): the particles away from the face keep their state and
-        # volume (all events at once on the old topology changed them by 0.2 and by factors 0.5-2.8 up to 12 h away)
+        # one sweep that removes a whole row (20 particles): every particle that stays keeps its state (point values:
+        # the remap's conservative update changed them by 0.023 up to 6 h from the face, and all events at once on
+        # the old topology by 0.2 up to 12 h), the particles away from the face keep their volume (at once: factors
+        # 0.5-2.8)
         pg = piston_grid(-0.5)
         before = Dict(pg.core.positions[i] => (pg.rhos[i][1], pg.core.volumes[i]) for i in inner(pg))
         r = advance!(pg, 1.5h)                                          # the face at 1 - 0.75 h
         @test r.removed >= 20
+        @test all(i -> pg.rhos[i][1] == before[pg.core.positions[i]][1], inner(pg))
         far = [i for i in inner(pg) if pg.core.positions[i][1] < 1 - 6h]
-        @test maximum(abs(pg.rhos[i][1] - before[pg.core.positions[i]][1]) for i in far) < 0.04             # measured 0.023
         @test all(i -> 0.92 < pg.core.volumes[i] / before[pg.core.positions[i]][2] < 1.08, far)               # 0.95 .. 0.99
         # receding, periodic across the face: the box spans the periodic axis; every lattice point once (the seam
         # was inserted twice, coincident particles) and the volumes follow the region
@@ -1102,6 +1104,36 @@ end
         @test all(i -> signed_distance(plate_shape, pg.core.positions[i] - SVector(0.305, 0.0)) < 0, gh)
         @test all(i -> signed_distance(plate_shape, pg.core.positions[i] - SVector(0.305, 0.0)) >= 0.25h - 1e-12, inner)
         @test abs(sum(pg.core.volumes[i] for i in inner) - 1.96) < 1e-9                                       # measured 3.5e-14
+    end
+
+    @testset "A piston receding at the flow speed along walls: the uncovered part converges" begin
+        # Data consistent with every condition (zero normal derivative on the face and the walls). The sweep must not
+        # rewrite the states of the particles that stay: the conservative remap blended every particle within R of the
+        # face with the swept content at every step, and the scheme amplified that into 0.055 / 0.061 three to six
+        # spacings behind the face (N = 40 / 80, non-convergent); point values give 0.021 / 0.018 there and
+        # 0.088 / 0.053 next to the face (first order at the moving face).
+        uc(x, t) = 1 + 0.5 * cos(2π * (x[1] - t - 1)) * cos(2π * x[2])
+        eq = LinearAdvection(((1.0,), (0.0,)), Float64)
+        function recede2d(N)
+            h = 1 / N
+            piston = Moving(Tagged(HalfSpace((1.0, 0.0), (1.0, 0.0)), 5), translating((1.0, 0.0)))
+            geom = GeometricDomain(intersect(Cuboid((0.0, 0.0), (2.0, 0.5)), piston); mins = (0.0, 0.0), maxs = (2.0, 0.5),
+                                   bc_map = BCD(1 => FixedDirichlet(), 2 => FixedDirichlet(), (t => MirrorBC(; degree = 1) for t in 3:5)...))
+            pg = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(uc(pg.core.positions[i], 0.0)); end
+            ts = GeneralRKTimeStepper(eq, MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux()), MOOD(), RK3_SSP_Tableau(Float64))
+            dt = 0.4h; t = 0.0
+            while t < 0.5 - 1e-12; d = min(dt, 0.5 - t); ts(eq, pg, t, d); t += d; end
+            face = 1 + t
+            inner = [i for i in 1:pg.meta.N if !pg.core.is_boundary[i] && pg.core.positions[i][1] > t + 0.2]
+            e(i) = abs(pg.rhos[i][1] - uc(pg.core.positions[i], t))
+            @test abs(sum(pg.core.volumes[i] for i in 1:pg.meta.N if !pg.core.is_boundary[i]) - 0.5 * face) < h^2   # the region's volume
+            return maximum(e, inner), maximum(e(i) for i in inner if 3h <= face - pg.core.positions[i][1] < 6h)
+        end
+        e40, b40 = recede2d(40)
+        e80, b80 = recede2d(80)
+        @test e80 < 0.75 * e40 && e80 < 0.07
+        @test b40 < 0.035 && b80 < 0.03
     end
 
     @testset "1-D pistons: receding at the flow speed (exact), advancing into a fluid at rest (sweep)" begin
