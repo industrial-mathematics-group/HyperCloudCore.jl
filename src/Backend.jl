@@ -69,6 +69,13 @@ Selects how the per-particle loops run: an `ExecutionBackend`, or a `KernelAbstr
 set_backend!(backend::ExecutionBackend) = (_BACKEND[] = backend)
 set_backend!(backend::KA.Backend; kwargs...) = set_backend!(KABackend(backend; kwargs...))
 
+# The backend to launch the kernels of a grid's own arrays with: the session backend, unless that is a device
+# backend and the grid lives on the host (`device_grid(Array, pg)`: the sweep of moving boundaries searches the
+# neighbours of its host copy between its rounds, which was launched on the device and failed on the host arrays)
+_launch_backend(pg) = _launch_backend(get_backend(), parent(pg.core.positions))
+_launch_backend(b::ExecutionBackend, ::AbstractArray) = b
+_launch_backend(b::KABackend, x::AbstractArray) = KA.get_backend(x) == b.backend ? b : PolyesterBackend()
+
 """
     KernelView
 

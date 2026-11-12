@@ -103,6 +103,18 @@ end
 # `;`-separated statements parse into (nested) `:toplevel` expressions, which `eval` runs outside an enclosing `let`
 _toplevel_to_block(ex) = ex isa Expr && ex.head === :toplevel ? Expr(:block, map(_toplevel_to_block, ex.args)...) : ex
 
+# Anonymous functions in the string (`Tagged(box, t -> t + 4)`, a motion `t -> RigidMotion(...)`) are wrapped in
+# `_Latest`: `Core.eval` defines them in a world newer than the running build, and calling them from it was a
+# MethodError ("method too new to be called from this world context"). Named functions defined in the string are
+# not wrapped: define them in the session instead.
+_wrap_closures(ex) = ex
+function _wrap_closures(ex::Expr)
+    ex.head === :quote && return ex
+    args = map(_wrap_closures, ex.args)
+    anonymous = ex.head === :-> || (ex.head === :function && !(args[1] isa Expr && args[1].head === :call))
+    return anonymous ? Expr(:call, GlobalRef(@__MODULE__, :_Latest), Expr(ex.head, args...)) : Expr(ex.head, args...)
+end
+
 function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
     haskey(domain_conf, :shape) || error("Domain :shape needs the key :shape (an AbstractShape)")
     shape = domain_conf[:shape]
@@ -115,7 +127,7 @@ function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
         bad = findfirst(a -> a isa Expr && a.head in (:incomplete, :error), body.args)
         bad === nothing ||
             throw(ArgumentError("Domain :shape: the string is not valid Julia code: " * sprint(showerror, body.args[bad].args[1])))
-        body = _toplevel_to_block(body)
+        body = _wrap_closures(_toplevel_to_block(body))
         ex = :(let T = $T; $body; end)
         shape = try
             Core.eval(Main, ex)

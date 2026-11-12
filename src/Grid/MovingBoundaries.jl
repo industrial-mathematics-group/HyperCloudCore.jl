@@ -321,7 +321,7 @@ function _refresh_static_ghosts!(hg::ParticleGrid, geom, t, inbox)
         hg.core.is_boundary[i] && inbox(hg.core.positions[i]) || continue
         tag = hg.core.tags[i]
         (tag + 1 <= length(pot) && pot[tag + 1] != 0) && continue
-        hg.core.normals[i], hg.core.wall_distances[i] = wall_geometry(geom, hg.core.positions[i], t)
+        hg.core.normals[i], hg.core.wall_distances[i] = _ghost_geometry(geom, hg.core.positions[i], t)
     end
     return nothing
 end

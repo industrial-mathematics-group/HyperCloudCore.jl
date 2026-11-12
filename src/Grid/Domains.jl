@@ -314,6 +314,20 @@ function get_points(
     # Points less than h/2 outside a wall (shape-based domains) are snapped onto it, see `_snap_near_wall!`
     h_snap = minimum(dxs_f) / 2
     near_wall = Space{D, T}[]
+    # An interior point within h/2 of a moving piece (on its face, say, or jittered or reflected next to it) would be
+    # covered as soon as the piece moves: it becomes one of the piece's ghosts half a spacing outside instead
+    moving = geom.shape !== nothing && has_moving_pieces(geom)
+    function add_interior!(p)
+        if moving
+            φ, _, _, pc = _probe(geom.shape, p)
+            if pc !== nothing && φ > -h_snap
+                push!(ghost_candidates, _push_out(geom, p, h_snap, wrap))
+                return nothing
+            end
+        end
+        push!(inner_points, p)
+        return nothing
+    end
     for I in CartesianIndices(Ns_total)
         lattice = Space{D, T}(ntuple(Val(D)) do d
             j = I[d] - 1
@@ -322,16 +336,7 @@ function get_points(
         jitter = Space{D, T}(ntuple(d -> rand_f[d] * (rand(rng, T) * 2 - 1), Val(D)))
         pos = wrap(lattice + jitter)
         if geom.is_interior(pos)
-            if geom.shape !== nothing && has_moving_pieces(geom)
-                # An interior point within h/2 of a moving piece (on its face, say) would be covered as soon as the
-                # piece moves: it becomes one of the piece's ghosts half a spacing outside instead
-                φ, _, _, pc = _probe(geom.shape, pos)
-                if pc !== nothing && φ > -h_snap
-                    push!(ghost_candidates, _push_out(geom, pos, h_snap, wrap))
-                    continue
-                end
-            end
-            push!(inner_points, pos)
+            add_interior!(pos)
         elseif !iszero(jitter) && geom.is_interior(lattice)
             # The jitter carried an interior lattice point (e.g. one on a wall) across the wall: it is reflected
             # back inside instead of becoming a ghost that sits almost on the wall. Such ghosts (about half of a
@@ -339,7 +344,7 @@ function get_points(
             # with them MirrorBC did not converge (channel along a wall, N = 20/40/80: max error 0.32/0.32/0.35)
             # and OutflowBC lost accuracy (0.23 at N = 80), without them both converge (0.28/0.062/0.023 and
             # 0.032, exact ghosts 0.026).
-            push!(inner_points, _reflect_inside(geom, pos, lattice, wrap))
+            add_interior!(_reflect_inside(geom, pos, lattice, wrap))     # (a reflected point can land within h/2 of a moving piece)
         elseif geom.shape !== nothing && signed_distance(geom.shape, pos) < h_snap
             # (the signed distance is a lower bound of the wall distance outside a combined shape)
             push!(near_wall, pos)
@@ -368,7 +373,7 @@ function get_points(
         tag = geom.get_tag(pos)
         tags[i] = tag
         is_boundary[i] = (tag != 0)
-        normals[i], wall_distances[i] = wall_geometry(geom, pos)
+        normals[i], wall_distances[i] = _ghost_geometry(geom, pos)
     end
     _assign_pieces!(geom, positions, tags, is_boundary)
 
@@ -414,8 +419,9 @@ end
 
 The rigid displacement of a boundary piece between two instants, as the kernels see it: a point `x` at the
 first instant is at `move(gm, x) = c_to + R (x - c_from)` at the second, a normal `n` at `rotate(gm, n) = R n`,
-and the piece's velocity at the world point `x` at the second instant is `velocity(gm, x) = v + Ω (x - c_to)`.
-`GhostMotion(D, T)` is the identity at rest.
+and the piece's velocity at the world point `x` at the second instant is `velocity(gm, x) = v + Ω (x - c_to)`,
+its acceleration `acceleration(gm, x) = a + (Ω̇ + Ω²) (x - c_to)` (`a`, `Ω̇`: the time derivatives of the pose's
+`v` and `Ω` at the second instant). `GhostMotion(D, T)` is the identity at rest.
 """
 struct GhostMotion{D, T, L}
     R::SMatrix{D, D, T, L}
@@ -423,21 +429,27 @@ struct GhostMotion{D, T, L}
     c_to::Space{D, T}
     v::Space{D, T}
     Ω::SMatrix{D, D, T, L}
+    a::Space{D, T}
+    Ωdot::SMatrix{D, D, T, L}
 end
 GhostMotion(::Val{D}, ::Type{T}) where {D, T} =
-    GhostMotion(SMatrix{D, D, T, D * D}(I), zero(Space{D, T}), zero(Space{D, T}), zero(Space{D, T}), zero(SMatrix{D, D, T, D * D}))
-GhostMotion(from::RigidMotion{D, T, L}, to::RigidMotion{D, T, L}) where {D, T, L} =
-    GhostMotion{D, T, L}(to.R * from.R', from.c, to.c, to.v, to.Ω)
+    GhostMotion(SMatrix{D, D, T, D * D}(I), zero(Space{D, T}), zero(Space{D, T}), zero(Space{D, T}), zero(SMatrix{D, D, T, D * D}),
+                zero(Space{D, T}), zero(SMatrix{D, D, T, D * D}))
+GhostMotion(from::RigidMotion{D, T, L}, to::RigidMotion{D, T, L},
+            a::Space{D, T} = zero(Space{D, T}), Ωdot::SMatrix{D, D, T, L} = zero(SMatrix{D, D, T, L})) where {D, T, L} =
+    GhostMotion{D, T, L}(to.R * from.R', from.c, to.c, to.v, to.Ω, a, Ωdot)
 @inline move(gm::GhostMotion, x) = gm.c_to + gm.R * (x - gm.c_from)
 @inline rotate(gm::GhostMotion, n) = gm.R * n
 @inline velocity(gm::GhostMotion, x) = gm.v + gm.Ω * (x - gm.c_to)
+@inline acceleration(gm::GhostMotion, x) = gm.a + (gm.Ωdot + gm.Ω * gm.Ω) * (x - gm.c_to)
 
 "The displacement of the piece of `tag` from time `t_from` to `t_to` (the identity for static tags)."
 function tag_motion(geom::GeometricDomain{GEO, D, T}, tag::Int, t_from, t_to) where {GEO, D, T}
     k = tag + 1 <= length(geom.piece_of_tag) ? geom.piece_of_tag[tag + 1] : 0
     k == 0 && return GhostMotion(Val(D), T)
     m = geom.pieces[k]
-    return GhostMotion(pose(m, t_from), pose(m, t_to))::GhostMotion{D, T, D * D}
+    a, Ωdot = _pose_derivatives(m, T(t_to))
+    return GhostMotion(pose(m, t_from), pose(m, t_to), a, Ωdot)::GhostMotion{D, T, D * D}
 end
 
 # One `GhostMotion` per tag (index `tag + 1`), as a tuple for the kernels (bits; the tag count is small)
@@ -527,7 +539,9 @@ end
 
 Outward unit wall normal and signed wall distance (negative inside the region) of the point `x`, from the
 domain's shape; `NaN`s for a domain without a shape. Stored per particle in `pg.core.normals` and
-`pg.core.wall_distances` when a grid is built or particles are inserted.
+`pg.core.wall_distances` when a grid is built or particles are inserted, except behind a convex edge or corner
+(outside two faces), where a ghost stores the face its tag names instead: that face's normal and the distance to
+its plane (see [`MirrorBC`](@ref)).
 
 The signed distance of a combined shape (`max`/`min` of its pieces) is only a bound where several pieces are
 active at once: behind a corner formed by two pieces (outside the floor *and* inside the step of a channel, or
@@ -576,6 +590,28 @@ function _wall_geometry(shape::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
     dist <= tol && return (n0, φ0)
     sgn = φ0 < zero(T) ? -one(T) : one(T)
     return (sgn * d / dist, sgn * dist)
+end
+
+# The geometry a particle stores (`pg.core.normals`, `pg.core.wall_distances`): the nearest wall point's
+# (`wall_geometry`), except for a point behind a convex corner or edge (outside two faces), which gets the face its
+# tag names (the one it is farther outside of): that face's normal, and the distance along it to the face's plane
+# through the nearest wall point. A ghost is then reflected in its own face, and the operator of a `MirrorBC` sees
+# that face's normal. The point reflection through the corner, with the diagonal normal to it, gave the operator a
+# normal that is right for neither face: a slip wall turned the velocity along the wall into the wall at the corner
+# with an inflow, and a uniform flow did not survive it. The mirror point now lies behind the other face, outside
+# the region, where the fit extrapolates the interior (exactly for linear data).
+function _ghost_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}, t = zero(T)) where {GEO, D, T}
+    geom.shape === nothing && return (Space{D, T}(ntuple(_ -> T(NaN), Val(D))), T(NaN))
+    shape = at_time(geom.shape, t)
+    n, φ = _wall_geometry(shape, x)
+    tol = 64 * eps(T) * max(one(T), maximum(abs, x))
+    (isfinite(φ) && φ > tol) || return (n, φ)
+    nf = _probe(shape, x)[5]
+    c  = sum(n .* nf)
+    c >= 1 - T(1e-10) && return (n, φ)         # outside one face: the nearest point lies on it
+    φf = φ * c                                 # (x - p) ⋅ n_face: the distance to the face's plane through p
+    φf > tol || return (n, φ)                  # (the face's plane does not separate x from p: keep the nearest point)
+    return (nf, φf)
 end
 
 # A boundary point near `p` by alternating projections onto the active piece (converges like cos² of the corner

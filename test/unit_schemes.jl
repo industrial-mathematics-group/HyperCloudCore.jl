@@ -1028,6 +1028,22 @@ end
         @test_throws ArgumentError sweep_boundaries!(pgp, 0.0, 0.85, 3)
     end
 
+    @testset "Jittered clouds keep the clearance of moving pieces" begin
+        # The jitter, and the reflection of a jittered point back inside, put interior particles within 0.01 h of a
+        # moving piece at t = 0: covered at the first sweep, with a warning that blamed the time step. They are the
+        # piece's ghosts half a spacing outside instead, as the lattice points on its face are.
+        h = 1 / 40
+        disc = Tagged(Ball((0.5, 0.25), 0.1), 5)
+        geom = GeometricDomain(Cuboid((0.0, 0.0), (1.0, 0.5)) - Moving(disc, translating((1.0, 0.0))); mins = (0.0, 0.0), maxs = (1.0, 0.5),
+                               bc_map = BCD(t => MirrorBC(; degree = 1) for t in 1:5))
+        for seed in (1, 7)
+            pg = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; randomness = (0.2h, 0.2h), rng = MersenneTwister(seed))
+            dmin = minimum(signed_distance(disc, pg.core.positions[i]) for i in 1:pg.meta.N if !pg.core.is_boundary[i])
+            @test dmin >= 0.5h - 1e-12
+            @test all(i -> !(pg.core.is_boundary[i] && pg.core.tags[i] == 5) || signed_distance(disc, pg.core.positions[i]) <= -0.5h * (1 - 1e-6), 1:pg.meta.N)
+        end
+    end
+
     @testset "Moving pieces: frames, float types, wall velocity, refused combinations" begin
         ball = Tagged(Ball((0.0, 0.0), 0.2), 5)
         # a Moving piece under a transformation would move in the wrapper's frame: refused
@@ -1052,6 +1068,25 @@ end
         gh = [i for i in 1:pg.meta.N if pg.core.is_boundary[i] && pg.core.tags[i] >= 5]
         xw(i) = pg.core.positions[i] - pg.core.wall_distances[i] * pg.core.normals[i]
         @test maximum(abs(buf[i][1] - wall_velocity(chan, xw(i), 0.0)[2]) for i in gh) < 1e-12
+        # ... and the body's acceleration there: centripetal for a rotation, zero for a uniform translation, c̈ for an
+        # oscillating piston (by central differences of the pose), through `wall_acceleration` and the kernels' GhostMotion
+        ax(eq, U, wall) = State{1, Float64}(wall.acceleration[1])
+        geom_a = GeometricDomain(chan; is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5),
+                                 bc_map = BCD(t => MirrorBC(ax; degree = 1) for t in (3, 4, 5, 6, 7, 8)))
+        pga = ParticleGrid(geom_a, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        bufa = copy(pga.rhos)
+        for tag in 5:8; MirrorBC(ax; degree = 1)(pga, bufa, tag, nothing, eq0, 0.0); end      # (at t = 0: the stored ghosts)
+        gha = [i for i in 1:pga.meta.N if pga.core.is_boundary[i] && pga.core.tags[i] >= 5]
+        xwa(i) = pga.core.positions[i] - pga.core.wall_distances[i] * pga.core.normals[i]
+        @test maximum(abs(bufa[i][1] - wall_acceleration(chan, xwa(i), 0.0)[1]) for i in gha) < 1e-9
+        @test maximum(abs(wall_acceleration(chan, xwa(i), 0.0)[1] + (xwa(i)[1])) for i in gha) < 1e-7    # -ω² (x - c), ω = 1, c = 0
+        trans = Cuboid((-1.0, -1.0), (1.0, 1.0)) - Moving(plate.shape, translating((1.0, 0.0)))
+        @test wall_velocity(trans, SVector(0.3, 0.0), 0.2) == SVector(1.0, 0.0) && wall_acceleration(trans, SVector(0.3, 0.0), 0.2) == SVector(0.0, 0.0)
+        osc(t) = RigidMotion(SVector(-0.1 * (1 - cos(3t))), SMatrix{1, 1, Float64, 1}(1.0), SVector(-0.3 * sin(3t)), zero(SMatrix{1, 1, Float64, 1}))
+        tube_o = intersect(Tagged(Cuboid((0.0,), (2.0,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), osc))
+        @test wall_acceleration(tube_o, SVector(0.95), 0.7) ≈ SVector(-0.9 * cos(2.1)) rtol = 1e-7
+        pgo = ParticleGrid(GeometricDomain(tube_o; mins = (0.0,), maxs = (2.0,)), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1)   # (the tag table is filled with the grid)
+        @test HyperCloudCore.acceleration(HyperCloudCore.tag_motion(pgo.geometry, 2, 0.6, 0.7), SVector(0.95)) ≈ SVector(-0.9 * cos(2.1)) rtol = 1e-7
         # moving pieces need a static interior, and the adaptivity's volume estimators integrate the region at t = 0
         pgl = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; mover = LagrangianMover())
         @test_throws ArgumentError HyperCloudCore._sync_boundaries!(pgl, 0.0, 3)

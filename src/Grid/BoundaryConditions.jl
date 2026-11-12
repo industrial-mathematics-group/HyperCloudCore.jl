@@ -138,15 +138,22 @@ export ExtrapolationBC, MirrorBC, WallPoint, requires_shape
     WallPoint{D, T}
 
 The wall as seen from a ghost particle, handed to the operator of a [`MirrorBC`](@ref): `position` (the wall
-point nearest to the ghost), the outward unit `normal` there, the `distance` of the ghost to the wall, and the
-wall `velocity` (that of a [`Moving`](@ref) piece at the wall point, zero for a static wall).
+point nearest to the ghost), the outward unit `normal` there, the `distance` of the ghost to the wall, the wall
+`velocity` and `acceleration` (those of a [`Moving`](@ref) piece at the wall point, [`wall_velocity`](@ref) and
+[`wall_acceleration`](@ref); zero for a static wall). An operator that mirrors the pressure of a fluid at the wall
+can add the normal pressure gradient of an accelerating wall, `∂p/∂n = -ρ n ⋅ a` (the momentum equation of the
+fluid moving with the wall), which an even mirror misses at first order. The four-argument constructor leaves
+the acceleration zero.
 """
 struct WallPoint{D, T}
     position::Space{D, T}
     normal::Space{D, T}
     distance::T
     velocity::Space{D, T}
+    acceleration::Space{D, T}
 end
+WallPoint(position::Space{D, T}, normal::Space{D, T}, distance, velocity::Space{D, T}) where {D, T} =
+    WallPoint{D, T}(position, normal, T(distance), velocity, zero(Space{D, T}))
 
 """
     requires_shape(bc::AbstractBoundaryCondition) -> Bool
@@ -224,11 +231,13 @@ without the bound that loop grew without limit for degrees ≥ 2 with a 5th-orde
 the plain fit (exact for polynomials up to `degree` at every ghost).
 
 For a planar wall the mirror point is the exact reflection, so the condition is as accurate as the fit; on a
-curved wall the mirror image is second-order accurate. Behind a convex corner (outside two faces) the nearest
-wall point is the corner: the normal is the diagonal direction to it and `op` is applied once with it, so an
-operator that reflects the normal velocity reflects the diagonal component only there (`(u, v) → (-v, -u)` at a
-box corner, not `(-u, -v)`), and only the condition of the face whose tag the ghost carries acts. Such ghosts
-are in the stencils of the corner particles only. Requires a shape-based domain ([`requires_shape`](@ref)).
+curved wall the mirror image is second-order accurate. Behind a convex corner or edge (outside two faces) a ghost
+is reflected in the face whose tag it carries, the one it lies farther outside of: its stored normal is that face's
+and its distance is measured along it, so the mirror point lies behind the other face (outside the region; the fit
+extrapolates the interior there, exactly for linear data) and `op` sees that face's normal. (The point reflection
+through the corner, with the diagonal normal to it, gave `op` a normal that is right for neither face: a slip wall
+turned the velocity along the wall into the wall at the corner with an inflow, and a uniform flow did not survive
+the corner.) Requires a shape-based domain ([`requires_shape`](@ref)).
 """
 struct MirrorBC{Q, F, B} <: AbstractBoundaryCondition
     op::F
@@ -376,7 +385,7 @@ end
         end
         if MIRROR
             x_w    = x_i - φ_i * n_i                     # the wall point: the body's velocity there, not at the ghost
-            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w))
+            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w), acceleration(gm, x_w))
             buf[i] = _apply_wall_op(op, eq, U, wall)
         else
             buf[i] = U
