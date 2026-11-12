@@ -708,7 +708,7 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
         core.tags[w]            = 0
         core.particle_orders[w] = max_order
         core.volumes[w]         = new_vol[a]
-        core.normals[w], core.wall_distances[w] = wall_geometry(pg.geometry, new_pos[a], pg.meta.boundary_time)
+        core.normals[w], core.wall_distances[w] = _ghost_geometry(pg.geometry, new_pos[a], pg.meta.boundary_time)
         pg.rhos[w]              = new_rho[a]
         pg.curvatures[w]        = zero(State{M, T})
         w += 1

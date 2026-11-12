@@ -1,6 +1,6 @@
 export AbstractShape, Cuboid, Ball, HalfSpace, Tagged, Translated, Rotated, complement
 export signed_distance, boundary_normal, boundary_tag, bounding_box, shape_volume
-export RigidMotion, Moving, translating, rotating, at_time, wall_velocity, moving_pieces
+export RigidMotion, Moving, translating, rotating, at_time, wall_velocity, wall_acceleration, moving_pieces
 
 # =========================================================================
 # SHAPES: signed-distance descriptions of the physical region
@@ -122,11 +122,24 @@ function _clipped_volume(s::AbstractShape{D, T}, lo::Space{D, T}, hi::Space{D, T
     return T(shape_volume(intersect(s, Cuboid{D, T}(Tuple(lo), Tuple(hi)))))
 end
 
-# (φ, n, tag, piece) of the active boundary piece at `x`: its signed distance, normal and tag, and the `Moving`
-# node it belongs to (`nothing` for a static piece). Leaves evaluate their three functions; composites pick the
-# active child's tuple, so a tag or normal is never taken from a piece other than the one whose distance is in
-# force. Host only (the piece is not a bits value).
-@inline _probe(s::AbstractShape, x) = (signed_distance(s, x), boundary_normal(s, x), boundary_tag(s, x), nothing)
+# (φ, n, tag, piece, n_face) of the active boundary piece at `x`: its signed distance, normal and tag, the `Moving`
+# node it belongs to (`nothing` for a static piece), and the normal of the *face* the tag names: the same as `n`
+# except outside two faces of a primitive with corners (a `Cuboid`), where `n` points to the edge and `n_face` is
+# the normal of the face the point is farther outside of (`_face_normal`; a ghost there is reflected in that face,
+# see `_ghost_geometry`). Leaves evaluate their functions; composites pick the active child's tuple, so a tag or
+# normal is never taken from a piece other than the one whose distance is in force. Host only (the piece is not a
+# bits value).
+@inline _probe(s::AbstractShape, x) = (signed_distance(s, x), boundary_normal(s, x), boundary_tag(s, x), nothing, _face_normal(s, x))
+# The normal of the face the boundary tag at `x` names (`boundary_normal` for shapes without corners)
+@inline _face_normal(s::AbstractShape, x) = boundary_normal(s, x)
+
+# A function evaluated from a string at run time (`build_domain(:shape)`), called through `invokelatest`: a tag or
+# motion function defined by `Core.eval` is newer than the running world of the build, and a direct call failed
+# with "method too new to be called from this world context"
+struct _Latest{F}
+    f::F
+end
+@inline (l::_Latest)(args...) = Base.invokelatest(l.f, args...)
 
 @inline function _unit(g::Space{D, T}) where {D, T}
     n2 = sum(abs2, g)
@@ -201,6 +214,13 @@ function boundary_normal(b::Cuboid{D, T}, x::Space{D, T}) where {D, T}
         return _unit(g)
     end
     _, axis, sgn = _box_face(b, x)      # inside (or on the boundary): the nearest face
+    return Space{D, T}(ntuple(d -> d == axis ? sgn : zero(T), Val(D)))
+end
+
+# Outside two faces (an edge or corner of the ghost band) the face the point is farther outside of, the one its
+# tag names; inside, and outside one face, the nearest face as `boundary_normal`
+function _face_normal(b::Cuboid{D, T}, x::Space{D, T}) where {D, T}
+    _, axis, sgn = _box_face(b, x)
     return Space{D, T}(ntuple(d -> d == axis ? sgn : zero(T), Val(D)))
 end
 
@@ -327,8 +347,8 @@ end
 @inline _probe(u::UnionShape, x) = _probe_select(u.shapes, x, <)
 @inline _probe(u::IntersectionShape, x) = _probe_select(u.shapes, x, >)
 @inline function _probe(c::ComplementShape, x)
-    φ, n, tag, pc = _probe(c.shape, x)
-    return (-φ, -n, tag, pc)
+    φ, n, tag, pc, nf = _probe(c.shape, x)
+    return (-φ, -n, tag, pc, -nf)
 end
 signed_distance(u::UnionShape{D, T}, x::Space{D, T}) where {D, T} = _dist_select(u.shapes, x, min)
 signed_distance(u::IntersectionShape{D, T}, x::Space{D, T}) where {D, T} = _dist_select(u.shapes, x, max)
@@ -375,8 +395,8 @@ signed_distance(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = signed_distance(
 boundary_normal(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = boundary_normal(t.shape, x)
 boundary_tag(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = _retag(t.tag, boundary_tag(t.shape, x))
 @inline function _probe(t::Tagged, x)
-    φ, n, tag, pc = _probe(t.shape, x)
-    return (φ, n, _retag(t.tag, tag), pc)
+    φ, n, tag, pc, nf = _probe(t.shape, x)
+    return (φ, n, _retag(t.tag, tag), pc, nf)
 end
 bounding_box(t::Tagged) = bounding_box(t.shape)
 shape_volume(t::Tagged; kwargs...) = shape_volume(t.shape; kwargs...)
@@ -433,8 +453,8 @@ signed_distance(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = signed_distance
 boundary_normal(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = r.R * boundary_normal(r.shape, _local(r, x))
 boundary_tag(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = boundary_tag(r.shape, _local(r, x))
 @inline function _probe(r::Rotated, x)
-    φ, n, tag, pc = _probe(r.shape, _local(r, x))
-    return (φ, r.R * n, tag, pc)
+    φ, n, tag, pc, nf = _probe(r.shape, _local(r, x))
+    return (φ, r.R * n, tag, pc, r.R * nf)
 end
 function bounding_box(r::Rotated{D, T}) where {D, T}
     mins, maxs = bounding_box(r.shape)
@@ -579,8 +599,8 @@ signed_distance(p::Posed{D, T}, x::Space{D, T}) where {D, T} = signed_distance(p
 boundary_normal(p::Posed{D, T}, x::Space{D, T}) where {D, T} = p.motion.R * boundary_normal(p.shape, world_to_body(p.motion, x))
 boundary_tag(p::Posed{D, T}, x::Space{D, T}) where {D, T} = boundary_tag(p.shape, world_to_body(p.motion, x))
 @inline function _probe(p::Posed, x)
-    φ, n, tag, _ = _probe(p.shape, world_to_body(p.motion, x))
-    return (φ, p.motion.R * n, tag, p.piece)
+    φ, n, tag, _, nf = _probe(p.shape, world_to_body(p.motion, x))
+    return (φ, p.motion.R * n, tag, p.piece, p.motion.R * nf)
 end
 function bounding_box(p::Posed{D, T}) where {D, T}
     mins, maxs = bounding_box(p.shape)
@@ -637,4 +657,28 @@ function wall_velocity(s::AbstractShape{D, T}, x::Space{D, T}, t) where {D, T}
     _, _, _, pc = _probe(at_time(s, t), x)
     pc === nothing && return zero(Space{D, T})
     return body_velocity(pose(pc, t), x)
+end
+
+"""
+    wall_acceleration(shape, x, t) -> Space{D, T}
+
+The acceleration of the boundary piece of `shape` nearest to `x` at time `t` (zero for a static piece): that of
+the body point at `x`, `c̈ + (Ω̇ + Ω²) (x - c)` for the pose `(c, R, v = ċ, Ω)`, with `c̈` and `Ω̇` by central
+differences of the pose in `t` (step `∛eps(T)`; exact for the built-in uniform motions). A `MirrorBC` operator
+receives it in the [`WallPoint`](@ref).
+"""
+function wall_acceleration(s::AbstractShape{D, T}, x::Space{D, T}, t) where {D, T}
+    _check_moving_frames(s)
+    _, _, _, pc = _probe(at_time(s, t), x)
+    pc === nothing && return zero(Space{D, T})
+    m = pose(pc, T(t))
+    a, Ωdot = _pose_derivatives(pc, T(t))
+    return a + (Ωdot + m.Ω * m.Ω) * (x - m.c)
+end
+
+# Time derivatives of a piece's pose: (c̈, Ω̇) at `t` by central differences (exact for the uniform motions)
+function _pose_derivatives(pc::Moving{D, T}, t::T) where {D, T}
+    δ = cbrt(eps(T)) * max(one(T), abs(t))
+    mp, mm = pose(pc, t + δ), pose(pc, t - δ)
+    return (mp.v - mm.v) / (2δ), (mp.Ω - mm.Ω) / (2δ)
 end

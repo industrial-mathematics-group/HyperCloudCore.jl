@@ -116,7 +116,7 @@ on every backend and in every run.
 function build_global_bins!(pg::ParticleGrid)
     N       = pg.meta.N
     bins    = pg.bins
-    backend = get_backend()
+    backend = _launch_backend(pg)
     nb      = prod(bins.coarse_dims)
     cs, cc, cp, bo = bins.cell_start, bins.cell_count, bins.cell_particles, bins.bin_of
 
@@ -233,7 +233,7 @@ or a device reduction, so it runs on a grid built with `device_grid` as well.
 - **Pass 2 (Writing):** Rescans the bins, writing neighbour indices, weights and distances into the slots.
 """
 function (nd::NeighborData{D, T})(pg::ParticleGrid{D, M, T}) where {D, M, T}
-    backend = get_backend()
+    backend = _launch_backend(pg)
     N = pg.meta.N
     R = eltype(nd.ranges)                                 # the slot layout
 

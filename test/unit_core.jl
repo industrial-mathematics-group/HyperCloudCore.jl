@@ -717,7 +717,11 @@ end
                 end
                 @test pg.core.tags[i] == best_tag
                 @test pg.core.wall_distances[i] > 0
-                @test all(d -> (x[d] > maxs[d]) ? n[d] > 0 : (x[d] < mins[d]) ? n[d] < 0 : true, 1:D)
+                # the stored normal is that of the tagged face (behind an edge or corner too: the ghost is reflected in
+                # its own face), the stored distance the one to that face's plane
+                ax = (best_tag + 1) ÷ 2
+                @test n == SVector(ntuple(d -> d == ax ? (isodd(best_tag) ? -1.0 : 1.0) : 0.0, D))
+                @test pg.core.wall_distances[i] ≈ best_out
             end
         end
         @test domain_volume(pg) == 2.0^D
@@ -748,10 +752,34 @@ end
     @test wall_geometry(geom, SVector(0.3, -0.05)) == (SVector(0.0, -1.0), 0.05)       # one projection: unchanged
     n2, d2 = wall_geometry(geom, SVector(0.5, 0.3))                                       # the step's top-front corner
     @test n2 ≈ SVector(1.0, -1.0) / sqrt(2) && d2 ≈ -sqrt(0.02)
+    # What a ghost stores: behind a convex corner (outside two faces) the face it is farther outside of, with the
+    # distance to that face's plane, so that it is reflected in its own face (the point reflection through the corner
+    # with the diagonal normal rotated a slip wall's velocity along the wall into the wall at the inflow corner)
+    gg = HyperCloudCore._ghost_geometry
+    @test gg(geom, SVector(-0.03, -0.02))[1] == SVector(-1.0, 0.0) && gg(geom, SVector(-0.03, -0.02))[2] ≈ 0.03
+    @test gg(geom, SVector(-0.02, -0.03))[1] == SVector(0.0, -1.0) && gg(geom, SVector(-0.02, -0.03))[2] ≈ 0.03
+    @test gg(geom, SVector(0.3, -0.05)) == (SVector(0.0, -1.0), 0.05)                   # outside one face: unchanged
+    @test gg(geom, SVector(0.7, -0.05))[1] == SVector(1.0, 0.0) && gg(geom, SVector(0.7, -0.05))[2] ≈ 0.1     # under the step, farther inside it than below the floor: the step's front, tag 5
+    @test gg(geom, SVector(0.5, 0.3)) == (n2, d2)                                        # inside: the nearest point
+    # 3-D edges and corners alike: the face with the largest outside distance
+    g3 = GeometricDomain(Cuboid((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)))
+    @test gg(g3, SVector(-0.01, -0.03, -0.02))[1] == SVector(0.0, -1.0, 0.0) && gg(g3, SVector(-0.01, -0.03, -0.02))[2] ≈ 0.03
+    @test gg(g3, SVector(1.02, 0.5, -0.01))[1] == SVector(1.0, 0.0, 0.0) && gg(g3, SVector(1.02, 0.5, -0.01))[2] ≈ 0.02
+    # a rotated box: the face normal rotates with it
+    rb = GeometricDomain(Rotated(Cuboid((0.0, 0.0), (1.0, 1.0)), π / 6))
+    nr, dr = gg(rb, SVector(cos(π / 6), sin(π / 6)) * 1.03 + SVector(-sin(π / 6), cos(π / 6)) * (-0.02))   # beyond the far x face, below the y face
+    @test nr ≈ SVector(cos(π / 6), sin(π / 6)) && dr ≈ 0.03
+    # every ghost's mirror image lies in the region, except behind a convex corner, where it lies behind the other face
     for i in 1:pg.meta.N
         pg.core.is_boundary[i] || continue
-        xm = pg.core.positions[i] - 2 * pg.core.wall_distances[i] * pg.core.normals[i]
-        @test signed_distance(shape, xm) <= 1e-12
+        x  = pg.core.positions[i]
+        xm = x - 2 * pg.core.wall_distances[i] * pg.core.normals[i]
+        n_near = wall_geometry(geom, x)[1]
+        if maximum(abs, n_near) > 1 - 1e-9                                                # outside one face
+            @test signed_distance(shape, xm) <= 1e-12
+        else                                                                              # a corner ghost: an axis normal
+            @test maximum(abs, pg.core.normals[i]) ≈ 1 && pg.core.wall_distances[i] < wall_geometry(geom, x)[2]
+        end
     end
     # unbounded shapes need the box
     @test_throws ArgumentError GeometricDomain(HalfSpace((0.0, 0.0), (1.0, 0.0)))
@@ -775,6 +803,15 @@ end
     @test gl.mins == SVector(-2.0, -2.0) && isapprox(domain_volume(gl), π; rtol = 1e-4)
     # boundary tags are positive (a tag 0 marked ghosts interior)
     @test_throws ArgumentError Tagged(Cuboid((0.0, 0.0), (1.0, 1.0)), 0)
+    # A shape string with an anonymous function (a tag map, a motion) builds and its functions can be called from the
+    # world the build runs in (the closure is defined by `Core.eval` in a newer world: a MethodError "method too new")
+    function string_shape_world()
+        ctx = Dict{Symbol, Any}(:T => Float64, :D => 2)
+        s = "box = Cuboid((T(0), T(0)), (T(2), T(1))); box - Tagged(Moving(Ball((T(1), T(0.5)), T(0.2)), t -> RigidMotion(Val(2), T)), t -> t + 4)"
+        g = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => s, :bc => Dict(1 => :outflow)), ctx)
+        return g.get_tag(SVector(1.0, 0.6)), g.get_tag(SVector(-0.01, 0.5)), wall_velocity(g.shape, SVector(1.0, 0.7), 0.3)
+    end
+    @test string_shape_world() == (5, 1, SVector(0.0, 0.0))
     g0 = GeometricDomain(Tagged(Cuboid((0.0, 0.0), (1.0, 1.0)), t -> t - 1))
     @test_throws ArgumentError g0.get_tag(SVector(-0.1, 0.5))
     # Wedges: behind a convex corner of any angle the wall point is the nearest boundary point (the projections
