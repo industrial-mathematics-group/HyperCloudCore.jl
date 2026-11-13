@@ -1087,6 +1087,38 @@ end
         @test wall_acceleration(tube_o, SVector(0.95), 0.7) ≈ SVector(-0.9 * cos(2.1)) rtol = 1e-7
         pgo = ParticleGrid(GeometricDomain(tube_o; mins = (0.0,), maxs = (2.0,)), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1)   # (the tag table is filled with the grid)
         @test HyperCloudCore.acceleration(HyperCloudCore.tag_motion(pgo.geometry, 2, 0.6, 0.7), SVector(0.95)) ≈ SVector(-0.9 * cos(2.1)) rtol = 1e-7
+        # ... the piece's spin (Ω = ω J for the rotating plate) and the wall's curvature (the Hessian of the signed
+        # distance at the wall point: zero on the plate's flat faces, -1/r around a disc obstacle, +1/r inside a circle)
+        sp(eq, U, wall) = State{1, Float64}(wall.spin[2, 1])
+        geom_s = GeometricDomain(chan; is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5),
+                                 bc_map = BCD(t => MirrorBC(sp; degree = 1) for t in (3, 4, 5, 6, 7, 8)))
+        pgs = ParticleGrid(geom_s, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+        bufs = copy(pgs.rhos)
+        for tag in 3:8; MirrorBC(sp; degree = 1)(pgs, bufs, tag, nothing, eq0, 0.0); end
+        @test all(i -> bufs[i][1] == (pgs.core.tags[i] >= 5 ? 1.0 : 0.0), [i for i in 1:pgs.meta.N if pgs.core.is_boundary[i]])
+        kt(eq, U, wall) = (t = SVector(-wall.normal[2], wall.normal[1]); State{1, Float64}(t' * wall.hessian * t))
+        ann = Ball((0.0, 0.0), 1.0) - Tagged(Ball((0.0, 0.0), 0.5), 2)
+        pgk = ParticleGrid(GeometricDomain(ann; bc_map = BCD(1 => MirrorBC(kt), 2 => MirrorBC(kt))), (0.05, 0.05),
+                           ExponentialWeightFunction(1.0, 0.125), 1)
+        bufk = copy(pgk.rhos)
+        for tag in 1:2; MirrorBC(kt)(pgk, bufk, tag, nothing, eq0, 0.0); end
+        for (tag, κ) in ((1, 1.0), (2, -2.0))
+            @test maximum(i -> abs(bufk[i][1] - κ), [i for i in 1:pgk.meta.N if pgk.core.is_boundary[i] && pgk.core.tags[i] == tag]) < 1e-12
+        end
+        # the 3-D encoding turns with a moving piece (stored in a tangent basis of the normal)
+        n3 = normalize(SVector(0.3, -0.5, 0.8)); H3 = SMatrix{3, 3}((I - n3 * n3') / 0.4)
+        R3 = SMatrix{3, 3}(cos(0.7), sin(0.7), 0, -sin(0.7), cos(0.7), 0, 0, 0, 1)
+        c3 = HyperCloudCore._rotate_curvature(HyperCloudCore._encode_curvature(H3, n3), n3, R3 * n3, R3)
+        @test HyperCloudCore._decode_curvature(c3, R3 * n3) ≈ R3 * H3 * R3' atol = 1e-13
+        # no interior particle starts on the corner of a moving face and a static wall (the wall won the tie of the
+        # nearest surface, and the particle was covered at the first step)
+        for (Nx, Ny) in ((150, 25), (300, 50))
+            hp = 1.5 / Nx
+            gch = GeometricDomain(intersect(Cuboid((0.0, 0.0), (1.5, 0.25)), Moving(Tagged(HalfSpace((1.0, 0.0), (1.0, 0.0)), 5), translating((-0.5, 0.0))));
+                                  mins = (0.0, 0.0), maxs = (1.5, 0.25))
+            pgc = ParticleGrid(gch, (hp, 0.25 / Ny), ExponentialWeightFunction(1.0, 2.5hp), 1; randomness = (0.2hp, 0.2hp), rng = Random.Xoshiro(1))
+            @test all(i -> pgc.core.is_boundary[i] || pgc.core.positions[i][1] <= 1 - hp / 2, 1:pgc.meta.N)   # (300 × 50: 0.16 h before)
+        end
         # moving pieces need a static interior, and the adaptivity's volume estimators integrate the region at t = 0
         pgl = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; mover = LagrangianMover())
         @test_throws ArgumentError HyperCloudCore._sync_boundaries!(pgl, 0.0, 3)

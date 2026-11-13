@@ -23,7 +23,7 @@ const _WARNED_SWEEP = Ref(false)
     place_ghosts!(pg, X, t_from, t_to)
 
 Moves the ghost particles of the moving pieces in the position buffer `X` (their positions at `t_from`) to the
-pieces' poses at `t_to`, rotates their stored normals from `pg.meta.boundary_time` to `t_to` and sets
+pieces' poses at `t_to`, rotates their stored normals and wall curvatures from `pg.meta.boundary_time` to `t_to` and sets
 `boundary_time = t_to`. Exact rigid motion (no integration). A kernel; nothing happens on a domain without
 moving pieces.
 """
@@ -33,18 +33,20 @@ function place_ghosts!(pg::ParticleGrid{D, M, T}, X, t_from, t_to) where {D, M, 
     tm_pos = tag_motions(geom, t_from, t_to)
     tm_nrm = tag_motions(geom, pg.meta.boundary_time, t_to)
     foreach_particle(_place_ghost!, get_backend(), pg.meta.N,
-                     (X, pg.core.normals, pg.core.is_boundary, pg.core.tags, tm_pos, tm_nrm))
+                     (X, pg.core.normals, pg.core.wall_curvatures, pg.core.is_boundary, pg.core.tags, tm_pos, tm_nrm))
     pg.meta.boundary_time = T(t_to)
     return nothing
 end
 
 # Kernel body (see Backend.jl): a ghost takes its piece's displacement; interior particles are left alone.
-@inline function _place_ghost!(p, X, normals, isb, tags, tm_pos, tm_nrm)
+@inline function _place_ghost!(p, X, normals, curvs, isb, tags, tm_pos, tm_nrm)
     @inbounds begin
         isb[p] || return nothing
         k = tags[p] + 1
         X[p]       = move(tm_pos[k], X[p])
-        normals[p] = rotate(tm_nrm[k], normals[p])
+        n_old      = normals[p]
+        normals[p] = rotate(tm_nrm[k], n_old)
+        curvs[p]   = _rotate_curvature(curvs[p], n_old, normals[p], tm_nrm[k].R)
     end
     return nothing
 end
@@ -321,7 +323,7 @@ function _refresh_static_ghosts!(hg::ParticleGrid, geom, t, inbox)
         hg.core.is_boundary[i] && inbox(hg.core.positions[i]) || continue
         tag = hg.core.tags[i]
         (tag + 1 <= length(pot) && pot[tag + 1] != 0) && continue
-        hg.core.normals[i], hg.core.wall_distances[i] = _ghost_geometry(geom, hg.core.positions[i], t)
+        hg.core.normals[i], hg.core.wall_distances[i], hg.core.wall_curvatures[i] = _ghost_geometry_curv(geom, hg.core.positions[i], t)
     end
     return nothing
 end
@@ -452,7 +454,7 @@ function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, box
         core.tags[p]            = tg[a]
         core.particle_orders[p] = max_order
         core.volumes[p]         = zero(T)
-        core.normals[p], core.wall_distances[p] = wall_geometry(geom, xs[a], t)
+        core.normals[p], core.wall_distances[p], core.wall_curvatures[p] = _ghost_geometry_curv(geom, xs[a], t)  # (as generated ghosts)
         hg.rhos[p]              = us[a]
         hg.curvatures[p]        = zero(State{M, T})
     end

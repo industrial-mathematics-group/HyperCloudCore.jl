@@ -135,25 +135,37 @@ end
 export ExtrapolationBC, MirrorBC, WallPoint, requires_shape
 
 """
-    WallPoint{D, T}
+    WallPoint{D, T, L}
 
 The wall as seen from a ghost particle, handed to the operator of a [`MirrorBC`](@ref): `position` (the wall
-point nearest to the ghost), the outward unit `normal` there, the `distance` of the ghost to the wall, the wall
-`velocity` and `acceleration` (those of a [`Moving`](@ref) piece at the wall point, [`wall_velocity`](@ref) and
-[`wall_acceleration`](@ref); zero for a static wall). An operator that mirrors the pressure of a fluid at the wall
-can add the normal pressure gradient of an accelerating wall, `∂p/∂n = -ρ n ⋅ a` (the momentum equation of the
-fluid moving with the wall), which an even mirror misses at first order. The four-argument constructor leaves
-the acceleration zero.
+point the ghost is reflected in), the outward unit `normal` there, the `distance` of the ghost to the wall, the
+wall `velocity` and `acceleration` (those of a [`Moving`](@ref) piece at the wall point, [`wall_velocity`](@ref)
+and [`wall_acceleration`](@ref); zero for a static wall), the piece's angular velocity as the skew matrix `spin`
+(`Ω`: the wall velocity is `w(x) = v + Ω (x - c)`; zero for a static wall) and the `hessian` of the region's signed
+distance at the wall point (the wall's curvature: `t ⋅ hessian * t` for a unit tangent `t` is negative where the
+wall is convex seen from the region, `-1/r` around a disc obstacle, and positive where it is concave, `+1/r`
+inside a circle; zero for a flat wall).
+
+An operator that mirrors the pressure of a fluid at the wall needs the normal momentum balance there, which the
+even mirror (`∂p/∂n = 0`) misses at first order at accelerating, rotating or curved walls. Following a fluid
+particle along the wall, `(u - w) ⋅ n = 0` gives
+`∂p/∂n = -ρ (n ⋅ a + 2 n ⋅ Ω (u - w) - u_r ⋅ hessian * u_r)` with `u_r` the tangential velocity relative to the
+wall (for a disc spinning in a gas at rest the three terms cancel). The four- and five-argument constructors leave
+the acceleration, spin and curvature zero.
 """
-struct WallPoint{D, T}
+struct WallPoint{D, T, L}
     position::Space{D, T}
     normal::Space{D, T}
     distance::T
     velocity::Space{D, T}
     acceleration::Space{D, T}
+    spin::SMatrix{D, D, T, L}
+    hessian::SMatrix{D, D, T, L}
 end
-WallPoint(position::Space{D, T}, normal::Space{D, T}, distance, velocity::Space{D, T}) where {D, T} =
-    WallPoint{D, T}(position, normal, T(distance), velocity, zero(Space{D, T}))
+WallPoint(position::Space{D, T}, normal::Space{D, T}, distance, velocity::Space{D, T},
+          acceleration::Space{D, T} = zero(Space{D, T})) where {D, T} =
+    WallPoint{D, T, D * D}(position, normal, T(distance), velocity, acceleration,
+                           zero(SMatrix{D, D, T, D * D}), zero(SMatrix{D, D, T, D * D}))
 
 """
     requires_shape(bc::AbstractBoundaryCondition) -> Bool
@@ -274,7 +286,7 @@ function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, val
                                            GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
     foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
         (buf, pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
-         pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
+         pg.core.wall_curvatures, pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
          (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
     return nothing
 end
@@ -316,7 +328,7 @@ end
 @inline _fit_support(D, q) = (3 * (basis_count(D, q) + 1) + 1) ÷ 2
 
 # Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
-@inline function _ghost_fit_body!(i, buf, pos, isb, tags, normals, wdist, orders, ranges, indices, wf,
+@inline function _ghost_fit_body!(i, buf, pos, isb, tags, normals, wdist, curvs, orders, ranges, indices, wf,
                                   wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
     @inbounds begin
         (isb[i] && tags[i] == tag) || return nothing
@@ -385,7 +397,8 @@ end
         end
         if MIRROR
             x_w    = x_i - φ_i * n_i                     # the wall point: the body's velocity there, not at the ghost
-            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w), acceleration(gm, x_w))
+            H      = gm.R * _decode_curvature(curvs[i], normals[i]) * gm.R'   # (stored for `normals[i]`)
+            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w), acceleration(gm, x_w), gm.Ω, H)
             buf[i] = _apply_wall_op(op, eq, U, wall)
         else
             buf[i] = U

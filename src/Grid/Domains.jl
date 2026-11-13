@@ -317,6 +317,7 @@ function get_points(
     # An interior point within h/2 of a moving piece (on its face, say, or jittered or reflected next to it) would be
     # covered as soon as the piece moves: it becomes one of the piece's ghosts half a spacing outside instead
     moving = geom.shape !== nothing && has_moving_pieces(geom)
+    posed0 = moving ? map(pc -> at_time(pc, zero(T)), geom.pieces) : ()
     function add_interior!(p)
         if moving
             φ, _, _, pc = _probe(geom.shape, p)
@@ -324,6 +325,8 @@ function get_points(
                 push!(ghost_candidates, _push_out(geom, p, h_snap, wrap))
                 return nothing
             end
+            g = φ > -h_snap ? _corner_ghost(geom, posed0, p, h_snap, wrap) : nothing
+            g === nothing || (push!(ghost_candidates, g); return nothing)
         end
         push!(inner_points, p)
         return nothing
@@ -367,17 +370,18 @@ function get_points(
     volumes = fill(prod(dxs_f), N)
     normals = Vector{Space{D, T}}(undef, N)
     wall_distances = Vector{T}(undef, N)
+    wall_curvatures = Vector{Space{D, T}}(undef, N)
 
     for i in 1:N
         pos = positions[i]
         tag = geom.get_tag(pos)
         tags[i] = tag
         is_boundary[i] = (tag != 0)
-        normals[i], wall_distances[i] = _ghost_geometry(geom, pos)
+        normals[i], wall_distances[i], wall_curvatures[i] = _ghost_geometry_curv(geom, pos)
     end
     _assign_pieces!(geom, positions, tags, is_boundary)
 
-    return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances
+    return positions, is_boundary, tags, volumes, Tuple(dxs_f), normals, wall_distances, wall_curvatures
 end
 
 # Fills `geom.piece_of_tag` from the ghost particles: the moving piece each tag belongs to. A tag shared by a
@@ -499,15 +503,33 @@ function _snap_near_wall!(inner, ghosts, near, geom::GeometricDomain{GEO, D, T},
         clash = any(Iterators.product(ntuple(_ -> -1:1, Val(D))...)) do off
             any(q -> mindist2(q, s) < cell^2, get(taken, wrapkey(ntuple(d -> k[d] + off[d], Val(D))), ()))
         end
+        g = has_moving_pieces(geom) ? _corner_ghost(geom, map(pc -> at_time(pc, zero(T)), geom.pieces), s, h_snap, wrap) : nothing
         if _probe(geom.shape, pos)[4] !== nothing
             # A point on a moving piece would be covered as soon as it moves: it becomes a ghost at h/2 instead
             push!(ghosts, _push_out(geom, pos, h_snap, wrap))
+        elseif g !== nothing
+            push!(ghosts, g)                           # snapped onto a static wall next to a moving face
         elseif !clash && geom.is_interior(s)
             push!(inner, s)
             push!(get!(taken, wrapkey(k), Space{D, T}[]), s)
         else
             push!(ghosts, wrap(pos + (h_snap - φ) * n))
         end
+    end
+    return nothing
+end
+
+# Where a moving face meets a static wall, the wall wins the tie of the nearest surface (distance 0 on the wall row),
+# and a point next to the face stayed interior, to be covered at the first step (the sweep warned at a legal step).
+# By the pieces' own distances: a point within `h_snap` of a moving piece becomes one of its ghosts, pushed into the
+# piece along the piece's normal to `h_snap` outside the region; `nothing` if no piece is that close.
+function _corner_ghost(geom::GeometricDomain{GEO, D, T}, posed, p, h_snap::T, wrap) where {GEO, D, T}
+    for q in posed
+        sq = signed_distance(q, p)
+        abs(sq) < h_snap || continue
+        n = boundary_normal(q, p)
+        s = _is_interior(geom, wrap(p + h_snap * n), zero(T)) ? -one(T) : one(T)   # the direction out of the region
+        return wrap(p + s * (abs(sq) + h_snap) * n)
     end
     return nothing
 end
@@ -612,6 +634,15 @@ function _ghost_geometry(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}, t = z
     φf = φ * c                                 # (x - p) ⋅ n_face: the distance to the face's plane through p
     φf > tol || return (n, φ)                  # (the face's plane does not separate x from p: keep the nearest point)
     return (nf, φf)
+end
+
+# `_ghost_geometry` and the curvature of the wall at the point it reflects in (`x - φ n`), encoded for storage
+# (`_encode_curvature`; zero without a shape or a finite distance)
+function _ghost_geometry_curv(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}, t = zero(T)) where {GEO, D, T}
+    n, φ = _ghost_geometry(geom, x, t)
+    (geom.shape === nothing || !isfinite(φ) || D == 1) && return (n, φ, zero(Space{D, T}))
+    H = _sdf_hessian(at_time(geom.shape, t), x - φ * n)
+    return (n, φ, _encode_curvature(H, n))
 end
 
 # A boundary point near `p` by alternating projections onto the active piece (converges like cos² of the corner

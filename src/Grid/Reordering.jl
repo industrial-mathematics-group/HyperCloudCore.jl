@@ -91,7 +91,7 @@ function (rd::ReorderData{D})(pg::ParticleGrid{D}) where {D}
     #    adaptivity, or the permutation longer than the grid after `reserve!`), so only `1:N` takes part.
     perm = view(p, 1:N)
     for x in (pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.particle_orders, pg.rhos, pg.curvatures,
-              pg.core.volumes, pg.core.normals, pg.core.wall_distances)
+              pg.core.volumes, pg.core.normals, pg.core.wall_distances, pg.core.wall_curvatures)
         @assert length(x) >= N "per-particle buffer shorter than the particle count"
         v = view(parent(x), 1:N)
         v .= v[perm]
