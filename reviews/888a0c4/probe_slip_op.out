@@ -1,0 +1,42 @@
+(a) static outer circle r = 1, vortex Γ = 0.5
+  d        err new      err/d²       err even     err/d       
+  0.040    3.418e-03    2.136e+00    4.006e-02    1.002e+00   
+  0.020    8.255e-04    2.064e+00    2.001e-02    1.000e+00   
+  0.010    2.031e-04    2.031e+00    1.000e-02    1.000e+00   
+  0.005    5.038e-05    2.015e+00    5.000e-03    1.000e+00   
+(b) static inner disc r = 0.5, vortex Γ = 0.5
+  d        err new      err/d²       err even     err/d       
+  0.040    2.315e-02    1.447e+01    1.610e-01    4.026e+00   
+  0.020    6.058e-03    1.515e+01    8.013e-02    4.006e+00   
+  0.010    1.555e-03    1.555e+01    4.002e-02    4.002e+00   
+  0.005    3.942e-04    1.577e+01    2.000e-02    4.000e+00   
+(c) outer circle translating with V = (0.3, 0.2), vortex + V (Galilean shift of (a))
+  d        err new      err/d²       err even     err/d       
+  0.040    1.930e-03    1.206e+00    4.006e-02    1.002e+00   
+  0.020    8.200e-04    2.050e+00    2.001e-02    1.000e+00   
+  0.010    6.111e-04    6.111e+00    1.000e-02    1.000e+00   
+  0.005    3.546e-04    1.418e+01    5.000e-03    1.000e+00   
+(d) inner disc translating with V, vortex + V (Galilean shift of (b))
+  d        err new      err/d²       err even     err/d       
+  0.040    2.915e-02    1.822e+01    1.610e-01    4.026e+00   
+  0.020    9.162e-03    2.291e+01    8.013e-02    4.006e+00   
+  0.010    3.136e-03    3.136e+01    4.002e-02    4.002e+00   
+  0.005    1.192e-03    4.769e+01    2.000e-02    4.000e+00   
+(e) inner disc spinning about its centre (ω = 2), vortex Γ = 0.5
+  d        err new      err/d²       err even     err/d       
+  0.040    2.315e-02    1.447e+01    1.610e-01    4.026e+00   
+  0.020    6.058e-03    1.515e+01    8.013e-02    4.006e+00   
+  0.010    1.555e-03    1.555e+01    4.002e-02    4.002e+00   
+  0.005    3.942e-04    1.577e+01    2.000e-02    4.000e+00   
+(f) inner disc spinning about its centre (ω = 2), gas at rest
+  d        err new      err/d²       err even     err/d       
+  0.040    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+  0.020    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+  0.010    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+  0.005    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+(g) inner disc translating with V through a gas at rest (static fluid, a moving wall: not a solution, skipped)
+  d        err new      err/d²       err even     err/d       
+  0.040    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+  0.020    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+  0.010    0.000e+00    0.000e+00    0.000e+00    0.000e+00   
+  0.005    0.000e+00    0.000e+00    0.000e+00    0.000e+00   

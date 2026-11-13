@@ -1,0 +1,8 @@
+=== x_disc_mach2_2d () env=env 10:00:47
+exit 2 10:03:05
+FAIL RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=1.532e-02  min(p)=-2.099e-03 at x=(0.121,-0.091)  mass drift=8.29e-03  steps=1937  runtime=32.3s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=2.270e-02  min(p)=2.591e-03 at x=(0.120,0.091)  mass drift=1.06e-02  steps=1922  runtime=61.9s
+=== x_disc_mach2_2d () env=penv 10:03:05
+exit 0 10:05:22
+OK   RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=6.231e-02  min(p)=2.664e-02 at x=(0.161,-0.092)  mass drift=1.39e-02  steps=1902  runtime=32.3s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=7.759e-02  min(p)=3.823e-02 at x=(0.161,-0.092)  mass drift=1.42e-02  steps=1840  runtime=60.9s

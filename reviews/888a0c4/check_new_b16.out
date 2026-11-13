@@ -1,0 +1,9 @@
+
+=== B16: 3-D ball: static vs translating
+| method | N | rel. difference static vs moving (ρ / p, ball frame, r ∈ [R, R+0.35]) |
+| RK2MUSCL2(VK,AR,MLS2) | 40×40×40 | 1.096e-01 / 9.651e-02 |
+| RK2MUSCL2(VK,AR,MLS2) | 60×60×60 | 5.103e-02 / 4.530e-02 |
+  PASS RK2MUSCL2(VK,AR,MLS2): Galilean difference decreases with N    1.096e-01 → 5.103e-02
+  PASS RK2MUSCL2(VK,AR,MLS2): Galilean difference < 10 % of the perturbation at the finest N (coarse 3-D) 5.103e-02
+
+=== Summary: 2 PASS, 0 FAIL

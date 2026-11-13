@@ -1,0 +1,30 @@
+
+=== B7: 2-D disc: static vs translating, rotating
+| method | N | rel. difference static vs moving (ρ / p, disc frame, r ∈ [R, R+0.35]) | surface p: min / max static, moving |
+| RK2MUSCL2(VK,AR,MLS2) | 100×100 | 2.270e-02 / 2.240e-02 | 0.6303 / 1.2381, 0.6916 / 1.2444 |
+| RK2MUSCL2(VK,AR,MLS2) | 200×200 | 9.455e-03 / 9.185e-03 | 0.6224 / 1.2572, 0.6598 / 1.2570 |
+| RK2MUSCL2(VK,AR,MLS2) | 400×400 | 4.726e-03 / 4.717e-03 | 0.6268 / 1.2590, 0.6500 / 1.2584 |
+| RK3MUSCL3(EPD1,AR,MLS2) | 100×100 | 2.240e-02 / 2.197e-02 | 0.6478 / 1.2408, 0.7013 / 1.2419 |
+| RK3MUSCL3(EPD1,AR,MLS2) | 200×200 | 9.168e-03 / 8.864e-03 | 0.6308 / 1.2574, 0.6609 / 1.2572 |
+| RK3MUSCL3(EPD1,AR,MLS2) | 400×400 | 5.333e-03 / 5.255e-03 | 0.6301 / 1.2595, 0.6498 / 1.2590 |
+  PASS RK2MUSCL2(VK,AR,MLS2): static and moving runs finished         
+  PASS RK2MUSCL2(VK,AR,MLS2): Galilean difference decreases with N    2.270e-02 → 9.455e-03 → 4.726e-03
+  PASS RK2MUSCL2(VK,AR,MLS2): Galilean difference < 5 % of the perturbation at the finest N 4.726e-03
+  PASS RK3MUSCL3(EPD1,AR,MLS2): static and moving runs finished       
+  PASS RK3MUSCL3(EPD1,AR,MLS2): Galilean difference decreases with N  2.240e-02 → 9.168e-03 → 5.333e-03
+  PASS RK3MUSCL3(EPD1,AR,MLS2): Galilean difference < 5 % of the perturbation at the finest N 5.333e-03
+| method | N | rotating disc in a gas at rest: max |u| / max |ρ − 1| / max |p − 1| |
+| RK2MUSCL2(VK,AR,MLS2) | 100×100 | 5.74e-16 / 0.00e+00 / 0.00e+00 |
+  PASS RK2MUSCL2(VK,AR,MLS2) 100×100: rotating disc keeps the gas at rest (≤ 1e-10) 5.74e-16
+| RK2MUSCL2(VK,AR,MLS2) | 200×200 | 8.83e-16 / 0.00e+00 / 0.00e+00 |
+  PASS RK2MUSCL2(VK,AR,MLS2) 200×200: rotating disc keeps the gas at rest (≤ 1e-10) 8.83e-16
+| RK2MUSCL2(VK,AR,MLS2) | 400×400 | 1.35e-15 / 0.00e+00 / 0.00e+00 |
+  PASS RK2MUSCL2(VK,AR,MLS2) 400×400: rotating disc keeps the gas at rest (≤ 1e-10) 1.35e-15
+| RK3MUSCL3(EPD1,AR,MLS2) | 100×100 | 4.40e-16 / 0.00e+00 / 0.00e+00 |
+  PASS RK3MUSCL3(EPD1,AR,MLS2) 100×100: rotating disc keeps the gas at rest (≤ 1e-10) 4.40e-16
+| RK3MUSCL3(EPD1,AR,MLS2) | 200×200 | 3.89e-16 / 0.00e+00 / 0.00e+00 |
+  PASS RK3MUSCL3(EPD1,AR,MLS2) 200×200: rotating disc keeps the gas at rest (≤ 1e-10) 3.89e-16
+| RK3MUSCL3(EPD1,AR,MLS2) | 400×400 | 9.72e-16 / 0.00e+00 / 0.00e+00 |
+  PASS RK3MUSCL3(EPD1,AR,MLS2) 400×400: rotating disc keeps the gas at rest (≤ 1e-10) 9.72e-16
+
+=== Summary: 12 PASS, 0 FAIL
