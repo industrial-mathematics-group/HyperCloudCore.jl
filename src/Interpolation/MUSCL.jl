@@ -290,7 +290,7 @@ end
         x = dists[k] * invL
         H += x * x'
     end
-    C = cholesky(Symmetric(H), check = false)
+    C = _cholesky_sym(H)
     _pivots_ok(C, H) || return zero(SVector{D, T})
     μ   = T(2) * (C \ b)                       # about half of the offsets are active
     tol = sqrt(eps(T))
@@ -308,7 +308,7 @@ end
             end
         end
         sum(abs2, g) <= tol * tol * nb2 && return μ
-        C = cholesky(Symmetric(H), check = false)
+        C = _cholesky_sym(H)
         _pivots_ok(C, H) || return zero(SVector{D, T})   # no active slot spans the space: no solution here
         Δ  = C \ g
         gΔ = dot(g, Δ)

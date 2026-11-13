@@ -839,6 +839,14 @@ end
     @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => Ball((0.0,), 1.0)), ctx)
     gs = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => "shape", :shape => "Ball((0.0, 0.0), 1.0)"), ctx)
     @test gs.shape isa Ball
+    # The fits' Cholesky factorisation takes an exact square root (StaticArrays' takes `sqrt_fast`, which the device
+    # compilers turn into an approximate one: single-precision fits in Float64 on CUDA); same factor as StaticArrays'
+    for B in (1, 3, 6), T in (Float64, Float32)
+        Xc = SMatrix{B, B, T}(reshape(T.(sin.(1:B * B)), B, B)); Ac = Xc' * Xc + T(0.1) * I
+        C1, C2 = cholesky(Symmetric(Ac)), HyperCloudCore._cholesky_sym(Ac)
+        @test issuccess(C2) && isapprox(C2.factors, C1.factors; rtol = 16eps(T))
+    end
+    @test !issuccess(HyperCloudCore._cholesky_sym(SMatrix{2, 2}(1.0, 2.0, 2.0, 1.0)))
     # `T` in a string is the run's float type
     g32 = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), T(1))"), Dict{Symbol, Any}(:T => Float32, :D => 2))
     @test g32.shape isa Ball{2, Float32}

@@ -44,11 +44,48 @@ repeated. A healthy stencil therefore keeps the exact fit for the price of one f
 gets a damped fit instead of none. `ok` is `false` if the retry fails as well.
 """
 @inline function _cholesky_moment(N_s::SMatrix{B, B, T}) where {B, T}
-    C = cholesky(Symmetric(N_s), check = false)
+    C = _cholesky_sym(N_s)
     _pivots_ok(C, N_s) && return C, true
     eps_reg = _mls_reg(T) * tr(N_s) / B
-    C = cholesky(Symmetric(N_s + eps_reg * I), check = false)
+    C = _cholesky_sym(N_s + eps_reg * I)
     return C, LinearAlgebra.issuccess(C)
+end
+
+"""
+    _cholesky_sym(A::SMatrix{B, B, T}) -> Cholesky (upper factor, `info` > 0 if not positive definite)
+
+`cholesky(Symmetric(A), check = false)` for the small moment matrices of the fits, unrolled as StaticArrays does it,
+but with `sqrt` instead of `Base.FastMath.sqrt_fast`. Under fast math the device compilers take an approximate
+square root: on CUDA in Float64 that is single-precision accurate, so every fit on an NVIDIA GPU carried errors of
+1e-7..1e-6 in Float64 (the constant fit of uniform data: ghost states 1 ± 2e-6, a drift of 1e-3 at an outflow after
+t = 0.06; MLS gradients, volumes and weights alike). On the CPU both give the correctly rounded root. Reads the upper
+triangle. Kernel-safe (no allocation).
+"""
+@generated function _cholesky_sym(A::SMatrix{M, M, T}) where {M, T}
+    q = Expr(:block)
+    for n in 1:M
+        for m in n:M
+            push!(q.args, :($(Symbol(:L_, m, :_, n)) = @inbounds A[$n, $m]))
+        end
+        for k in 1:n-1, m in n:M
+            Lmn, Lmk, Lnk = Symbol(:L_, m, :_, n), Symbol(:L_, m, :_, k), Symbol(:L_, n, :_, k)
+            push!(q.args, :($Lmn = muladd(-$Lmk, $Lnk, $Lmn)))
+        end
+        Lnn = Symbol(:L_, n, :_, n)
+        push!(q.args, :($Lnn > zero(T) || return Cholesky(zero(SMatrix{$M, $M, T, $(M * M)}), 'U', $n)))   # (NaN fails too)
+        push!(q.args, :($Lnn = sqrt($Lnn)))
+        Linv = Symbol(:Linv_, n)
+        push!(q.args, :($Linv = inv($Lnn)))
+        for m in n+1:M
+            push!(q.args, :($(Symbol(:L_, m, :_, n)) *= $Linv))
+        end
+    end
+    ret = Expr(:tuple)
+    for n in 1:M, m in 1:M                                   # column-major U: U[m, n] = L_n_m for m ≤ n
+        push!(ret.args, m <= n ? Symbol(:L_, n, :_, m) : :(zero(T)))
+    end
+    push!(q.args, :(Cholesky(SMatrix{$M, $M, T, $(M * M)}($ret), 'U', 0)))
+    return Expr(:block, Expr(:meta, :inline), q)
 end
 
 # `true` if the factorisation succeeded with every pivot `U[k, k]^2` above `_pivot_tol(T) * N_s[k, k]`
