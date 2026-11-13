@@ -694,7 +694,17 @@ end
 # primitives; composites take the active child's (as `_probe`), a complement the negative; finite differences of
 # `signed_distance` for other shapes.
 function _sdf_hessian(s::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
-    h  = eps(T)^(one(T) / 4) * max(one(T), maximum(abs, x))
+    # Step for second differences of a distance of size |x| known to eps(T) |x|: (eps |x|)^(1/4) (a step of
+    # eps^(1/4) |x| put a Float32 circle about (10, 10) 29 % off)
+    h  = (eps(T) * max(one(T), maximum(abs, x)))^(one(T) / 4)
+    H1 = _fd_hessian(s, x, h)
+    # Across a kink (a corner of a polygon, an edge where two pieces meet) the second differences are of size 1/h and
+    # mean nothing: the step and its double disagree there, while a smooth wall gives the same curvature with both
+    H2 = _fd_hessian(s, x, 2h)
+    nH = maximum(abs, H1)
+    return maximum(abs, H1 - H2) <= T(0.1) * nH + sqrt(eps(T)) / h ? H1 : zero(SMatrix{D, D, T, D * D})
+end
+function _fd_hessian(s::AbstractShape{D, T}, x::Space{D, T}, h::T) where {D, T}
     e(i) = Space{D, T}(ntuple(d -> d == i ? h : zero(T), Val(D)))
     φ0 = signed_distance(s, x)
     return SMatrix{D, D, T, D * D}(ntuple(Val(D * D)) do k

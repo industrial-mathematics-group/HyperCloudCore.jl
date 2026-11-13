@@ -847,6 +847,19 @@ end
         @test issuccess(C2) && isapprox(C2.factors, C1.factors; rtol = 16eps(T))
     end
     @test !issuccess(HyperCloudCore._cholesky_sym(SMatrix{2, 2}(1.0, 2.0, 2.0, 1.0)))
+    # (on the CPU both roots are exact, so look at the typed code: no fast-math square root, which a device compiler would
+    # turn into an approximate one)
+    ir_chol = string(Base.code_typed(HyperCloudCore._cholesky_sym, (SMatrix{3, 3, Float64, 9},))[1].first)
+    @test occursin("sqrt", ir_chol) && !occursin("fast", ir_chol)
+    # the finite-difference curvature of a user shape: right on a smooth wall, zero across a corner (no 1/h garbage)
+    struct _UserDisc <: AbstractShape{2, Float64} end
+    HyperCloudCore.signed_distance(::_UserDisc, x::SVector{2, Float64}) = sqrt(sum(abs2, x)) - 0.5
+    struct _UserSquare <: AbstractShape{2, Float64} end
+    HyperCloudCore.signed_distance(::_UserSquare, x::SVector{2, Float64}) =
+        (q = abs.(x) .- 0.5; sqrt(sum(abs2, max.(q, 0.0))) + min(maximum(q), 0.0))
+    @test HyperCloudCore._sdf_hessian(_UserDisc(), SVector(0.3, 0.4)) ≈ HyperCloudCore._sdf_hessian(Ball((0.0, 0.0), 0.5), SVector(0.3, 0.4)) atol = 1e-6
+    @test HyperCloudCore._sdf_hessian(_UserSquare(), SVector(0.5, 0.5)) == zero(SMatrix{2, 2, Float64, 4})
+    @test HyperCloudCore._sdf_hessian(_UserSquare(), SVector(0.5, 0.1)) == zero(SMatrix{2, 2, Float64, 4})   # (a flat face)
     # `T` in a string is the run's float type
     g32 = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), T(1))"), Dict{Symbol, Any}(:T => Float32, :D => 2))
     @test g32.shape isa Ball{2, Float32}
