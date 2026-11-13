@@ -456,13 +456,6 @@ function tag_motion(geom::GeometricDomain{GEO, D, T}, tag::Int, t_from, t_to) wh
     return GhostMotion(pose(m, t_from), pose(m, t_to), a, Ωdot)::GhostMotion{D, T, D * D}
 end
 
-# One `GhostMotion` per tag (index `tag + 1`), as a tuple for the kernels (bits; the tag count is small)
-function tag_motions(geom::GeometricDomain{GEO, D, T}, t_from, t_to) where {GEO, D, T}
-    K = max(1, length(geom.piece_of_tag))
-    K <= 64 || throw(ArgumentError("moving boundaries support boundary tags up to 63 (got $(K - 1))"))
-    return ntuple(k -> tag_motion(geom, k - 1, t_from, t_to), K)
-end
-
 # Points within `h_snap` = h/2 outside a wall (curved walls, obstacles and box extents off the lattice, jittered rows
 # that the reflection below does not cover) would be ghosts sitting almost on the wall, with a gap of up to h between
 # the wall and the first interior particle: the mirror points of the ghosts then fall into that gap, the fit of

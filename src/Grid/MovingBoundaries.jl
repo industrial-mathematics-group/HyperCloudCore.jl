@@ -30,23 +30,47 @@ moving pieces.
 function place_ghosts!(pg::ParticleGrid{D, M, T}, X, t_from, t_to) where {D, M, T}
     geom = pg.geometry
     has_moving_pieces(geom) || return nothing
-    tm_pos = tag_motions(geom, t_from, t_to)
-    tm_nrm = tag_motions(geom, pg.meta.boundary_time, t_to)
+    # The kernel gets one displacement per piece and a table tag -> piece: a full `GhostMotion` per tag (39 numbers
+    # in 3-D, two tuples) exceeded the 4 KiB kernel parameter limit of older NVIDIA GPUs (sm_61: 5.1 KiB for a ball
+    # with tag 7)
+    ptab = _piece_table(geom)
+    moves = map(pc -> _Placement(pose(pc, t_from), pose(pc, t_to)), geom.pieces)
+    turns = map(pc -> (b = pose(pc, pg.meta.boundary_time); e = pose(pc, t_to); e.R * b.R'), geom.pieces)
     foreach_particle(_place_ghost!, get_backend(), pg.meta.N,
-                     (X, pg.core.normals, pg.core.wall_curvatures, pg.core.is_boundary, pg.core.tags, tm_pos, tm_nrm))
+                     (X, pg.core.normals, pg.core.wall_curvatures, pg.core.is_boundary, pg.core.tags, ptab, moves, turns))
     pg.meta.boundary_time = T(t_to)
     return nothing
 end
 
-# Kernel body (see Backend.jl): a ghost takes its piece's displacement; interior particles are left alone.
-@inline function _place_ghost!(p, X, normals, curvs, isb, tags, tm_pos, tm_nrm)
+# The rigid displacement of a piece between two poses, as `_place_ghost!` applies it: `x -> c_to + R (x - c_from)`
+struct _Placement{D, T, L}
+    R::SMatrix{D, D, T, L}
+    c_from::Space{D, T}
+    c_to::Space{D, T}
+end
+_Placement(from::RigidMotion, to::RigidMotion) = _Placement(to.R * from.R', from.c, to.c)
+
+# The moving piece of each boundary tag (index `tag + 1`, 0 = static), as a fixed-size bits table for the kernels
+function _piece_table(geom::GeometricDomain)
+    pot = geom.piece_of_tag
+    length(pot) <= 64 || throw(ArgumentError("moving boundaries support boundary tags up to 63 (got $(length(pot) - 1))"))
+    return ntuple(i -> i <= length(pot) ? Int8(pot[i]) : Int8(0), Val(64))
+end
+
+# Kernel body (see Backend.jl): a ghost of a moving piece takes the piece's displacement; static ghosts and interior
+# particles are left alone.
+@inline function _place_ghost!(p, X, normals, curvs, isb, tags, ptab, moves, turns)
     @inbounds begin
         isb[p] || return nothing
-        k = tags[p] + 1
-        X[p]       = move(tm_pos[k], X[p])
+        k  = tags[p] + 1
+        pc = 1 <= k <= 64 ? Int(ptab[k]) : 0
+        pc == 0 && return nothing
+        m  = moves[pc]
+        X[p] = m.c_to + m.R * (X[p] - m.c_from)
+        R  = turns[pc]
         n_old      = normals[p]
-        normals[p] = rotate(tm_nrm[k], n_old)
-        curvs[p]   = _rotate_curvature(curvs[p], n_old, normals[p], tm_nrm[k].R)
+        normals[p] = R * n_old
+        curvs[p]   = _rotate_curvature(curvs[p], n_old, normals[p], R)
     end
     return nothing
 end
