@@ -699,10 +699,18 @@ function _sdf_hessian(s::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
     h  = (eps(T) * max(one(T), maximum(abs, x)))^(one(T) / 4)
     H1 = _fd_hessian(s, x, h)
     # Across a kink (a corner of a polygon, an edge where two pieces meet) the second differences are of size 1/h and
-    # mean nothing: the step and its double disagree there, while a smooth wall gives the same curvature with both
-    H2 = _fd_hessian(s, x, 2h)
+    # mean nothing. A smooth wall gives the same curvature with the step, its double and its quadruple; near a vertex
+    # of a polygon whose edges are not axis-aligned two of the steps could agree by coincidence (a triangle: 1/h
+    # curvatures accepted at wall points 1-1.5 steps from the apex), so three must agree, and a radius below ten
+    # steps, which this stencil cannot resolve, is dropped as well
+    z  = zero(SMatrix{D, D, T, D * D})
     nH = maximum(abs, H1)
-    return maximum(abs, H1 - H2) <= T(0.1) * nH + sqrt(eps(T)) / h ? H1 : zero(SMatrix{D, D, T, D * D})
+    h * nH <= T(0.1) || return z
+    tol = T(0.1) * nH + sqrt(eps(T)) / h
+    H2 = _fd_hessian(s, x, 2h)
+    maximum(abs, H1 - H2) <= tol || return z
+    H4 = _fd_hessian(s, x, 4h)
+    return maximum(abs, H2 - H4) <= tol ? H1 : z
 end
 function _fd_hessian(s::AbstractShape{D, T}, x::Space{D, T}, h::T) where {D, T}
     e(i) = Space{D, T}(ntuple(d -> d == i ? h : zero(T), Val(D)))

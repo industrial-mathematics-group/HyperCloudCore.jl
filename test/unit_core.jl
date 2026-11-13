@@ -860,6 +860,25 @@ end
     @test HyperCloudCore._sdf_hessian(_UserDisc(), SVector(0.3, 0.4)) ≈ HyperCloudCore._sdf_hessian(Ball((0.0, 0.0), 0.5), SVector(0.3, 0.4)) atol = 1e-6
     @test HyperCloudCore._sdf_hessian(_UserSquare(), SVector(0.5, 0.5)) == zero(SMatrix{2, 2, Float64, 4})
     @test HyperCloudCore._sdf_hessian(_UserSquare(), SVector(0.5, 0.1)) == zero(SMatrix{2, 2, Float64, 4})   # (a flat face)
+    # ... also next to the apex of a polygon whose edges are not axis-aligned (two steps agreed there by coincidence:
+    # 1/h curvatures at wall points 1-1.5 steps from the vertex); a triangle with apex (0, 0.5), scanned along an edge
+    struct _UserTriangle <: AbstractShape{2, Float64} end
+    function HyperCloudCore.signed_distance(::_UserTriangle, x::SVector{2, Float64})
+        vs = (SVector(0.0, 0.5), SVector(-0.433, -0.25), SVector(0.433, -0.25))
+        d, s = Inf, 1.0
+        for k in 1:3
+            a, b = vs[k], vs[mod1(k + 1, 3)]
+            e, w = b - a, x - a
+            q = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0)
+            d = min(d, sqrt(dot(q, q)))
+            (e[1] * w[2] - e[2] * w[1]) < 0 && (s = -s)
+        end
+        return -s * d
+    end
+    hfd = eps(Float64)^(1 / 4)
+    tri_e = normalize(SVector(-0.433, -0.75))
+    @test all(δ -> maximum(abs, HyperCloudCore._sdf_hessian(_UserTriangle(), SVector(0.0, 0.5) + δ * hfd * tri_e)) * hfd <= 0.1,
+              range(0.25, 6.0; length = 400))
     # `T` in a string is the run's float type
     g32 = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), T(1))"), Dict{Symbol, Any}(:T => Float32, :D => 2))
     @test g32.shape isa Ball{2, Float32}
