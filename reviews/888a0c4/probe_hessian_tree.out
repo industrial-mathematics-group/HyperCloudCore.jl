@@ -1,0 +1,12 @@
+2-D Ball                                       max |H - FD| 5.82e-08 (0 points near seams/kinks skipped)
+2-D complement(Ball)                           max |H - FD| 5.82e-08 (0 points near seams/kinks skipped)
+2-D Rotated(Translated(Ball)) centre           max |H - FD| 1.38e-07 (0 points near seams/kinks skipped)
+2-D Cuboid - Ball                              max |H - FD| 8.85e-08 (0 points near seams/kinks skipped)
+2-D Ball ∪ Ball                                max |H - FD| 1.39e-07 (1 points near seams/kinks skipped)
+2-D Ball ∩ Ball                                max |H - FD| 3.72e-08 (0 points near seams/kinks skipped)
+2-D Posed(rotating off-centre Ball, t=0.4)     max |H - FD| 2.39e-07 (0 points near seams/kinks skipped)
+2-D Tagged(Rotated(Ball))                      max |H - FD| 1.38e-07 (0 points near seams/kinks skipped)
+3-D Ball3                                      max |H - FD| 1.04e-07, encode/decode round trip 2.2e-15
+3-D Cuboid3 - Ball3                            max |H - FD| 1.03e-07, encode/decode round trip 1.8e-15
+3-D Rotated Ball3                              max |H - FD| 2.48e-07, encode/decode round trip 4.0e-15
+tangent basis jump across the helper-axis switch: 1.7320508077132146 (the decoded H is basis independent)

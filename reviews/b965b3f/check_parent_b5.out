@@ -1,0 +1,23 @@
+
+=== B5: 2-D piston in a channel with slip walls
+| method | N | finished | L1(ρ) | plateau ρ / u / p (exact) | shock x (exact) err/h | mass change | max |v⊥|/c₀ |
+| RK2MUSCL2(VK,AR,MLS2) | 150×25 | yes | 9.610e-03 | 1.4864 / -0.4992 / 1.7589 (1.4899 / -0.5000 / 1.7603) | 0.5407 (0.5438) 0.3 | – | 7.01e-03 |
+| RK2MUSCL2(VK,AR,MLS2) | 300×50 | yes | 4.933e-03 | 1.4891 / -0.4999 / 1.7603 (1.4899 / -0.5000 / 1.7603) | 0.5417 (0.5438) 0.4 | – | 6.64e-03 |
+| RK2MUSCL2(VK,AR,MLS2) | 600×100 | yes | 2.477e-03 | 1.4898 / -0.5000 / 1.7604 (1.4899 / -0.5000 / 1.7603) | 0.5430 (0.5438) 0.3 | – | 7.07e-03 |
+| RK3MUSCL3(EPD1,AR,MLS2) | 150×25 | yes | 1.018e-02 | 1.4881 / -0.4996 / 1.7601 (1.4899 / -0.5000 / 1.7603) | 0.5443 (0.5438) 0.0 | – | 8.27e-03 |
+| RK3MUSCL3(EPD1,AR,MLS2) | 300×50 | yes | 4.757e-03 | 1.4901 / -0.5000 / 1.7608 (1.4899 / -0.5000 / 1.7603) | 0.5439 (0.5438) 0.0 | – | 8.32e-03 |
+| RK3MUSCL3(EPD1,AR,MLS2) | 600×100 | yes | 2.407e-03 | 1.4901 / -0.5000 / 1.7605 (1.4899 / -0.5000 / 1.7603) | 0.5439 (0.5438) 0.0 | – | 8.70e-03 |
+  PASS RK2MUSCL2(VK,AR,MLS2): all runs finished                       
+  PASS RK2MUSCL2(VK,AR,MLS2): plateau ρ, p within 2.0 % at N = 600    ρ -0.01 %, p +0.00 %
+  PASS RK2MUSCL2(VK,AR,MLS2): plateau velocity within 1 % of c₂       Δu = +0.0000
+  PASS RK2MUSCL2(VK,AR,MLS2): shock within 2 h at N = 600             0.32 h
+  PASS RK2MUSCL2(VK,AR,MLS2): L1(ρ) order ≥ 0.6 (300 → 600)           0.99
+  PASS RK2MUSCL2(VK,AR,MLS2): transverse velocity ≤ 1 % of c₀         7.07e-03
+  PASS RK3MUSCL3(EPD1,AR,MLS2): all runs finished                     
+  PASS RK3MUSCL3(EPD1,AR,MLS2): plateau ρ, p within 2.0 % at N = 600  ρ +0.02 %, p +0.01 %
+  PASS RK3MUSCL3(EPD1,AR,MLS2): plateau velocity within 1 % of c₂     Δu = -0.0000
+  PASS RK3MUSCL3(EPD1,AR,MLS2): shock within 2 h at N = 600           0.03 h
+  PASS RK3MUSCL3(EPD1,AR,MLS2): L1(ρ) order ≥ 0.6 (300 → 600)         0.98
+  PASS RK3MUSCL3(EPD1,AR,MLS2): transverse velocity ≤ 1 % of c₀       8.70e-03
+
+=== Summary: 12 PASS, 0 FAIL

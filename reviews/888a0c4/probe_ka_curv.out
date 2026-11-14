@@ -1,0 +1,6 @@
+Float64  polyester  178 ball ghosts: max |H_fit - H_exact(t)| = 4.44e-15
+Float64  ka-cpu     178 ball ghosts: max |H_fit - H_exact(t)| = 4.44e-15
+Float64  KA vs Polyester: hessians 1.33e-15, stored curvatures 8.88e-16
+Float32  polyester  178 ball ghosts: max |H_fit - H_exact(t)| = 3.81e-06
+Float32  ka-cpu     178 ball ghosts: max |H_fit - H_exact(t)| = 3.58e-06
+Float32  KA vs Polyester: hessians 7.15e-07, stored curvatures 7.15e-07

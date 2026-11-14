@@ -1,0 +1,2 @@
+user square (FD Hessian)   264 ghosts: ρ in [0.037, 1.000], p in [0.010, 1.000], |u| in [0.539, 20.641]
+built-in Cuboid            264 ghosts: ρ in [1.000, 1.000], p in [1.000, 1.000], |u| in [0.539, 0.539]

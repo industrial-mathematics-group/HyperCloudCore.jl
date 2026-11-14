@@ -1,0 +1,49 @@
+=== disc_rotating_2d (Grid_Ns=[(100, 100), (200, 200)]) 08:46:14
+exit 0 08:47:26
+OK   RK2MUSCL2(VK) MLS=2 N=100x100 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=1.000e+00  min(p)=1.000e+00 at x=(-0.997,-0.998)  mass drift=4.00e-04  steps=275  runtime=2.8s
+OK   RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=1.000e+00  min(p)=1.000e+00 at x=(-0.999,-0.999)  mass drift=7.57e-05  steps=579  runtime=11.9s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=100x100 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=1.000e+00  min(p)=1.000e+00 at x=(-0.997,-0.998)  mass drift=4.00e-04  steps=275  runtime=2.6s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=1.000e+00  min(p)=1.000e+00 at x=(-0.999,-0.999)  mass drift=7.57e-05  steps=579  runtime=14.7s
+=== disc_static_2d (Grid_Ns=[(100, 100), (200, 200)]) 08:47:26
+exit 0 08:48:51
+OK   RK2MUSCL2(VK) MLS=2 N=100x100 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=6.441e-01  min(p)=5.562e-01 at x=(0.063,-0.138)  mass drift=-8.62e-04  steps=390  runtime=3.1s
+OK   RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=6.152e-01  min(p)=5.162e-01 at x=(0.071,-0.132)  mass drift=-3.09e-04  steps=764  runtime=14.7s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=100x100 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=6.619e-01  min(p)=5.698e-01 at x=(0.063,-0.138)  mass drift=-4.46e-04  steps=386  runtime=4.3s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=6.209e-01  min(p)=5.205e-01 at x=(0.070,0.133)  mass drift=-1.69e-04  steps=763  runtime=26.3s
+=== disc_moving_2d (Grid_Ns=[(100, 100), (200, 200)]) 08:48:51
+exit 0 08:51:04
+OK   RK2MUSCL2(VK) MLS=2 N=100x100 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=7.436e-01  min(p)=6.727e-01 at x=(-0.016,-0.158)  mass drift=7.10e-04  steps=344  runtime=5.2s
+OK   RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=6.848e-01  min(p)=5.971e-01 at x=(0.000,0.140)  mass drift=4.29e-04  steps=703  runtime=32.8s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=100x100 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=7.491e-01  min(p)=6.787e-01 at x=(-0.016,-0.158)  mass drift=7.08e-04  steps=343  runtime=6.3s
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.3/0.3  NaN=0  min(u1)=6.824e-01  min(p)=5.932e-01 at x=(0.000,0.140)  mass drift=4.47e-04  steps=701  runtime=45.5s
+=== annulus_vortex_2d (Grid_Ns=[(50, 50), (100, 100), (200, 200)]) 08:51:04
+exit 0 08:56:41
+OK   RK3MUSCL3 MLS=2 N=50x50 CFL=0.2 R=2.5    t=2/2  NaN=0  min(u1)=8.980e-01  min(p)=6.180e-01 at x=(0.285,0.411)  mass drift=-1.87e-03  steps=1048  runtime=2.7s  L1err(u1)=8.030e-03
+OK   RK3MUSCL3 MLS=2 N=100x100 CFL=0.2 R=2.5  t=2/2  NaN=0  min(u1)=9.045e-01  min(p)=6.221e-01 at x=(-0.124,0.484)  mass drift=-7.09e-04  steps=2051  runtime=10.7s  L1err(u1)=2.763e-03
+OK   RK3MUSCL3 MLS=2 N=200x200 CFL=0.2 R=2.5  t=2/2  NaN=0  min(u1)=9.074e-01  min(p)=6.240e-01 at x=(0.364,-0.343)  mass drift=-2.06e-04  steps=4376  runtime=79.0s  L1err(u1)=8.026e-04
+OK   RK2MUSCL2 MLS=2 N=50x50 CFL=0.2 R=2.5    t=2/2  NaN=0  min(u1)=8.918e-01  min(p)=6.136e-01 at x=(-0.457,-0.204)  mass drift=-5.93e-03  steps=1050  runtime=1.3s  L1err(u1)=2.311e-02
+OK   RK2MUSCL2 MLS=2 N=100x100 CFL=0.2 R=2.5  t=2/2  NaN=0  min(u1)=9.022e-01  min(p)=6.206e-01 at x=(-0.184,0.465)  mass drift=-1.84e-03  steps=2053  runtime=6.7s  L1err(u1)=7.179e-03
+OK   RK2MUSCL2 MLS=2 N=200x200 CFL=0.2 R=2.5  t=2/2  NaN=0  min(u1)=9.066e-01  min(p)=6.235e-01 at x=(0.354,0.353)  mass drift=-5.18e-04  steps=4379  runtime=42.8s  L1err(u1)=2.017e-03
+OK   RK2MUSCL2(VK) MLS=2 N=50x50 CFL=0.2 R=2.5 t=2/2  NaN=0  min(u1)=8.842e-01  min(p)=6.090e-01 at x=(-0.457,-0.204)  mass drift=-1.08e-02  steps=1052  runtime=1.2s  L1err(u1)=4.193e-02
+OK   RK2MUSCL2(VK) MLS=2 N=100x100 CFL=0.2 R=2.5 t=2/2  NaN=0  min(u1)=8.996e-01  min(p)=6.189e-01 at x=(-0.124,0.484)  mass drift=-3.12e-03  steps=2056  runtime=7.5s  L1err(u1)=1.216e-02
+OK   RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=2/2  NaN=0  min(u1)=9.062e-01  min(p)=6.229e-01 at x=(-0.270,0.421)  mass drift=-8.25e-04  steps=4383  runtime=52.0s  L1err(u1)=3.215e-03
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=50x50 CFL=0.2 R=2.5 t=2/2  NaN=0  min(u1)=8.980e-01  min(p)=6.180e-01 at x=(0.285,0.411)  mass drift=-1.87e-03  steps=1048  runtime=2.0s  L1err(u1)=8.030e-03
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=100x100 CFL=0.2 R=2.5 t=2/2  NaN=0  min(u1)=9.045e-01  min(p)=6.221e-01 at x=(-0.124,0.484)  mass drift=-7.09e-04  steps=2051  runtime=10.2s  L1err(u1)=2.763e-03
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=2/2  NaN=0  min(u1)=9.074e-01  min(p)=6.240e-01 at x=(0.364,-0.343)  mass drift=-2.06e-04  steps=4376  runtime=76.3s  L1err(u1)=8.026e-04
+=== oscillating_piston_1d () 08:56:41
+exit 0 08:57:32
+OK   RK3MUSCL3 MLS=2 N=150 CFL=0.2 R=2.5      t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.922)  mass drift=-7.97e-08  steps=210  runtime=1.0s  L1err(u1)=3.354e-06
+OK   RK3MUSCL3 MLS=2 N=300 CFL=0.2 R=2.5      t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.925)  mass drift=-4.72e-08  steps=495  runtime=0.0s  L1err(u1)=8.978e-07
+OK   RK3MUSCL3 MLS=2 N=600 CFL=0.2 R=2.5      t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.925)  mass drift=5.60e-10  steps=818  runtime=0.2s  L1err(u1)=2.930e-07
+OK   RK3MUSCL3 MLS=2 N=1200 CFL=0.2 R=2.5     t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.630)  mass drift=-5.72e-09  steps=1667  runtime=0.6s  L1err(u1)=2.422e-07
+OK   RK3MUSCL3 MLS=2 N=2400 CFL=0.2 R=2.5     t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.630)  mass drift=1.95e-09  steps=3456  runtime=2.4s  L1err(u1)=8.911e-08
+OK   RK2MUSCL2 MLS=2 N=150 CFL=0.2 R=2.5      t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.922)  mass drift=-1.95e-08  steps=210  runtime=0.1s  L1err(u1)=6.434e-06
+OK   RK2MUSCL2 MLS=2 N=300 CFL=0.2 R=2.5      t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.925)  mass drift=-4.29e-08  steps=495  runtime=0.0s  L1err(u1)=2.377e-06
+OK   RK2MUSCL2 MLS=2 N=600 CFL=0.2 R=2.5      t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.925)  mass drift=1.75e-09  steps=818  runtime=0.1s  L1err(u1)=6.872e-07
+OK   RK2MUSCL2 MLS=2 N=1200 CFL=0.2 R=2.5     t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.926)  mass drift=-4.83e-09  steps=1667  runtime=0.7s  L1err(u1)=3.536e-07
+OK   RK2MUSCL2 MLS=2 N=2400 CFL=0.2 R=2.5     t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.926)  mass drift=1.60e-09  steps=3456  runtime=2.0s  L1err(u1)=1.202e-07
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=150 CFL=0.2 R=2.5 t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.922)  mass drift=-8.06e-08  steps=210  runtime=0.3s  L1err(u1)=3.340e-06
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=300 CFL=0.2 R=2.5 t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.925)  mass drift=-4.73e-08  steps=495  runtime=0.1s  L1err(u1)=8.995e-07
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=600 CFL=0.2 R=2.5 t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.925)  mass drift=5.60e-10  steps=818  runtime=0.2s  L1err(u1)=2.930e-07
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=1200 CFL=0.2 R=2.5 t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.630)  mass drift=-5.46e-09  steps=1667  runtime=0.7s  L1err(u1)=2.422e-07
+OK   RK3MUSCL3(EPD1,U2) MLS=2 N=2400 CFL=0.2 R=2.5 t=0.5/0.5  NaN=0  min(u1)=9.999e-01  min(p)=9.999e-01 at x=(0.630)  mass drift=1.95e-09  steps=3456  runtime=2.2s  L1err(u1)=8.911e-08

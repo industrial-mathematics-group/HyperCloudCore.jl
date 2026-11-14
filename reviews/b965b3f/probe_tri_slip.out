@@ -1,0 +1,21 @@
+Float64  triangle       dx=0.02     225 ghosts: max ||u|-|U|| 5.246e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 1.413e-08
+Float64  triangle       dx=0.0125   575 ghosts: max ||u|-|U|| 6.380e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 1.391e-08
+Float64  triangle       dx=0.01     874 ghosts: max ||u|-|U|| 7.887e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 1.477e-08
+Float64  triangle       dx=0.005   3465 ghosts: max ||u|-|U|| 7.167e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 1.501e-08
+Float64  square rot 30  dx=0.02     248 ghosts: max ||u|-|U|| 6.078e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 8.862e-09
+Float64  square rot 30  dx=0.0125   616 ghosts: max ||u|-|U|| 4.807e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 8.846e-09
+Float64  square rot 30  dx=0.01     956 ghosts: max ||u|-|U|| 4.798e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 9.071e-09
+Float64  square rot 30  dx=0.005   3708 ghosts: max ||u|-|U|| 4.798e-10, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 1.245e-08
+     ghost Float32[0.0, 0.36] d = 0.016543204 n = Float32[0.65700996, -0.75388193] curv Float32[-20.39236, 0.0]
+Float32  triangle       dx=0.02     225 ghosts: max ||u|-|U|| 3.312e-01, p in [0.840, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 2, max stored |curv| 2.039e+01
+Float32  triangle       dx=0.0125   576 ghosts: max ||u|-|U|| 1.419e-05, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 3.841e-04
+     ghost Float32[0.0, 0.36] d = 0.016543204 n = Float32[0.65700996, -0.75388193] curv Float32[-20.39236, 0.0]
+Float32  triangle       dx=0.01     874 ghosts: max ||u|-|U|| 3.312e-01, p in [0.840, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 2, max stored |curv| 2.039e+01
+     ghost Float32[0.0, 0.36] d = 0.016543204 n = Float32[0.65700996, -0.75388193] curv Float32[-20.39236, 0.0]
+     ghost Float32[-0.004999995, 0.375] d = 0.006708211 n = Float32[0.8944276, -0.4472128] curv Float32[-8.420497, 0.0]
+     ghost Float32[0.004999995, 0.33000004] d = 0.027243033 n = Float32[-0.37899613, -0.9253983] curv Float32[-22.30619, 0.0]
+Float32  triangle       dx=0.005   3472 ghosts: max ||u|-|U|| 3.969e-01, p in [0.834, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 9, max stored |curv| 2.231e+01
+Float32  square rot 30  dx=0.02     248 ghosts: max ||u|-|U|| 2.253e-05, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 4.207e-04
+Float32  square rot 30  dx=0.0125   616 ghosts: max ||u|-|U|| 2.664e-05, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 4.568e-04
+Float32  square rot 30  dx=0.01     956 ghosts: max ||u|-|U|| 2.670e-05, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 4.241e-04
+Float32  square rot 30  dx=0.005   3708 ghosts: max ||u|-|U|| 2.271e-05, p in [1.000, 1.000], ghosts with ||u|-|U|| or |p-1| > 1e-3: 0, max stored |curv| 4.594e-04

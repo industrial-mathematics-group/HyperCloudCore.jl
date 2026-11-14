@@ -150,10 +150,13 @@ struct ParticleGridCore{D, T, VP <: AbstractVector{Space{D, T}}, VB <: AbstractV
     # Read by the conditions that build ghost states from the interior (`ExtrapolationBC`, `MirrorBC`).
     normals::VP
     wall_distances::VT
+    # The curvature of that wall (the Hessian of the signed distance at the wall point, in a tangent basis of the
+    # normal: `_encode_curvature`), read by `MirrorBC` operators through `WallPoint.hessian`.
+    wall_curvatures::VP
 end
-ParticleGridCore{D, T}(positions, is_boundary, volumes, tags::VI, particle_orders::VI, normals, wall_distances) where {D, T, VI} =
+ParticleGridCore{D, T}(positions, is_boundary, volumes, tags::VI, particle_orders::VI, normals, wall_distances, wall_curvatures) where {D, T, VI} =
     ParticleGridCore{D, T, typeof(positions), typeof(is_boundary), typeof(volumes), VI}(positions, is_boundary, volumes, tags,
-                                                                                        particle_orders, normals, wall_distances)
+                                                                                        particle_orders, normals, wall_distances, wall_curvatures)
 
 """
     ParticleGrid{D, M, T, WF, GM, N_OFF, Geom, META, CORE, SH, NB, RD, BINS, VS}
@@ -251,7 +254,7 @@ function ParticleGrid(
     
     comp_domain = ComputationalDomain(geom, nominal_dx, interp_range_factor)
     
-    positions, is_boundary, tags, volumes, _, normals, wall_distances = get_points(
+    positions, is_boundary, tags, volumes, _, normals, wall_distances, wall_curvatures = get_points(
         comp_domain, geom;
         nominal_dx = nominal_dx,
         interp_range_factor = interp_range_factor,
@@ -269,7 +272,7 @@ function ParticleGrid(
     # Every per-particle array is a `Growable`, so a grid can grow on a device as well (adaptivity copies
     # its result back into the device grid in place). The reordering state stays a host object.
     core = ParticleGridCore{D, T}(Growable(positions), Growable(is_boundary), Growable(volumes), Growable(tags), Growable(zeros(Int, N)),
-                                  Growable(normals), Growable(wall_distances))
+                                  Growable(normals), Growable(wall_distances), Growable(wall_curvatures))
 
     shared = SharedBuffers{D, M, T}(Growable(zeros(State{M, T}, N)), Growable(similar(positions)), Growable(zeros(T, N)),
                                     Growable(zeros(T, N)), Growable(zeros(Bool, N)), Growable(zeros(Int, N)))
@@ -490,6 +493,7 @@ end
     ensure_capacity!(core.particle_orders, req_capacity)
     ensure_capacity!(core.normals, req_capacity)
     ensure_capacity!(core.wall_distances, req_capacity)
+    ensure_capacity!(core.wall_curvatures, req_capacity)
     return nothing
 end
 

@@ -1,0 +1,13 @@
+
+=== B5: 2-D piston in a channel with slip walls
+| method | N | finished | L1(ρ) | plateau ρ / u / p (exact) | shock x (exact) err/h | mass change | max |v⊥|/c₀ |
+| RK2MUSCL2(VK,AR,MLS2) | 150×25 | **no** | | | | | |
+| RK2MUSCL2(VK,AR,MLS2) | 300×50 | **no** | | | | | |
+| RK2MUSCL2(VK,AR,MLS2) | 600×100 | **no** | | | | | |
+| RK3MUSCL3(EPD1,AR,MLS2) | 150×25 | **no** | | | | | |
+| RK3MUSCL3(EPD1,AR,MLS2) | 300×50 | **no** | | | | | |
+| RK3MUSCL3(EPD1,AR,MLS2) | 600×100 | **no** | | | | | |
+  FAIL RK2MUSCL2(VK,AR,MLS2): all runs finished                       
+  FAIL RK3MUSCL3(EPD1,AR,MLS2): all runs finished                     
+
+=== Summary: 0 PASS, 2 FAIL

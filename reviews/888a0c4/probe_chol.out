@@ -1,0 +1,33 @@
+T=Float64 B=1: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float64 B=2: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float64 B=3: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float64 B=4: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float64 B=6: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float64 B=10: factor differs bitwise in 79/200, success flag differs in 0/200
+T=Float64 B=15: factor differs bitwise in 95/200, success flag differs in 0/200
+T=Float64 B=20: factor differs bitwise in 123/200, success flag differs in 0/200
+T=Float64 B=24: factor differs bitwise in 161/200, success flag differs in 0/200
+T=Float32 B=1: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float32 B=2: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float32 B=3: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float32 B=4: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float32 B=6: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float32 B=10: factor differs bitwise in 0/200, success flag differs in 0/200
+T=Float32 B=15: factor differs bitwise in 69/200, success flag differs in 0/200
+T=Float32 B=20: factor differs bitwise in 130/200, success flag differs in 0/200
+T=Float32 B=24: factor differs bitwise in 119/200, success flag differs in 0/200
+zero pivot     SA: info=2 factors=[0.0 0.0; 0.0 1.0] | sym: info=1 factors=[0.0 0.0; 0.0 0.0] pivots_ok=false
+singular 2x2   SA: info=0 factors=[1.0 1.0; 0.0 0.0] | sym: info=2 factors=[0.0 0.0; 0.0 0.0] pivots_ok=false
+NaN            SA: info=1 factors=[NaN 0.0; 0.0 1.0] | sym: info=1 factors=[0.0 0.0; 0.0 0.0] pivots_ok=false
+neg            SA: info=1 factors=[-1.0 0.0; 0.0 1.0] | sym: info=1 factors=[0.0 0.0; 0.0 0.0] pivots_ok=false
+NaN offdiag    SA: info=2 factors=[1.0 NaN; NaN 1.0] | sym: info=2 factors=[0.0 0.0; 0.0 0.0] pivots_ok=false
+Inf            SA: info=0 factors=[Inf 0.0; 0.0 1.0] | sym: info=0 factors=[Inf 0.0; 0.0 1.0] pivots_ok=false
+moment of rank-1 3x3: ok=true info=0
+moment of zero 3x3: ok=false info=1
+allocs B=10: 0
+┌ Warning: Assignment to `A` in soft scope is ambiguous because a global variable by the same name exists: `A` will be treated as a new local. Disambiguate by using `local A` to suppress this warning or `global A` to assign to the existing global variable.
+└ @ ~/.claude/jobs/a4b4be7c/tmp/rr6/probes/probe_chol.jl:36
+B=28: first call (compile) 0.6 s, rel diff to LAPACK 7.72265928040113e-16, allocs 0
+   StaticArrays B=28 (heap path) first call 2.7 s, allocs 12720
+B=35: first call (compile) 1.1 s, rel diff to LAPACK 8.480098395220139e-16, allocs 0
+   StaticArrays B=35 (heap path) first call 5.3 s, allocs 19888

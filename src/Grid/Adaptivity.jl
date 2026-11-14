@@ -294,7 +294,8 @@ function _upload_particles!(pg::ParticleGrid, hg::ParticleGrid)
     for (dst, src) in ((pg.core.positions, hg.core.positions), (pg.core.is_boundary, hg.core.is_boundary),
                        (pg.core.tags, hg.core.tags), (pg.core.particle_orders, hg.core.particle_orders),
                        (pg.core.volumes, hg.core.volumes), (pg.core.normals, hg.core.normals),
-                       (pg.core.wall_distances, hg.core.wall_distances), (pg.rhos, hg.rhos), (pg.curvatures, hg.curvatures))
+                       (pg.core.wall_distances, hg.core.wall_distances), (pg.core.wall_curvatures, hg.core.wall_curvatures),
+                       (pg.rhos, hg.rhos), (pg.curvatures, hg.curvatures))
         copyto!(parent(dst), 1, parent(src), 1, N)
     end
     pg.meta.N          = N
@@ -697,6 +698,7 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
             core.volumes[w]         = core.volumes[i]
             core.normals[w]         = core.normals[i]
             core.wall_distances[w]  = core.wall_distances[i]
+            core.wall_curvatures[w] = core.wall_curvatures[i]
             pg.rhos[w]              = pg.rhos[i]
             pg.curvatures[w]        = pg.curvatures[i]
         end
@@ -708,7 +710,7 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
         core.tags[w]            = 0
         core.particle_orders[w] = max_order
         core.volumes[w]         = new_vol[a]
-        core.normals[w], core.wall_distances[w] = _ghost_geometry(pg.geometry, new_pos[a], pg.meta.boundary_time)
+        core.normals[w], core.wall_distances[w], core.wall_curvatures[w] = _ghost_geometry_curv(pg.geometry, new_pos[a], pg.meta.boundary_time)
         pg.rhos[w]              = new_rho[a]
         pg.curvatures[w]        = zero(State{M, T})
         w += 1

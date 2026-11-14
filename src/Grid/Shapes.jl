@@ -682,3 +682,93 @@ function _pose_derivatives(pc::Moving{D, T}, t::T) where {D, T}
     mp, mm = pose(pc, t + δ), pose(pc, t - δ)
     return (mp.v - mm.v) / (2δ), (mp.Ω - mm.Ω) / (2δ)
 end
+
+# =========================================================================
+# Curvature of the wall: the Hessian of the signed distance at a wall point
+# =========================================================================
+# ∇∇φ of the region's signed distance at a point of its boundary: the shape operator of the wall there (tangential to
+# it). For a unit tangent t, t ⋅ H t > 0 where the region's boundary bends towards the region's outside like the
+# inside of a cylinder seen from within (concave from the fluid, the centre of curvature in the region), < 0 where it
+# bends away (a disc obstacle, convex from the fluid). A slip wall needs it for the normal momentum of a flow along a
+# curved wall, ∂p/∂n = ρ u_t ⋅ H u_t (the even mirror, ∂p/∂n = 0, is first order at curved walls). Analytic for the
+# primitives; composites take the active child's (as `_probe`), a complement the negative; finite differences of
+# `signed_distance` for other shapes.
+function _sdf_hessian(s::AbstractShape{D, T}, x::Space{D, T}) where {D, T}
+    # Step for second differences of a distance of size |x| known to eps(T) |x|: (eps |x|)^(1/4) (a step of
+    # eps^(1/4) |x| put a Float32 circle about (10, 10) 29 % off)
+    h  = (eps(T) * max(one(T), maximum(abs, x)))^(one(T) / 4)
+    H1 = _fd_hessian(s, x, h)
+    # Across a kink (a corner of a polygon, an edge where two pieces meet) the second differences are of size 1/h and
+    # mean nothing. A smooth wall gives the same curvature with the step, its double and its quadruple; near a vertex
+    # of a polygon whose edges are not axis-aligned two of the steps could agree by coincidence (a triangle: 1/h
+    # curvatures accepted at wall points 1-1.5 steps from the apex), so three must agree, and a radius below ten
+    # steps, which this stencil cannot resolve, is dropped as well
+    z  = zero(SMatrix{D, D, T, D * D})
+    nH = maximum(abs, H1)
+    h * nH <= T(0.1) || return z
+    tol = T(0.1) * nH + sqrt(eps(T)) / h
+    H2 = _fd_hessian(s, x, 2h)
+    maximum(abs, H1 - H2) <= tol || return z
+    H4 = _fd_hessian(s, x, 4h)
+    return maximum(abs, H2 - H4) <= tol ? H1 : z
+end
+function _fd_hessian(s::AbstractShape{D, T}, x::Space{D, T}, h::T) where {D, T}
+    e(i) = Space{D, T}(ntuple(d -> d == i ? h : zero(T), Val(D)))
+    φ0 = signed_distance(s, x)
+    return SMatrix{D, D, T, D * D}(ntuple(Val(D * D)) do k
+        i, j = (k - 1) % D + 1, (k - 1) ÷ D + 1
+        i == j ? (signed_distance(s, x + e(i)) - 2φ0 + signed_distance(s, x - e(i))) / h^2 :
+                 (signed_distance(s, x + e(i) + e(j)) - signed_distance(s, x + e(i) - e(j)) -
+                  signed_distance(s, x - e(i) + e(j)) + signed_distance(s, x - e(i) - e(j))) / (4h^2)
+    end)
+end
+_sdf_hessian(::Union{Cuboid{D, T}, HalfSpace{D, T}}, x::Space{D, T}) where {D, T} = zero(SMatrix{D, D, T, D * D})
+function _sdf_hessian(b::Ball{D, T}, x::Space{D, T}) where {D, T}
+    r = x - b.center
+    ρ = sqrt(sum(abs2, r))
+    ρ > zero(T) || return zero(SMatrix{D, D, T, D * D})
+    u = r / ρ
+    return (SMatrix{D, D, T, D * D}(I) - u * u') / ρ
+end
+@inline _hessian_select(shapes::Tuple{Any}, x, better) = (signed_distance(shapes[1], x), _sdf_hessian(shapes[1], x))
+@inline function _hessian_select(shapes::Tuple, x, better)
+    φa = signed_distance(shapes[1], x)
+    b  = _hessian_select(Base.tail(shapes), x, better)
+    return better(b[1], φa) ? b : (φa, _sdf_hessian(shapes[1], x))
+end
+_sdf_hessian(u::UnionShape{D, T}, x::Space{D, T}) where {D, T} = _hessian_select(u.shapes, x, <)[2]
+_sdf_hessian(u::IntersectionShape{D, T}, x::Space{D, T}) where {D, T} = _hessian_select(u.shapes, x, >)[2]
+_sdf_hessian(c::ComplementShape{D, T}, x::Space{D, T}) where {D, T} = -_sdf_hessian(c.shape, x)
+_sdf_hessian(t::Tagged{D, T}, x::Space{D, T}) where {D, T} = _sdf_hessian(t.shape, x)
+_sdf_hessian(t::Translated{D, T}, x::Space{D, T}) where {D, T} = _sdf_hessian(t.shape, x - t.offset)
+_sdf_hessian(r::Rotated{D, T}, x::Space{D, T}) where {D, T} = r.R * _sdf_hessian(r.shape, _local(r, x)) * r.R'
+_sdf_hessian(p::Posed{D, T}, x::Space{D, T}) where {D, T} = p.motion.R * _sdf_hessian(p.shape, world_to_body(p.motion, x)) * p.motion.R'
+_sdf_hessian(m::Moving{D, T}, x::Space{D, T}) where {D, T} = _sdf_hessian(Posed(m, zero(T)), x)
+
+# The stored form of the wall curvature (`pg.core.wall_curvatures`, a `Space{D, T}` per particle like the normals):
+# the Hessian in a tangent basis of the normal, 2-D `(t ⋅ H t, 0)`, 3-D `(t₁ ⋅ H t₁, t₁ ⋅ H t₂, t₂ ⋅ H t₂)`, 1-D none.
+# The basis is a function of the normal alone, so a rotation of the wall (a moving piece) is a re-encoding with the
+# rotated normal (`_rotate_curvature`; nothing to do in 2-D, where t turns with n). Kernel-safe.
+@inline _tangent2(n::Space{2, T}) where {T} = Space{2, T}(-n[2], n[1])
+@inline function _tangents3(n::Space{3, T}) where {T}
+    a = abs.(n)
+    e = a[1] <= a[2] && a[1] <= a[3] ? Space{3, T}(1, 0, 0) : a[2] <= a[3] ? Space{3, T}(0, 1, 0) : Space{3, T}(0, 0, 1)
+    t1 = cross(n, e)
+    t1 = t1 / sqrt(sum(abs2, t1))
+    return t1, cross(n, t1)
+end
+@inline _encode_curvature(H::SMatrix{1, 1, T}, n::Space{1, T}) where {T} = zero(Space{1, T})
+@inline _encode_curvature(H::SMatrix{2, 2, T}, n::Space{2, T}) where {T} = (t = _tangent2(n); Space{2, T}(t' * H * t, zero(T)))
+@inline function _encode_curvature(H::SMatrix{3, 3, T}, n::Space{3, T}) where {T}
+    t1, t2 = _tangents3(n)
+    return Space{3, T}(t1' * H * t1, t1' * H * t2, t2' * H * t2)
+end
+@inline _decode_curvature(c::Space{1, T}, n::Space{1, T}) where {T} = zero(SMatrix{1, 1, T, 1})
+@inline _decode_curvature(c::Space{2, T}, n::Space{2, T}) where {T} = (t = _tangent2(n); c[1] * (t * t'))
+@inline function _decode_curvature(c::Space{3, T}, n::Space{3, T}) where {T}
+    t1, t2 = _tangents3(n)
+    return c[1] * (t1 * t1') + c[2] * (t1 * t2' + t2 * t1') + c[3] * (t2 * t2')
+end
+@inline _rotate_curvature(c::Space{D, T}, n_old, n_new, R) where {D, T} = c
+@inline _rotate_curvature(c::Space{3, T}, n_old::Space{3, T}, n_new::Space{3, T}, R) where {T} =
+    _encode_curvature(R * _decode_curvature(c, n_old) * R', n_new)
