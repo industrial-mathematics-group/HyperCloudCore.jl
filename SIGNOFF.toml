@@ -1,7 +1,15 @@
-# AI declarations of the files, checked by aisignoff (migrated from aidecl and from format version 1).
+# AI declarations, checked by aisignoff: file-level annotations below, line-level declarations from [history].
 # Scheme: https://github.com/industrial-mathematics-group/.github/blob/main/.github/CONTRIBUTING.md#ai-assisted-contributions
 version = 3
 exclude = ["reviews/**"]   # committed AI reviews (CONTRIBUTING.md) need no declaration
+
+# Line by line: the commit that landed a line on main declares it. For a pull request into main that is its
+# merge commit, whose message is the PR description with the ticked AI declaration of the template; main_dev
+# lands through the "Main dev" pull requests on GitHub. Lines whose commit declares nothing keep the
+# file-level declarations of the annotations below.
+[history]
+default-branch = "main"
+merge-method = "merge"
 
 [[annotations]]
 path = "**"
@@ -48,6 +56,10 @@ Reviewed-by = "blhackslash <dev@blackslash.win>"
 AI-Review = "A2"
 AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"
 
+# The file lists below stay until SIGNOFF.snapshot.json holds the levels they give: `aisignoff freeze` on main
+# after the next "Main dev" merge, then the lists are deleted. Their review levels are already the
+# attestations at the end of this file; generation, and reviews below the folder defaults, can't be attested.
+
 # Further files changed by Claude agents for the A2 reviews (claude/review-numerics), reviewed again in reviews/.
 [[annotations]]
 path = ["docs/src/time_integration/mood.md", "src/API.jl", "src/Interpolation/Interpolators.jl", "src/Interpolation/MUSCL_hooks.jl", "src/Types.jl", "test/kinetic_source.jl"]
@@ -66,3 +78,66 @@ AI-Review = "A1"
 AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), same session"
 Human-Review = "H1"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
+
+# Reviews of whole files, as of the content that was checked (`aisignoff attest`): lines changed afterwards fall
+# back to the commit that changed them. Taken from the file lists above, with their Human-Review (H1 and up) and
+# AI-Review, for the content each file had at the commit that last set its list.
+[[attestations]]
+path = "docs/src/time_integration/mood.md"
+blob = "6311dcf7d90c649384ba1c71a54b726bb1c9bf5a"
+AI-Review = "A2"
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+
+[[attestations]]
+path = "src/API.jl"
+blob = "7fc23983f3df4559e0bd7077227cf0ffdc77782a"
+AI-Review = "A2"
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+
+[[attestations]]
+path = "src/Interpolation/Interpolators.jl"
+blob = "a2ce97645317db4a4cd97131eaaf8bdbd12f96f0"
+AI-Review = "A2"
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+
+[[attestations]]
+path = "src/Interpolation/MUSCL_hooks.jl"
+blob = "b7c2395ea160d2c1cb63430f18cd315e26cb06a4"
+AI-Review = "A2"
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+
+[[attestations]]
+path = "src/Types.jl"
+blob = "f6508a589a9edbde66891b8ad1cab45827532599"
+AI-Review = "A2"
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+
+[[attestations]]
+path = "test/kinetic_source.jl"
+blob = "b60fd2a713f43c739cba0a531042e81b627191fd"
+AI-Review = "A2"
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+
+[[attestations]]
+path = ".github/workflows/file-signoff.yml"
+blob = "f7192628ae1080e1bed28d94f1596613face206e"
+Human-Review = "H1"
+AI-Review = "A1"
+Reviewed-by = ["blhackslash <dev@blackslash.win>"]
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), same session"]
+
+[[attestations]]
+path = ".github/workflows/pr-signoff.yml"
+blob = "ab2dcedb2970f8817b72ef54a2e03952a475bf34"
+Human-Review = "H1"
+AI-Review = "A1"
+Reviewed-by = ["blhackslash <dev@blackslash.win>"]
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), same session"]
+
+[[attestations]]
+path = ".github/workflows/signoff-badges.yml"
+blob = "4337b163b254e1e6eed94eed6866d089cd594a2b"
+Human-Review = "H1"
+AI-Review = "A1"
+Reviewed-by = ["blhackslash <dev@blackslash.win>"]
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), same session"]
