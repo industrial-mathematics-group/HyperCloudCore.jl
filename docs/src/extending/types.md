@@ -35,6 +35,7 @@ Velocity
 | `GridMover` | grid velocity models | [Moving Grids (ALE)](@ref) |
 | `VolumeEstimator` | particle quadrature weights | `update_volumes!(pg, est)`, see [Particle Volumes and Adaptivity](@ref) |
 | `AbstractBoundaryCondition` | boundary conditions | [Boundary Conditions](@ref) |
+| `AbstractShape` | signed-distance descriptions of the physical region | [Geometric Domains](@ref) |
 | `MLSWeightFunction` | MLS kernels | [MLS Weight Functions](@ref) |
 | `TimeStepper` | a different time integrator | functor `(ts)(eq, pg, t, dt)` |
 

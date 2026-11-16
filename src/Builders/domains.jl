@@ -55,9 +55,14 @@ end
 
 - `:rectangular`: [`get_rectangular_domain`](@ref) on the box `:mins`, `:maxs`;
 - `:spherical`: [`get_spherical_domain`](@ref) with the midpoint of the box as centre and half its first
-  extent as radius (needs `context[:D]`).
+  extent as radius (needs `context[:D]`);
+- `:shape`: the [`AbstractShape`](@ref) in `:shape` (an instance, or a string of Julia code that evaluates to
+  one, in which `T` is the run's float type: `"Ball((T(0), T(0)), T(0.5))"` works for Float32 and Float64), with
+  `:mins`/`:maxs` where the shape is unbounded (optional otherwise; several statements separated by `;` work, and
+  `T` shadows a global `T` of `Main`). A string is also what the parameter hash sees in full: the motion of a
+  `Moving` piece is a function, which the hash of an instance does not see.
 
-Both read `:periodic` (`Bool` or `NTuple{D, Bool}`, default `false`) and the boundary conditions
+All read `:periodic` (`Bool` or `NTuple{D, Bool}`, default `false`) and the boundary conditions
 (`:bc`, see [`parse_bc`](@ref)). A [`GeometricDomain`](@ref) among the values of `domain_conf` is returned
 as it is, so a pre-built domain can be passed through the configuration.
 """
@@ -93,6 +98,54 @@ function build_domain(::Val{:rectangular}, domain_conf::Dict, context::Dict)
     req_maxs = Tuple(T.(domain_conf[:maxs]))
     
     return get_rectangular_domain(T, req_mins, req_maxs; bc_map = bc_map, is_periodic = is_per)
+end
+
+# `;`-separated statements parse into (nested) `:toplevel` expressions, which `eval` runs outside an enclosing `let`
+_toplevel_to_block(ex) = ex isa Expr && ex.head === :toplevel ? Expr(:block, map(_toplevel_to_block, ex.args)...) : ex
+
+# Anonymous functions in the string (`Tagged(box, t -> t + 4)`, a motion `t -> RigidMotion(...)`) are wrapped in
+# `_Latest`: `Core.eval` defines them in a world newer than the running build, and calling them from it was a
+# MethodError ("method too new to be called from this world context"). Named functions defined in the string are
+# not wrapped: define them in the session instead.
+_wrap_closures(ex) = ex
+function _wrap_closures(ex::Expr)
+    ex.head === :quote && return ex
+    args = map(_wrap_closures, ex.args)
+    anonymous = ex.head === :-> || (ex.head === :function && !(args[1] isa Expr && args[1].head === :call))
+    return anonymous ? Expr(:call, GlobalRef(@__MODULE__, :_Latest), Expr(ex.head, args...)) : Expr(ex.head, args...)
+end
+
+function build_domain(::Val{:shape}, domain_conf::Dict, context::Dict)
+    haskey(domain_conf, :shape) || error("Domain :shape needs the key :shape (an AbstractShape)")
+    shape = domain_conf[:shape]
+    T = real_type(context)
+    # A string is evaluated in `Main`, where the user's own shape types live (HyperCloudCore's shapes are visible
+    # there through `using HyperCloud`/`using HyperCloudCore`); HyperCloudCore itself if `Main` doesn't know a name.
+    # `T` is bound to the run's float type.
+    if shape isa String
+        body = Meta.parseall(shape)                       # statements separated by `;` or newlines
+        bad = findfirst(a -> a isa Expr && a.head in (:incomplete, :error), body.args)
+        bad === nothing ||
+            throw(ArgumentError("Domain :shape: the string is not valid Julia code: " * sprint(showerror, body.args[bad].args[1])))
+        body = _wrap_closures(_toplevel_to_block(body))
+        ex = :(let T = $T; $body; end)
+        shape = try
+            Core.eval(Main, ex)
+        catch e
+            e isa UndefVarError || rethrow()
+            eval(ex)
+        end
+    end
+    shape isa AbstractShape || error("Domain :shape: :shape must be an AbstractShape, got $(typeof(shape))")
+    eltype(shape) == T ||
+        error("Domain :shape: the shape has element type $(eltype(shape)), the run uses $T; build the shape in $T")
+    haskey(context, :D) && ndims(shape) != context[:D] &&
+        error("Domain :shape: the shape is $(ndims(shape))-D, the run is $(context[:D])-D")
+    bc_map = parse_bc(domain_conf)
+    is_per = get(domain_conf, :periodic, false)
+    mins = haskey(domain_conf, :mins) ? Tuple(T.(domain_conf[:mins])) : nothing
+    maxs = haskey(domain_conf, :maxs) ? Tuple(T.(domain_conf[:maxs])) : nothing
+    return GeometricDomain(shape; bc_map = bc_map, is_periodic = is_per, mins = mins, maxs = maxs)
 end
 
 function build_domain(::Val{:spherical}, domain_conf::Dict, context::Dict)

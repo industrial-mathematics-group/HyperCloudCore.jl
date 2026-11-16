@@ -15,7 +15,8 @@ using Adapt
 Adapt.adapt_structure(to, m::GridMetadata) = GridMetadataView(m)
 
 Adapt.adapt_structure(to, c::ParticleGridCore{D, T}) where {D, T} = ParticleGridCore{D, T}(
-    adapt(to, c.positions), adapt(to, c.is_boundary), adapt(to, c.volumes), adapt(to, c.tags), adapt(to, c.particle_orders))
+    adapt(to, c.positions), adapt(to, c.is_boundary), adapt(to, c.volumes), adapt(to, c.tags), adapt(to, c.particle_orders),
+    adapt(to, c.normals), adapt(to, c.wall_distances), adapt(to, c.wall_curvatures))
 
 Adapt.adapt_structure(to, nd::NeighborData{D, T, WF}) where {D, T, WF} = NeighborData{D, T, WF}(
     nd.weight_func, adapt(to, nd.ranges), adapt(to, nd.indices), adapt(to, nd.weights), adapt(to, nd.distances),
@@ -73,7 +74,7 @@ writes through either grid are seen by both while their metadata can diverge. Us
 function device_grid(::Type{AT}, pg::ParticleGrid{D, M, T}) where {AT <: AbstractArray, D, M, T}
     m  = pg.meta
     to = ToStorage{AT}()
-    meta = GridMetadata{D, T}(m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version)
+    meta = GridMetadata{D, T}(m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version, m.boundary_time, m.sweep_time)
     # Neighbour slots: row-major on the host, slot-major on a device (converted on host arrays).
     nd_host = parent(pg.rhos) isa Array ? pg.neighbor : adapt(ToStorage{Array}(), pg.neighbor)
     nd_host = with_slot_layout(nd_host, m.N, AT === Array ? RowMajorSlots : SlotMajorSlots)

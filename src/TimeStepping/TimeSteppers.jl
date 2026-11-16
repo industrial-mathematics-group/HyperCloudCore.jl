@@ -271,7 +271,63 @@ without a MOOD criterion (`NoMOOD` checks nothing).
 """
 mood_inadmissible(ts::GeneralRKTimeStepper) = ts.work.inadmissible[]
 
-@inline _is_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover)
+# The moving-grid path (position stages, a neighbour search per step) also serves a static cloud whose boundary
+# pieces move: their ghost particles are placed every stage (`place_ghosts!`), the interior keeps `grid_velocity` 0.
+@inline _is_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover) || has_moving_pieces(pg.geometry)
+
+# A step starts with the ghosts of the moving pieces and the region at the step's time: a grid is generated at the
+# pieces' poses at t = 0, so a run that starts later (or resumes) first places the ghosts and sweeps the cloud to
+# `t` (the ghosts used to move from `t` by one step only and stay behind their piece for the rest of the run).
+# Moving pieces need a static interior: the volume estimators integrate the region at t = 0, so a grid mover's
+# re-estimated volumes would lose what the pieces uncovered.
+function _sync_boundaries!(pg::ParticleGrid{D, M, T}, t::T, max_order::Int) where {D, M, T}
+    pg.mover isa NoGridMover ||
+        throw(ArgumentError("moving pieces need a static interior cloud (NoGridMover), got $(nameof(typeof(pg.mover))): " *
+                            "the volume estimators integrate the region at t = 0"))
+    tol = 8 * eps(T) * max(one(T), abs(t))
+    (abs(pg.meta.boundary_time - t) <= tol && abs(pg.meta.sweep_time - t) <= tol) && return nothing
+    # In sub-intervals over which no piece moves more than a quarter spacing (the sweep's clearance): one sweep over
+    # a long way lost the uncovered region farther than R from every particle (Σ V 1.9535 for 1.96 after 6 spacings)
+    t0 = pg.meta.boundary_time
+    n  = _sync_substeps(pg, t0, t)
+    for k in 1:n
+        tk = k == n ? t : t0 + (t - t0) * T(k) / T(n)
+        place_ghosts!(pg, pg.core.positions, pg.meta.boundary_time, tk)
+        pg.neighbor(pg)
+        sweep_boundaries!(pg, pg.meta.sweep_time, tk, max_order)
+    end
+    return nothing
+end
+
+# Number of equal sub-intervals of [t0, t] over each of which every piece moves at most a quarter spacing: the
+# displacement of the corners of the piece's box in its body frame (the canvas corners for an unbounded piece; with
+# the canvas corners always, a ball spinning in place needed 4096 sub-steps to start at t = 5)
+function _sync_substeps(pg::ParticleGrid{D, M, T}, t0::T, t::T) where {D, M, T}
+    geom, cd = pg.geometry, pg.domain
+    lim = minimum(pg.meta.dx) / 4
+    box_corners(lo, hi) = [Space{D, T}(ntuple(d -> I[d] == 0 ? lo[d] : hi[d], Val(D))) for I in CartesianIndices(ntuple(_ -> 0:1, Val(D)))]
+    body = map(geom.pieces) do piece
+        lo, hi = bounding_box(piece.shape)
+        all(isfinite, lo) && all(isfinite, hi) ? (box_corners(lo, hi), true) : (box_corners(cd.canvas_mins, cd.canvas_maxs), false)
+    end
+    function moves(ta, tb)
+        dmax = zero(T)
+        for (piece, (pts, in_body)) in zip(geom.pieces, body)
+            ma, mb = pose(piece, ta), pose(piece, tb)
+            for x in pts
+                d = in_body ? HyperCloudCore.body_to_world(mb, x) - HyperCloudCore.body_to_world(ma, x) :
+                              mb.c + mb.R * (ma.R' * (x - ma.c)) - x
+                dmax = max(dmax, sqrt(sum(abs2, d)))
+            end
+        end
+        return dmax
+    end
+    n = 1
+    while n < 2^20 && any(k -> moves(t0 + (t - t0) * T(k - 1) / T(n), t0 + (t - t0) * T(k) / T(n)) > lim, 1:n)
+        n *= 2
+    end
+    return n
+end
 
 function update_size!(ts::GeneralRKTimeStepper, N::Int, M_neighbors::Int, moving::Bool)
     ensure_capacity!(ts.rho_n, N)
@@ -326,8 +382,14 @@ function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K
 end
 
 # Kernel bodies of the right-hand side (see Backend.jl): the scheme's pre-pass (cached gradients), then the flux pass.
+# Boundary particles take part in the full gather: their reconstruction gradients enter the interface states of
+# every wall pair. Skipped (gradient zero), the ghost side of a wall pair was piecewise constant and the wall rows
+# first order, and a condition that mirrors the numerical solution fed that error back (a channel wall, MUSCL3,
+# N = 80/160, t = 1: exact ghosts 1.5e-2/7.8e-3 and MirrorBC 3.8e-2/2.9e-2; gathered: 1.6e-2/2.4e-3 and
+# 2.0e-2/2.6e-3). A partial pass (MOOD re-form, same states, changed orders) does not need them: ghost orders
+# never change.
 @inline function _rhs_gather!(p, Y, is_boundary, nb_slices, ib, interp, pg, grad_mask, full)
-    (is_boundary[p] || !(full || grad_mask[p])) && return nothing
+    (full || grad_mask[p]) || return nothing
     fi = Y[p]; nb = nb_slices[p]
     update_content!(interp, p, fi, nb, pg, Y, ib)
     return nothing
@@ -517,8 +579,10 @@ end
     return nothing
 end
 
-# Switch the grid to stage geometry X (frozen topology or full search)
-function _apply_stage_geometry!(ts::GeneralRKTimeStepper, pg, X)
+# Switch the grid to stage geometry X (frozen topology or full search); the ghosts of moving pieces are placed at
+# the stage time first (X holds their positions of the step start)
+function _apply_stage_geometry!(ts::GeneralRKTimeStepper, pg, X, t_n, t_i)
+    place_ghosts!(pg, X, t_n, t_i)
     set_positions!(pg, X, ts.full_search_per_stage)
     ts.full_search_per_stage && uses_slot_buffers(ts.divergence_interpolator) && update_size!(ts.int_buffer, length(pg.neighbor.indices))
     return nothing
@@ -529,6 +593,7 @@ end
 # =========================================================================
 
 function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid, time::Real, dt::T) where {D, M, T}
+    has_moving_pieces(pg.geometry) && _sync_boundaries!(pg, T(time), _extract_order(ts.divergence_interpolator))
     N      = pg.meta.N
     s      = ts.num_stages
     interp = ts.divergence_interpolator
@@ -551,7 +616,7 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
             form_candidate!(ts, eq, pg, 1, dt, time)      # X_1 == x_n, grid already there
         else
             mood_checkpoint!(ts, eq, pg, i, dt, time)      # uses geometry of stage i-1
-            moving && _apply_stage_geometry!(ts, pg, ts.X_stages[i])
+            moving && _apply_stage_geometry!(ts, pg, ts.X_stages[i], time, time + ts.tableau.c_t[i] * dt)
         end
         ts.reset_orders_per_stage && fill!(view(orders, 1:N), max_order)
         compute_explicit_rhs!(ts, eq, pg, ts.K_E_stages[i], ts.K_X_stages[i], ts.Y_stages[i],
@@ -569,9 +634,13 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
     end
 
     if moving
+        place_ghosts!(pg, parent(ts.x_cand), time, time + dt)
         copyto!(pg.core.positions, 1, parent(ts.x_cand), 1, N)
         pg.neighbor(pg)                                    # full search + periodic wrap for the next step
-        ts.volume_estimator === nothing || update_volumes!(pg, ts.volume_estimator)
+        # Volumes are re-estimated when the interior moves; a static cloud with moving pieces keeps the volumes
+        # the remaps of `sweep_boundaries!` maintain (the region's volume changes with the pieces)
+        (ts.volume_estimator === nothing || pg.mover isa NoGridMover) || update_volumes!(pg, ts.volume_estimator)
+        has_moving_pieces(pg.geometry) && sweep_boundaries!(pg, time, time + dt, max_order)
     end
     return nothing
 end

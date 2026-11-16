@@ -75,9 +75,8 @@ Detects holes and clusters, applies the conservative remap for every event on th
 changes the particle set, and rebuilds the neighbour lists. `max_order` is the scheme's maximum
 consistency order (new particles start there, and `exclude_reduced_order` compares against it).
 Requires valid neighbour lists and volumes (`update_volumes!`). `mass_residual` is the change of the interior
-content `Σ V U` (boundary particles excluded) over the call, which should be at round-off level; with a
-`volume_estimator` the ghosts' content changes with their re-estimated volumes, so `total_mass` (which includes
-them) does not stay exact on grids with walls. Merges and insertions involve interior
+content `Σ V U` (boundary particles excluded, which carry no volume) over the call, which should be at
+round-off level. Merges and insertions involve interior
 particles only (no insertion between an interior particle and a ghost). On a grid whose buffers
 `reserve!` froze, a `CapacityError` is thrown before the grid is changed: the particle buffers and the neighbour
 slots the new particle set needs (`_slots_after_events`) are checked before the first remap.
@@ -91,6 +90,9 @@ one reduction per call.
 function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int) where {D, M, T}
     nothing_done = (inserted = 0, removed = 0, mass_residual = zero(State{M, T}))
     pg.meta.N == 0 && return nothing_done
+    (ad.volume_estimator !== nothing && has_moving_pieces(pg.geometry)) &&
+        throw(ArgumentError("adapt_particles!: a volume estimator together with moving pieces is not supported (the " *
+                            "estimators integrate the region at t = 0, the pieces have moved it); use volume_estimator = nothing"))
     _has_adapt_candidates(pg, ad) || return nothing_done
     mass0 = interior_mass(pg)
 
@@ -210,8 +212,8 @@ steps use, and the states stay the remap's up to that small correction. Keeping 
 (`U_i ← V_i^remap U_i / V_i^est`) would also be exact, but the remap's volumes (integrals of the Shepard partition)
 and an estimator's differ by several percent per particle near an event, which that would put into the states.
 `hg` is the host grid of the event work (`pg` itself on the host, its host copy for a device grid).
-Only the interior content is restored: the estimator also changes the volumes of ghost particles near an event, and
-their content change stays with them (it used to be moved onto the interior, i.e. across the wall).
+Ghost particles carry no volume, so the interior content is the whole content (up to 0.7.9 the ghosts had volumes
+and their content change was moved onto the interior, i.e. across the wall).
 """
 function _reestimate_volumes!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, est::VolumeEstimator,
                               changed::Dict{Int, Tuple{State{M, T}, State{M, T}}}) where {D, M, T}
@@ -291,7 +293,9 @@ function _upload_particles!(pg::ParticleGrid, hg::ParticleGrid)
     ensure_capacity!(pg, N)
     for (dst, src) in ((pg.core.positions, hg.core.positions), (pg.core.is_boundary, hg.core.is_boundary),
                        (pg.core.tags, hg.core.tags), (pg.core.particle_orders, hg.core.particle_orders),
-                       (pg.core.volumes, hg.core.volumes), (pg.rhos, hg.rhos), (pg.curvatures, hg.curvatures))
+                       (pg.core.volumes, hg.core.volumes), (pg.core.normals, hg.core.normals),
+                       (pg.core.wall_distances, hg.core.wall_distances), (pg.core.wall_curvatures, hg.core.wall_curvatures),
+                       (pg.rhos, hg.rhos), (pg.curvatures, hg.curvatures))
         copyto!(parent(dst), 1, parent(src), 1, N)
     end
     pg.meta.N          = N
@@ -309,10 +313,12 @@ end
 Radius around an accepted event centre within which no particle may start another event in the same call:
 `R (2 + 2√D) + dx`. Events are remapped one after the other on the old topology, so two remaps are only
 independent if neither sees a particle that the other removes or adds. The remap of an event at `c'` reads
-every particle within `R (1 + 2√D) + dx` of `c'` (its local set: the support of its quadrature box of
-half-width `2R`) and gives a share of its swept content to each of them; a particle that an earlier event
-removed would take that share with it when the particle set is compacted. The changed particles of an event
-lie within `R/2` of its centre, and a later event's centre lies within `R/2` of the particle that starts it,
+every particle within `(R + r_ev) √D + R + dx` of `c'` (its local set: the support of its quadrature box of
+half-width `R + r_ev`, `r_ev ≤ R/2` the reach of the event's particles; the former box of half-width `2R` gave
+`R (1 + 2√D) + dx`, which this spacing keeps) and gives a share of its swept content to each of them; a particle
+that an earlier event removed would take that share with it when the particle set is compacted. The changed
+particles of an event lie within `R/2` of its centre, and a later event's centre lies within `R/2` of the particle
+that starts it,
 hence the extra `R`. Periodic axes wrap (`_collect_near!`). In 1-D this is close to the former `4R`; in 2-D and
 3-D the former `4R` let the local sets of events about `3.5R` apart overlap, which is where calls with
 several events were not exactly conservative.
@@ -405,10 +411,15 @@ end
 #
 # `record` (optional) collects `(index, lo, hi)` for every particle the remap wrote, with the local bounds of
 # its DMP repair: the old index of a survivor, `-a` for the `a`-th entry of `new_pos`.
+# `point_values` (the sweep of moving boundaries): the survivors' volumes follow the event, their states do not (they
+# are point values of a collocation scheme; the conservative update is a cell-average operation that perturbs them by
+# O(h) per event). The new particles take the reconstruction averaged over their share, clipped to the bounds of the
+# old states within R; nothing is redistributed, so the remap is not conservative in this mode.
 function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev::_AdaptEvent{D, T},
                        new_pos::Vector{Space{D, T}}, new_rho::Vector{State{M, T}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
-                       record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing) where {D, M, T}
+                       record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing,
+                       removed_mask = nothing, point_values::Bool = false) where {D, M, T}
     nb     = pg.neighbor
     pos    = pg.core.positions
     V      = pg.core.volumes
@@ -424,13 +435,22 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     fill!(view(lmap, 1:pg.meta.N), 0)                 # the neighbour search leaves prefix sums in here
     n_add  = length(ev.added)
 
-    # 1. Local set: every old particle whose shape function can change (within R of the
-    #    quadrature box, whose half-width is 2R)
+    # 1. Local set: every old particle whose shape function can change. The partition changes only within R of a
+    #    removed or added particle, so the quadrature box has the half-width R + r_ev (r_ev: the event's farthest
+    #    particle from its centre; 0 for the sweep's single-particle events, which were integrated over ± 2R: 8× the
+    #    points and local sets of radius 12 h in 3-D) and the local set reaches R beyond the box's corners
+    r_ev = zero(T)
+    for r in ev.removed; r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(pos[r], ev.center, L, Li)))); end
+    for a in ev.added;   r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(a, ev.center, L, Li)))); end
+    half = R + r_ev
     loc_idx, loc_d = Int[], Space{D, T}[]
-    n_loc = _collect_near!(pg, ev.center, (R * (1 + 2 * sqrt(T(D))) + dx)^2, loc_idx, loc_d)
+    n_loc = _collect_near!(pg, ev.center, (half * sqrt(T(D)) + R + dx)^2, loc_idx, loc_d)
     @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = l; end
-    is_removed = falses(n_loc)
-    for r in ev.removed; is_removed[lmap[r]] = true; end
+    # `removed_mask` (the sweep of moving boundaries): particles other events of the same call remove, so that no
+    # content is given to a particle that the compaction drops
+    is_removed = removed_mask === nothing ? falses(n_loc) : [removed_mask[loc_idx[l]] for l in 1:n_loc]
+    is_other   = copy(is_removed)                          # removed by another event: gone from the balance below
+    for r in ev.removed; is_removed[lmap[r]] = true; is_other[lmap[r]] = false; end
     # Boundary (ghost) particles are not remapped: their states are boundary data (`FixedDirichlet` restores them
     # from `pg.rhos`, `OutflowBC` overwrites them), so the remap must not write them. Their swept share is left out
     # of the balance below, which then puts it onto the interior particles: Σ V U over the interior is exact.
@@ -457,27 +477,31 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         grads[l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
     end
 
-    # 3. Quadrature over the box center ± 2R
+    # 3. Quadrature over the box center ± half (the region at `boundary_time`: moving pieces have been swept)
+    t_bnd = pg.meta.boundary_time
     δV  = zeros(T, n_loc + n_add)
     δm  = zeros(State{M, T}, n_loc + n_add)
     hq  = dx / ad.samples_per_dx
-    nq  = ceil(Int, 4R / hq)
+    nq  = ceil(Int, 2half / hq)
     ω   = hq^D
     qidx, qd = Int[], Space{D, T}[]
     w_add = zeros(T, n_add)
 
     for I in CartesianIndices(ntuple(_ -> nq, Val(D)))
-        y_raw = Space{D, T}(ntuple(d -> ev.center[d] - 2R + (I[d] - T(0.5)) * hq, Val(D)))
+        y_raw = Space{D, T}(ntuple(d -> ev.center[d] - half + (I[d] - T(0.5)) * hq, Val(D)))
         y = _wrap_point(pg, y_raw)
-        geom.is_interior(y) || continue
+        _is_interior(geom, y, t_bnd) || continue
         n = _collect_near!(pg, y, R_sq, qidx, qd)
         n == 0 && continue
 
         # S_old, nearest donor, S_new
+        # Ghost (fixed) particles are not part of the partition: like the volume estimators, the interior particles
+        # share the region among themselves (a ghost's share would leave the interior accounting)
         S_old = zero(T); S_new = zero(T)
         jstar, dstar = 0, T(Inf)
         @inbounds for k in 1:n
             l  = lmap[qidx[k]]
+            (l != 0 && is_fixed[l]) && continue
             d2 = sum(abs2, qd[k])
             wk = wf(d2)
             S_old += wk
@@ -500,6 +524,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
             S_new += w_add[a]
         end
         (S_old > 0 && S_new > 0) || continue
+        inv_old, inv_new = inv(S_old), inv(S_new)
 
         # Ũ(y): limited linear reconstruction of the nearest old particle
         lstar = lmap[qidx[jstar]]
@@ -512,14 +537,14 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         # Accumulate swept contributions
         @inbounds for k in 1:n
             l = lmap[qidx[k]]
-            (l == 0 || is_removed[l]) && continue
+            (l == 0 || is_removed[l] || is_fixed[l]) && continue
             wk = wf(sum(abs2, qd[k]))
-            dφ = wk / S_new - wk / S_old
+            dφ = wk * inv_new - wk * inv_old
             δV[l] += ω * dφ
             δm[l] += (ω * dφ) * u_rec
         end
         @inbounds for a in 1:n_add
-            dφ = w_add[a] / S_new
+            dφ = w_add[a] * inv_new
             δV[n_loc + a] += ω * dφ
             δm[n_loc + a] += (ω * dφ) * u_rec
         end
@@ -528,8 +553,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     # 4. New volumes and contents; exact residual correction
     V_before = zero(T); m_before = zero(State{M, T})
     @inbounds for l in 1:n_loc
-        is_fixed[l] && continue
-        j = loc_idx[l]
+        (is_fixed[l] || is_other[l]) && continue           # (other events' removals: counting them once per
+        j = loc_idx[l]                                     # overlapping event handed their volume out repeatedly)
         V_before += V[j]; m_before += V[j] * U[j]
     end
     Vn = zeros(T, n_loc + n_add)
@@ -577,13 +602,18 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
             end
         end
     end
-    _dmp_repair!(Un, [Vn[l] for l in aff], lo_a, hi_a)
+    if point_values
+        for p in eachindex(aff); Un[p] = math_max.(lo_a[p], math_min.(hi_a[p], Un[p])); end
+    else
+        _dmp_repair!(Un, [Vn[l] for l in aff], lo_a, hi_a)
+    end
 
     # 6. Write back
     for (p, l) in enumerate(aff)
         if l <= n_loc
             j = loc_idx[l]
-            V[j] = Vn[l]; U[j] = Un[p]
+            V[j] = Vn[l]
+            point_values || (U[j] = Un[p])
             record === nothing || push!(record, (j, lo_a[p], hi_a[p]))
         else
             push!(new_pos, ev.added[l - n_loc]); push!(new_rho, Un[p]); push!(new_vol, Vn[l])
@@ -666,6 +696,9 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
             core.tags[w]            = core.tags[i]
             core.particle_orders[w] = core.particle_orders[i]
             core.volumes[w]         = core.volumes[i]
+            core.normals[w]         = core.normals[i]
+            core.wall_distances[w]  = core.wall_distances[i]
+            core.wall_curvatures[w] = core.wall_curvatures[i]
             pg.rhos[w]              = pg.rhos[i]
             pg.curvatures[w]        = pg.curvatures[i]
         end
@@ -677,6 +710,7 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
         core.tags[w]            = 0
         core.particle_orders[w] = max_order
         core.volumes[w]         = new_vol[a]
+        core.normals[w], core.wall_distances[w], core.wall_curvatures[w] = _ghost_geometry_curv(pg.geometry, new_pos[a], pg.meta.boundary_time)
         pg.rhos[w]              = new_rho[a]
         pg.curvatures[w]        = zero(State{M, T})
         w += 1

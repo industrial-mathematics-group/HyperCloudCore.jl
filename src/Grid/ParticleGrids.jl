@@ -35,6 +35,10 @@ mutable struct GridMetadata{D, T}
     # Incremented whenever neighbour lists, distances or weights change (neighbour search,
     # `refresh_geometry!`), so caches derived from the geometry can detect that they are stale.
     geometry_version::Int
+    # The time the boundary particles' positions and normals belong to (moving pieces; see `place_ghosts!`), and
+    # the time of the region the volumes near the moving pieces belong to (`sweep_boundaries!`)
+    boundary_time::T
+    sweep_time::T
 end
 
 """
@@ -53,9 +57,11 @@ struct GridMetadataView{D, T}
     interp_range_factor::T
     max_nb::Int
     geometry_version::Int
+    boundary_time::T
+    sweep_time::T
 end
 GridMetadataView(m::GridMetadata{D, T}) where {D, T} = GridMetadataView{D, T}(
-    m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version)
+    m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version, m.boundary_time, m.sweep_time)
 
 # The storage containers are parametric in their vector types, so the same structs hold host `Vector`s,
 # device arrays (`CuArray`, ...) or the device views KernelAbstractions passes into kernels. Their arrays are
@@ -138,9 +144,19 @@ struct ParticleGridCore{D, T, VP <: AbstractVector{Space{D, T}}, VB <: AbstractV
     # discrete mass Σ V U and make particle insertion/merging exactly conservative.
     # `particle_orders`: per-particle consistency order (read by every scheme, written by MOOD).
     particle_orders::VI
+
+    # Wall geometry from the domain's shape (`wall_geometry`): the outward unit normal of the nearest wall and
+    # the signed distance to it (negative inside the region, positive for ghosts); `NaN` without a shape.
+    # Read by the conditions that build ghost states from the interior (`ExtrapolationBC`, `MirrorBC`).
+    normals::VP
+    wall_distances::VT
+    # The curvature of that wall (the Hessian of the signed distance at the wall point, in a tangent basis of the
+    # normal: `_encode_curvature`), read by `MirrorBC` operators through `WallPoint.hessian`.
+    wall_curvatures::VP
 end
-ParticleGridCore{D, T}(positions, is_boundary, volumes, tags::VI, particle_orders::VI) where {D, T, VI} =
-    ParticleGridCore{D, T, typeof(positions), typeof(is_boundary), typeof(volumes), VI}(positions, is_boundary, volumes, tags, particle_orders)
+ParticleGridCore{D, T}(positions, is_boundary, volumes, tags::VI, particle_orders::VI, normals, wall_distances, wall_curvatures) where {D, T, VI} =
+    ParticleGridCore{D, T, typeof(positions), typeof(is_boundary), typeof(volumes), VI}(positions, is_boundary, volumes, tags,
+                                                                                        particle_orders, normals, wall_distances, wall_curvatures)
 
 """
     ParticleGrid{D, M, T, WF, GM, N_OFF, Geom, META, CORE, SH, NB, RD, BINS, VS}
@@ -187,6 +203,7 @@ include("BoundaryConditions.jl")
 include("Reordering.jl")
 include("Volumes.jl")
 include("Adaptivity.jl")
+include("MovingBoundaries.jl")
 
 export get_positions, get_weights, get_distances, get_neighbors
 
@@ -219,7 +236,7 @@ Calculates the strictly shortest distance vector between two particles, actively
 end
 
 function ParticleGrid(
-    geom::GeometricDomain{GEO, D, T, FI, FT},
+    geom::GeometricDomain{GEO, D, T},
     nominal_dx::NTuple{D, T},
     weight_func::MLSWeightFunction,
     M::Int;
@@ -227,7 +244,8 @@ function ParticleGrid(
     rng = Random.default_rng(),
     mover = NoGridMover(),
     volume_estimator::VolumeEstimator = ShepardVolumes()
-) where {D, T, FI, FT, GEO}
+) where {D, T, GEO}
+    _check_bc_shape(geom)
     
     R = get_cutoff(weight_func)
     dxs_f = Space{D, T}(nominal_dx...)
@@ -236,7 +254,7 @@ function ParticleGrid(
     
     comp_domain = ComputationalDomain(geom, nominal_dx, interp_range_factor)
     
-    positions, is_boundary, tags, volumes, _ = get_points(
+    positions, is_boundary, tags, volumes, _, normals, wall_distances, wall_curvatures = get_points(
         comp_domain, geom;
         nominal_dx = nominal_dx,
         interp_range_factor = interp_range_factor,
@@ -249,11 +267,12 @@ function ParticleGrid(
     N_interior = count(!, is_boundary)
     N_ghost = N - N_interior
     
-    meta = GridMetadata{D, T}(N, N_interior, N_ghost, R, max_dx, dxs_f, interp_range_factor, 0, 0)
+    meta = GridMetadata{D, T}(N, N_interior, N_ghost, R, max_dx, dxs_f, interp_range_factor, 0, 0, zero(T), zero(T))
     
     # Every per-particle array is a `Growable`, so a grid can grow on a device as well (adaptivity copies
     # its result back into the device grid in place). The reordering state stays a host object.
-    core = ParticleGridCore{D, T}(Growable(positions), Growable(is_boundary), Growable(volumes), Growable(tags), Growable(zeros(Int, N)))
+    core = ParticleGridCore{D, T}(Growable(positions), Growable(is_boundary), Growable(volumes), Growable(tags), Growable(zeros(Int, N)),
+                                  Growable(normals), Growable(wall_distances), Growable(wall_curvatures))
 
     shared = SharedBuffers{D, M, T}(Growable(zeros(State{M, T}, N)), Growable(similar(positions)), Growable(zeros(T, N)),
                                     Growable(zeros(T, N)), Growable(zeros(Bool, N)), Growable(zeros(Int, N)))
@@ -472,6 +491,9 @@ end
     ensure_capacity!(core.volumes, req_capacity)
     ensure_capacity!(core.tags, req_capacity)
     ensure_capacity!(core.particle_orders, req_capacity)
+    ensure_capacity!(core.normals, req_capacity)
+    ensure_capacity!(core.wall_distances, req_capacity)
+    ensure_capacity!(core.wall_curvatures, req_capacity)
     return nothing
 end
 

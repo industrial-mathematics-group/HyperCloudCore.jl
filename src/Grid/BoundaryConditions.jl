@@ -129,3 +129,354 @@ end
     status[i] == 0 && (buf[i] = rhos[i])
     return nothing
 end
+# =========================================================================
+# Ghost states from the interior: one-sided fits at the nearest interior particle
+# =========================================================================
+export ExtrapolationBC, MirrorBC, WallPoint, requires_shape
+
+"""
+    WallPoint{D, T, L}
+
+The wall as seen from a ghost particle, handed to the operator of a [`MirrorBC`](@ref): `position` (the wall
+point the ghost is reflected in), the outward unit `normal` there, the `distance` of the ghost to the wall, the
+wall `velocity` and `acceleration` (those of a [`Moving`](@ref) piece at the wall point, [`wall_velocity`](@ref)
+and [`wall_acceleration`](@ref); zero for a static wall), the piece's angular velocity as the skew matrix `spin`
+(`Ω`: the wall velocity is `w(x) = v + Ω (x - c)`; zero for a static wall) and the `hessian` of the region's signed
+distance at the wall point (the wall's curvature: `t ⋅ hessian * t` for a unit tangent `t` is negative where the
+wall is convex seen from the region, `-1/r` around a disc obstacle, and positive where it is concave, `+1/r`
+inside a circle; zero for a flat wall).
+
+An operator that mirrors the pressure of a fluid at the wall needs the normal momentum balance there, which the
+even mirror (`∂p/∂n = 0`) misses at first order at accelerating, rotating or curved walls. Following a fluid
+particle along the wall, `(u - w) ⋅ n = 0` gives
+`∂p/∂n = -ρ (n ⋅ a + 2 n ⋅ Ω (u - w) - u_r ⋅ hessian * u_r)` with `u_r` the tangential velocity relative to the
+wall (for a disc spinning in a gas at rest the three terms cancel). The four- and five-argument constructors leave
+the acceleration, spin and curvature zero.
+"""
+struct WallPoint{D, T, L}
+    position::Space{D, T}
+    normal::Space{D, T}
+    distance::T
+    velocity::Space{D, T}
+    acceleration::Space{D, T}
+    spin::SMatrix{D, D, T, L}
+    hessian::SMatrix{D, D, T, L}
+end
+WallPoint(position::Space{D, T}, normal::Space{D, T}, distance, velocity::Space{D, T},
+          acceleration::Space{D, T} = zero(Space{D, T})) where {D, T} =
+    WallPoint{D, T, D * D}(position, normal, T(distance), velocity, acceleration,
+                           zero(SMatrix{D, D, T, D * D}), zero(SMatrix{D, D, T, D * D}))
+
+"""
+    requires_shape(bc::AbstractBoundaryCondition) -> Bool
+
+`true` if the condition reads the wall normals and distances of the particles, which only a domain built from
+an [`AbstractShape`](@ref) provides. The `ParticleGrid` constructor refuses such a condition on a domain without
+a shape. Defaults to `false`; [`MirrorBC`](@ref) returns `true`.
+"""
+requires_shape(::AbstractBoundaryCondition) = false
+
+function _check_bc_shape(geom::GeometricDomain)
+    geom.shape === nothing || return nothing
+    bad = sort!([tag for (tag, bc) in geom.bc_map if requires_shape(bc)])
+    isempty(bad) && return nothing
+    throw(ArgumentError("the boundary condition(s) of tag(s) $bad need the wall normals of a shape-based domain " *
+                        "(GeometricDomain(shape; ...)); this domain was built from an interior test and a tag function"))
+end
+
+"""
+    ExtrapolationBC(degree = 1)
+
+Transmissive condition of polynomial degree `degree` (0–5; in 3-D at most 3 is used): every boundary particle with the tag takes the value
+at its own position of an MLS fit through the interior. The data of the fit are the interior particle nearest
+to the boundary particle (the donor, found in its neighbour list and refined by walking the neighbour graph)
+and the donor's interior neighbours; the fit is centred at the boundary particle and weighted by the distance
+to it with the grid's weight function. It is exact for polynomials up to `degree`, so an outflow of degree `q`
+keeps the first `q` derivatives of the interior solution across the boundary, where [`OutflowBC`](@ref) (a
+donor copy) kinks it; degree 0 is the weighted average of the data.
+
+The degree is lowered where it is not supported: to the order of the donor particle minus one (MOOD lowered it),
+to what the data count carries (1.5× the unknowns, counting the constant term; a donor at a corner with too few
+interior neighbours is replaced by its best-supported interior neighbour nearest to the target first), and
+whenever the one-sided moment matrix is not positive definite even after the conditional regularisation. A
+boundary particle without any interior particle within two hops keeps its state. The condition needs no wall
+normals, so it works on every domain.
+
+In Float32, degrees ≥ 3 lose accuracy at the ghosts farthest from the data (a cubic evaluated up to `R + 4Δx` beyond
+one-sided data amplifies the round-off: 2-D, degree 3, jittered: 1e-1 relative error, against 1e-3 for degree 2);
+use Float64 for them. A degree `q` needs enough interior data within the cutoff: in 1-D `R ≳ (q + 0.5)Δx`
+(degree 4 runs as degree 3 at `R = 3.5Δx`).
+
+Extrapolation is an *outflow* condition: the ghost states feed back into the interior scheme through the
+stencils of the near-wall particles, and a high-degree one-sided extrapolation amplifies perturbations. At a
+wall with tangential flow use [`MirrorBC`](@ref) (whose target point lies inside the cloud); see its docstring
+and the docs for the degrees that were found stable.
+"""
+struct ExtrapolationBC{Q} <: AbstractBoundaryCondition
+    function ExtrapolationBC{Q}() where {Q}
+        (Q isa Int && 0 <= Q <= 5) || throw(ArgumentError("ExtrapolationBC: the degree must be an integer 0–5, got $Q"))
+        return new{Q}()
+    end
+end
+ExtrapolationBC(degree::Int = 1) = ExtrapolationBC{degree}()
+
+"""
+    MirrorBC(op = nothing; degree = 1, bounded = true)
+
+Wall condition built from the mirror image: every boundary particle with the tag builds the interior fit of
+[`ExtrapolationBC`](@ref) (same donor, data, degree rule and fallbacks) centred at its mirror point
+`x - 2 φ n` behind the wall (`φ` its wall distance, `n` the outward normal; both from the domain's shape, see
+[`wall_geometry`](@ref)) and stores `op(eq, U, wall::WallPoint)` of the value `U` found there. The mirror point
+lies inside the cloud, so the fit interpolates. Without `op`
+the mirrored value itself is used, i.e. an even reflection of every component (a symmetry plane, zero normal
+derivative). Physics packages supply the operators of their walls (reflecting the normal velocity for a slip
+wall, a Maxwellian for a diffuse kinetic wall, ...); `op` must be a bits-type callable, and the state it
+returns is used as it is.
+
+With `bounded` (the default) the mirrored value is clamped, component by component, to the range of the data
+of its fit (the donor and its interior neighbours) before `op` is applied: a discrete maximum principle on the
+ghost state. It costs accuracy only where the value at the mirror point would lie outside the range of the
+interior data around it (an extremum between the data points), and it is what keeps long runs along a wall
+bounded: the ghost states feed back into the interior through the stencils of the near-wall particles, and
+without the bound that loop grew without limit for degrees ≥ 2 with a 5th-order scheme on jittered clouds
+(and slowly for degree 1), while every bounded case stayed below the initial maximum. `bounded = false` gives
+the plain fit (exact for polynomials up to `degree` at every ghost).
+
+For a planar wall the mirror point is the exact reflection, so the condition is as accurate as the fit; on a
+curved wall the mirror image is second-order accurate. Behind a convex corner or edge (outside two faces) a ghost
+is reflected in the face whose tag it carries, the one it lies farther outside of: its stored normal is that face's
+and its distance is measured along it, so the mirror point lies behind the other face (outside the region; the fit
+extrapolates the interior there, exactly for linear data) and `op` sees that face's normal. (The point reflection
+through the corner, with the diagonal normal to it, gave `op` a normal that is right for neither face: a slip wall
+turned the velocity along the wall into the wall at the corner with an inflow, and a uniform flow did not survive
+the corner.) Requires a shape-based domain ([`requires_shape`](@ref)).
+"""
+struct MirrorBC{Q, F, B} <: AbstractBoundaryCondition
+    op::F
+    function MirrorBC{Q, F, B}(op::F) where {Q, F, B}
+        (Q isa Int && 0 <= Q <= 5) || throw(ArgumentError("MirrorBC: the degree must be an integer 0–5, got $Q"))
+        B isa Bool || throw(ArgumentError("MirrorBC: bounded must be a Bool"))
+        isbits(op) || throw(ArgumentError("MirrorBC: the operator must be a bits type (a plain struct or function, no captured arrays)"))
+        return new{Q, F, B}(op)
+    end
+end
+MirrorBC(op = nothing; degree::Int = 1, bounded::Bool = true) = MirrorBC{degree, typeof(op), bounded}(op)
+requires_shape(::MirrorBC) = true
+
+function (::ExtrapolationBC{Q})(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t::Real) where {Q}
+    _launch_ghost_fit!(pg, rhos_buffer, tag, eq, t, Val(Q), nothing, Val(false), Val(false))
+    return nothing
+end
+function (bc::MirrorBC{Q, F, B})(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t::Real) where {Q, F, B}
+    _launch_ghost_fit!(pg, rhos_buffer, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B))
+    return nothing
+end
+
+# In 3-D the degree is capped at 3 (20 unknowns, the limit of the package's other 3-D fits): degrees 4-5 (35/56
+# unknowns) would take StaticArrays' allocating, host-only Cholesky inside the kernel
+_ghost_degree(::Val{Q}, ::Val{D}) where {Q, D} = Val(D == 3 ? min(Q, 3) : Q)
+
+function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val) where {D, M, T}
+    valQ = _ghost_degree(valQ, Val(D))
+    nb   = pg.neighbor
+    invL = one(T) / minimum(pg.meta.dx)
+    # A moving piece: the stored ghost positions and normals belong to `boundary_time`; the kernel moves them to
+    # the time of the state being built (the interior cloud does not move), and the wall point gets the velocity
+    gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
+                                           GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
+    foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
+        (buf, pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
+         pg.core.wall_curvatures, pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
+         (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
+    return nothing
+end
+
+# The operator enters the kernel inside a struct: a plain `Function` argument makes the Polyester loop allocate
+# (368 bytes per launch), a struct holding it does not.
+struct _WallOp{F}
+    op::F
+end
+@inline _apply_wall_op(::_WallOp{Nothing}, eq, U, wall) = U
+@inline _apply_wall_op(w::_WallOp, eq, U, wall) = w.op(eq, U, wall)
+
+@inline _min_image(dx::Space{D, T}, L::Space{D, T}, Li::Space{D, T}) where {D, T} =
+    Space{D, T}(ntuple(d -> dx[d] - L[d] * round(dx[d] * Li[d]), Val(D)))
+
+# The interior neighbour of `c` nearest to the point `x_t` (squared distance), `0` if it has none.
+@inline function _nearest_interior(c, x_t, ranges, indices, isb, pos, L, Li)
+    j, best = 0, typemax(eltype(x_t))
+    @inbounds for k in ranges[c]
+        m = indices[k]
+        isb[m] && continue
+        d2 = sum(abs2, _min_image(pos[m] - x_t, L, Li))
+        d2 < best && (j = m; best = d2)
+    end
+    return j, best
+end
+
+# The donor `j` and its interior neighbours: the data of the fit.
+@inline function _support_count(j, ranges, indices, isb)
+    n = 1
+    @inbounds for k in ranges[j]
+        isb[indices[k]] || (n += 1)
+    end
+    return n
+end
+
+# Unknowns of the degree-`q` fit with its constant term, with the margin of 1.5× that keeps the coefficients of a
+# one-sided fit bounded (an exactly determined fit amplifies noise, and the ghost states feed back into the interior).
+@inline _fit_support(D, q) = (3 * (basis_count(D, q) + 1) + 1) ÷ 2
+
+# Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
+@inline function _ghost_fit_body!(i, buf, pos, isb, tags, normals, wdist, curvs, orders, ranges, indices, wf,
+                                  wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
+    @inbounds begin
+        (isb[i] && tags[i] == tag) || return nothing
+        L, Li, invL = wrap
+        x_i = move(gm, pos[i])
+        n_i = rotate(gm, normals[i])
+        φ_i = wdist[i]
+        x_t = MIRROR ? x_i - 2φ_i * n_i : x_i
+        # Donor: the interior particle nearest to the target point. Its neighbour list is the stencil of the fit
+        # (every interior particle within R - |x_t - x_j| of the target is in it). Searched in the ghost's own
+        # neighbour list, then in its neighbours' lists (the outermost ghosts of the R + dx band have no interior
+        # neighbour), then refined by walking the neighbour graph towards the target.
+        j, best = _nearest_interior(i, x_t, ranges, indices, isb, pos, L, Li)
+        if j == 0
+            for k in ranges[i]
+                j2, best2 = _nearest_interior(indices[k], x_t, ranges, indices, isb, pos, L, Li)
+                (j2 != 0 && best2 < best) && (j = j2; best = best2)
+            end
+        end
+        j == 0 && return nothing
+        for _ in 1:3
+            j2, best2 = _nearest_interior(j, x_t, ranges, indices, isb, pos, L, Li)
+            (j2 != 0 && best2 < best) || break
+            j, best = j2, best2
+        end
+        # Fit degree and donor: the requested degree, at most the donor's order - 1 (0 = order never set), lowered
+        # one step at a time until the donor or, failing that, its interior neighbour nearest to the target carries
+        # the degree with the margin. A donor at a wall or corner has too few interior neighbours for a high degree
+        # (3-4 for the 6 unknowns of a 2-D quadratic) while its neighbours further inside do; the fit stays exact for
+        # polynomials whatever the distance. (Trying the requested degree only and otherwise falling back to what the
+        # wall donor supports made a higher request give a lower degree: 1-D, R = 3.5Δx, degree 4 ran as degree 1
+        # while degree 3 ran as 3.)
+        q = Q
+        n_sup = _support_count(j, ranges, indices, isb)
+        jd = j
+        while q > 0
+            needed = _fit_support(D, q)
+            n_sup >= needed && break
+            jb, bb = 0, typemax(eltype(x_t))
+            for k in ranges[j]
+                m = indices[k]
+                (isb[m] || _support_count(m, ranges, indices, isb) < needed) && continue
+                d2 = sum(abs2, _min_image(pos[m] - x_t, L, Li))
+                d2 < bb && (jb = m; bb = d2)
+            end
+            jb != 0 && (jd = jb; break)
+            q -= 1
+        end
+        j = jd
+        o = orders[j]                                  # the MOOD cap of the donor that is fitted (a lower degree
+        o > 0 && (q = min(q, o - 1))                   # needs less support, so the donor still carries it)
+        U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
+        if BOUNDED
+            # Discrete maximum principle on the ghost state: the mirrored value stays within the range of the data
+            # it was built from. Without it the feedback ghost -> near-wall stencils -> ghost grew without bound for
+            # degrees >= 2 with a 5th-order scheme (long runs along a wall), with it every tested case stayed bounded.
+            lo = buf[j]
+            hi = buf[j]
+            for k in ranges[j]
+                m = indices[k]
+                isb[m] && continue
+                lo = min.(lo, buf[m])
+                hi = max.(hi, buf[m])
+            end
+            U = clamp.(U, lo, hi)
+        end
+        if MIRROR
+            x_w    = x_i - φ_i * n_i                     # the wall point: the body's velocity there, not at the ghost
+            H      = gm.R * _decode_curvature(curvs[i], normals[i]) * gm.R'   # (stored for `normals[i]`)
+            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w), acceleration(gm, x_w), gm.Ω, H)
+            buf[i] = _apply_wall_op(op, eq, U, wall)
+        else
+            buf[i] = U
+        end
+    end
+    return nothing
+end
+
+# Static dispatch over the fit degrees Q, Q-1, ..., 0 (kernels cannot build a `Val` at run time): the first
+# degree `≤ q_run` whose moment matrix factorises gives the value; degree 0 is the weighted average.
+@inline function _fit_eval(::Val{q}, q_run::Int, args...) where {q}
+    if q_run >= q
+        U, ok = _fit_degree(Val(q), args...)
+        ok && return U
+    end
+    return _fit_eval(Val(q - 1), q_run, args...)
+end
+@inline function _fit_eval(::Val{0}, q_run::Int, args...)
+    U, ok = _fit_degree(Val(0), args...)
+    return U
+end
+
+@inline _fit_degree(::Val{q}, j, x_t::Space{D, T}, args...) where {q, D, T} =
+    _fit_degree_b(basis_length(Val(D), Val(q)), Val(q), j, x_t, args...)
+@inline _fit_degree(::Val{0}, j, x_t::Space{D, T}, args...) where {D, T} = _fit_degree_b(Val(0), Val(0), j, x_t, args...)
+
+@inline _target_basis(::Val{0}, d::SVector{D, T}) where {D, T} = SVector{1, T}(one(T))
+@inline _target_basis(::Val{q}, d::SVector{D, T}) where {q, D, T} = _intercept_basis(Val(q), d)
+
+# MLS fit of degree `q` centred at the target point over the donor `j` and its interior neighbours, weighted by
+# their distance to the target (the weight function of the grid, no cutoff: the stencil is the donor's): the
+# fit's constant term is the value at the target. Centred at the target and weighted from it, the fit
+# interpolates where the target lies inside the cloud (a mirror point) and extrapolates as little as possible
+# where it does not (a ghost position); a fit centred at the donor and evaluated away from it amplified noise on
+# jittered clouds and destabilised the interior scheme.
+@inline function _fit_degree_b(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, buf::AbstractVector{State{M, T}}, rg, indices,
+                               pos, isb, L, Li, wf, invL) where {B, q, D, T, M}
+    N_s, b_s = _ghost_moments(Val(B), Val(q), j, x_t, buf, rg, indices, pos, isb, L, Li, wf, invL)
+    C, ok = _cholesky_moment(N_s)
+    ok || return (@inbounds(buf[j]), false)
+    c_s = C \ b_s
+    return (State{M, T}(ntuple(m -> c_s[1, m], Val(M))), true)
+end
+
+# The weighted moments of the fit. Kept out of line on purpose: accumulated in the same function as the Cholesky
+# solve, Julia 1.13.3 / LLVM 20 miscompiled the Float32 3-D degree-2 case on the CPU backends (an unsymmetric moment
+# matrix, ghost errors of 2-7 on data of size 4; KA and Float64 were right, and the trigger depended on the thread
+# count). A separate function avoids the code shape; the Float32 3-D test guards it.
+@noinline function _ghost_moments(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, buf::AbstractVector{State{M, T}}, rg, indices,
+                                  pos, isb, L, Li, wf, invL) where {B, q, D, T, M}
+    N_s = zero(SMatrix{B + 1, B + 1, T, (B + 1) * (B + 1)})
+    b_s = zero(SMatrix{B + 1, M, T, (B + 1) * M})
+    @inbounds begin
+        # The basis is scaled by the largest data distance seen from the target, not by the grid spacing: a ghost
+        # position lies up to R + 4Δx from its data, so with 1/Δx the degree-q columns were ~7^q times the constant
+        # one, and the Float32 moment matrix lost the fit (2-D degree 3: 9e-2 relative error). The value at the
+        # target, the constant term, does not depend on the scale.
+        r2max = sum(abs2, _min_image(pos[j] - x_t, L, Li))
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            r2max = max(r2max, sum(abs2, _min_image(pos[m] - x_t, L, Li)))
+        end
+        s   = r2max > zero(T) ? inv(sqrt(r2max)) : invL
+        r   = _min_image(pos[j] - x_t, L, Li)
+        p   = _target_basis(Val(q), r * s)
+        w   = wf(sum(abs2, r))
+        N_s += w * (p * p')
+        b_s += w * (p * buf[j]')
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            r    = _min_image(pos[m] - x_t, L, Li)
+            p    = _target_basis(Val(q), r * s)
+            w    = wf(sum(abs2, r))
+            N_s += w * (p * p')
+            b_s += w * (p * buf[m]')
+        end
+    end
+    return N_s, b_s
+end

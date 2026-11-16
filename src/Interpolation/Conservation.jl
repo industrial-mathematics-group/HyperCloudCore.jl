@@ -10,14 +10,22 @@ neighbour slot `(i, j)` the face vector `S_ij = 2 V_i c_ij` is the coefficient w
 those of the divergence fit each particle currently uses (its `particle_orders` entry, i.e. MOOD drops
 included, and its neighbour count, as in `_divergence_index`), rebuilt on the host with the volumes of `pg`.
 
-Returns `(; particle, degree, equal, mixed, onesided, total)`:
-- `particle[i]`: relative defect `Σ_j |S_ij + S_ji| / Σ_j |S_ij|` of particle `i`;
+Returns `(; particle, degree, equal, mixed, onesided, total, wall)`:
+- `particle[i]`: relative defect `Σ_j |S_ij + S_ji| / Σ_j |S_ij|` of interior particle `i` over its interior
+  partners (0 for boundary particles);
 - `degree[i]`: the divergence degree particle `i` uses;
 - `equal`, `mixed`: `(; pairs, rel)` over the unordered pairs whose particles use the same / different
   degrees: the number of pairs and `Σ |S_ij + S_ji| / Σ ½(|S_ij| + |S_ji|)`;
 - `onesided`: `(; pairs, rel)` over the slots whose partner does not list the particle back (`S_ji = 0`,
   the whole face vector is a defect);
-- `total`: `(; pairs, rel)` over all of them.
+- `total`: `(; pairs, rel)` over all of them;
+- `wall`: `(; pairs)`, the number of slots from an interior particle to a boundary (ghost) particle.
+
+Only pairs of interior particles are counted. A boundary particle is not updated by the scheme and carries no
+volume (its face vectors `2 V_j c_ji` vanish), so the flux of an interior–ghost pair is a flux through the
+boundary, not a pair defect; such slots are left out of the sums and only counted in `wall`. (Up to 0.8 every
+pair was counted and the ghosts had volumes; with zero ghost volumes every interior–ghost pair would count as a
+whole defect.)
 
 A diagnostic for grids on the host (it allocates and is not a kernel); a device grid has to be copied back
 first.
@@ -44,14 +52,20 @@ function conservation_defect(muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER},
     slot_of(j, i) = (p = searchsortedfirst(sorted[j], (i, 0); by = first);
                      p <= length(sorted[j]) && sorted[j][p][1] == i ? sorted[j][p][2] : 0)
 
+    bnd = pg.core.is_boundary
     particle = zeros(T, N)
-    n_eq = n_mx = n_os = 0
+    n_eq = n_mx = n_os = n_wall = 0
     d_eq = d_mx = d_os = zero(T)          # defect sums
     s_eq = s_mx = s_os = zero(T)          # face-vector magnitude sums (the reference)
     for i in 1:N
+        bnd[i] && continue                                     # ghost rows: not updated by the scheme
         num = den = zero(T)
         for k in ranges[i]
             j   = indices[k]
+            if bnd[j]                                          # a flux through the boundary, not a pair
+                n_wall += 1
+                continue
+            end
             mag = norm(S[k])
             den += mag
             kk  = slot_of(j, i)
@@ -78,7 +92,8 @@ function conservation_defect(muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER},
             equal    = (; pairs = n_eq, rel = rel(d_eq, s_eq)),
             mixed    = (; pairs = n_mx, rel = rel(d_mx, s_mx)),
             onesided = (; pairs = n_os, rel = rel(d_os, s_os)),
-            total    = (; pairs = n_eq + n_mx + n_os, rel = rel(d_eq + d_mx + d_os, s_eq + s_mx + s_os)))
+            total    = (; pairs = n_eq + n_mx + n_os, rel = rel(d_eq + d_mx + d_os, s_eq + s_mx + s_os)),
+            wall     = (; pairs = n_wall))
 end
 
 # Face vectors `2 V_i c_ij` of one particle for the divergence fit of degree `q` (intercept basis, as in

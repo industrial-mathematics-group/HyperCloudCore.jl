@@ -58,7 +58,7 @@ The `context::Dict{Symbol, Any}` carries everything that is already built:
 
 | Builder | Namespace | Selector | Values |
 |---|---|---|---|
-| [`build_domain`](@ref) | `Grid` | `:domain` | `:rectangular`, `:spherical` |
+| [`build_domain`](@ref) | `Grid` | `:domain` | `:rectangular`, `:spherical`, `:shape` (an [`AbstractShape`](@ref) in `:shape`) |
 | [`build_weights`](@ref) | `Weight` | `:name` | `:exponential`, `:inverse` |
 | [`build_mover`](@ref) | `Grid` | `:mover` | `:none`, `:lagrangian`, `:scaled_lagrangian`, `:sinusoidal` |
 | [`build_volume_estimator`](@ref) | `Grid` | `:volumes` | `:shepard`, `:mls` |

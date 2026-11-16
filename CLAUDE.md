@@ -31,7 +31,7 @@ combinations that already exist, and on small stencils (degree-5 2-D fits cost ~
 | `src/API.jl`, `src/Types.jl` | API contracts physics packages implement (`flux`, `max_eigenvalue`, `velocity`, sources, …) and abstract types |
 | `src/Backend.jl` | Execution backends and `foreach_particle` (every parallel per-particle loop) |
 | `src/DeviceAdapt.jl`, `src/Growable.jl`, `src/MemoryBudget.jl` | `Adapt` rules / `KernelView`, growable buffers, memory estimate and `reserve!` |
-| `src/Grid/` | Domains, particle grids, neighbour search (cell lists), BCs, volumes, adaptivity, reordering |
+| `src/Grid/` | Shapes (signed distances), domains, particle grids, neighbour search (cell lists), BCs, volumes, adaptivity, reordering |
 | `src/Interpolation/` | MLS interpolators, schemes, numerical fluxes, limiters |
 | `src/TimeStepping/` | RK/IMEX time stepper, Butcher tableaus, MOOD, grid movers |
 | `src/Builders/` | Config-driven builders (`build_*`) used by HyperCloud |
@@ -43,6 +43,8 @@ Every parallel per-particle loop is a kernel body `body(i, args...)` launched wi
 `foreach_particle(body, backend, N, args)`; never write a raw `@threads`/`@batch` loop or
 backend-specific code elsewhere. Kernel bodies must work on every backend:
 
+- At most 20 arguments per kernel body (the kernel view of a longer argument tuple is not inferred and
+  allocates at every launch; pack related values into a tuple).
 - No allocation, no dynamic dispatch, no `Dict` access, only bits-type arguments
   (`kernel_view`/`Adapt` turns host structs into their kernel form; add an
   `adapt_structure` method in `src/DeviceAdapt.jl` for new containers).

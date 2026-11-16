@@ -16,7 +16,9 @@ function build_adaptivity(conf::Dict, context::Dict)
     get(conf, :enabled, false) || return nothing
     T = real_type(context)
     pg = get(context, :Grid, nothing)
-    moving = pg isa ParticleGrid && _is_moving(pg)
+    # a moving interior (grid mover): the stepper re-estimates volumes, the remap must use the same estimator; a static
+    # cloud with moving pieces keeps the remap's volumes (estimators integrate the region at t = 0 and are refused)
+    moving = pg isa ParticleGrid && !(pg.mover isa NoGridMover)
     return ParticleAdaptivity(T;
         max_gap               = get(conf, :max_gap, 1.6),
         min_gap               = get(conf, :min_gap, 0.5),

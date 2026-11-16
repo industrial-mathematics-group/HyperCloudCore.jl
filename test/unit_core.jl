@@ -122,6 +122,7 @@ end
 
     for v in (pg.rhos, pg.curvatures,
               pg.core.positions, pg.core.is_boundary, pg.core.volumes, pg.core.tags, pg.core.particle_orders,
+              pg.core.normals, pg.core.wall_distances,
               pg.shared.rho_buffer, pg.shared.pos_buffer, pg.shared.float_buffer, pg.shared.bit_buffer, pg.shared.int_buffer,
               pg.reorder.permutation,
               pg.bins.cell_particles, pg.bins.bin_of)
@@ -180,14 +181,20 @@ end
             @test length(xs) == Ns + 1 && xs[1] == lo && xs[end] == hi
             @test minimum(diff(xs)) > dx / 2                        # no duplicated wall point
         end
-        # A wall between two lattice points (extent not a multiple of dx) is not snapped to, also within 1 % of a
-        # multiple (only round-off is): the points stay on the lattice
+        # A wall between two lattice points (extent not a multiple of dx) is not given a lattice index, also within
+        # 1 % of a multiple (only round-off is): the interior points stay on the lattice, except the one point less
+        # than dx/2 outside the wall, which is snapped onto it (no ghost sits close to the wall; for dx = 0.3 the last
+        # point is 0.2 outside, more than dx/2, and stays a ghost)
         for dxv in (0.3, 1 / 30.009, 1 / 29.991)
             geom = get_rectangular_domain(Float64, (0.0,), (1.0,))
             cd   = HyperCloudCore.ComputationalDomain(geom, (dxv,), 2.5)
             pos, isb, _, _, _ = HyperCloudCore.get_points(cd, geom; nominal_dx = (dxv,), interp_range_factor = 2.5)
             xs   = sort([p[1] for (p, b) in zip(pos, isb) if !b])
-            @test xs[1] == 0 && maximum(abs.(xs ./ dxv .- round.(xs ./ dxv))) < 1e-12 && xs[end] < 1
+            on_lattice = filter(x -> x < 1, xs)
+            @test xs[1] == 0 && maximum(abs.(on_lattice ./ dxv .- round.(on_lattice ./ dxv))) < 1e-12
+            snapped = ceil(1 / dxv) * dxv - 1 < dxv / 2
+            @test (xs[end] == 1) == snapped && minimum(diff(xs)) >= dxv / 2 - 1e-12
+            @test all(p -> p[1] >= 0 || p[1] <= -dxv / 2 + 1e-12, pos) && all(p -> p[1] <= 1 || p[1] >= 1 + dxv / 2 - 1e-12, pos)
         end
         dx = 2 / 30                                                   # 2-D: no wall row or column lost
         pg = ParticleGrid(get_rectangular_domain(Float64, (-1.0, -1.0), (1.0, 1.0)), (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1)
@@ -348,6 +355,10 @@ end
         Ns   = ntuple(d -> round(Int, (cd.canvas_maxs[d] - cd.canvas_mins[d]) / dx) + 1, 2)
         pts  = [Space{2, Float64}(cd.canvas_mins[1] + (I[1] - 1) * dx, cd.canvas_mins[2] + (I[2] - 1) * dx) for I in CartesianIndices(Ns)]
         inner, outer = filter(geom.is_interior, pts), filter(!geom.is_interior, pts)
+        # points less than dx/2 outside the circle are snapped onto it (interior)
+        near  = filter(g -> norm(g) - 1 < dx / 2, outer)
+        inner = vcat(inner, [g / norm(g) for g in near])
+        outer = filter(g -> norm(g) - 1 >= dx / 2, outer)
         cutoff_sq = (2.5dx + dx)^2
         expected = count(g -> any(p -> sum(abs2, g - p) <= cutoff_sq, inner), outer)
         @test pg.meta.N_interior == length(inner)
@@ -438,6 +449,15 @@ end
         @test rm.mixed.pairs == length(nb.ranges[N ÷ 2]) && rm.degree[N ÷ 2] == 1
         @test rm.mixed.rel > 1 > rm.equal.rel && rm.mixed.rel > 2 * rm.equal.rel
         fill!(view(pg.core.particle_orders, 1:N), 0)                         # as constructed
+        # bounded lattice: interior–ghost slots are boundary fluxes (the ghosts carry no volume), counted apart;
+        # the interior pairs of the lattice nearly cancel (measured 4.7e-3, 0.17 when the ghost slots counted)
+        hb  = 0.05
+        box = ParticleGrid(get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0)), (hb, hb), ExponentialWeightFunction(1.0, 2.5hb), 2)
+        fill!(view(box.core.particle_orders, 1:box.meta.N), 3)
+        rb  = HyperCloudCore.conservation_defect(m, box)
+        @test rb.wall.pairs > 0 && rb.onesided.pairs == 0 && rb.total.rel < 1e-2
+        @test all(i -> !box.core.is_boundary[i] || rb.particle[i] == 0, 1:box.meta.N)
+        @test maximum(rb.particle[i] for i in 1:box.meta.N if all(x -> abs(x - 0.5) < 0.5 - 3hb, box.core.positions[i])) < 1e-10
     end
 
     @testset "Conditional regularisation of degenerate stencils" begin
@@ -589,6 +609,564 @@ end
         finally
             set_backend!(PolyesterBackend())
         end
+    end
+end
+
+@testset "Shapes: signed distances, normals, tags, volumes" begin
+    b = Cuboid((0.0, 0.0), (3.0, 1.0))
+    @test signed_distance(b, SVector(1.0, 0.5)) == -0.5
+    @test signed_distance(b, SVector(-1.0, 0.5)) == 1.0
+    @test signed_distance(b, SVector(4.0, 2.0)) ≈ sqrt(2)                 # outside a corner: Euclidean
+    @test boundary_normal(b, SVector(4.0, 2.0)) ≈ SVector(1, 1) / sqrt(2)
+    @test boundary_normal(b, SVector(1.0, 0.9)) == SVector(0.0, 1.0)      # inside: the nearest face
+    @test boundary_tag(b, SVector(-0.1, 0.5)) == 1 && boundary_tag(b, SVector(3.1, 0.5)) == 2
+    @test boundary_tag(b, SVector(1.0, -0.1)) == 3 && boundary_tag(b, SVector(1.0, 1.1)) == 4
+    @test boundary_tag(b, SVector(-0.2, -0.1)) == 1                       # the face it is farthest outside of
+    @test boundary_tag(b, SVector(-0.1, -0.1)) == 1                       # ties: the lower tag
+    @test shape_volume(b) == 3.0 && bounding_box(b) == (SVector(0.0, 0.0), SVector(3.0, 1.0))
+    # an open axis has no faces: unbounded along it, no tag from it
+    ob = Cuboid((0.0, 0.0), (3.0, 1.0); open = (true, false))
+    @test signed_distance(ob, SVector(-5.0, 0.5)) == -0.5 && boundary_tag(ob, SVector(-5.0, 1.2)) == 4
+    @test bounding_box(ob)[1][1] == -Inf && shape_volume(ob) == Inf
+    @test_throws ArgumentError Cuboid((1.0,), (0.0,))
+    # Float32 stays Float32
+    bf = Cuboid((0f0,), (1f0,))
+    @test signed_distance(bf, SVector(1.5f0)) === 0.5f0 && eltype(bf) == Float32 && ndims(bf) == 1
+
+    ball = Ball((0.0, 0.0), 1.0)
+    @test signed_distance(ball, SVector(0.0, 0.0)) == -1.0 && signed_distance(ball, SVector(0.0, 2.0)) == 1.0
+    @test boundary_normal(ball, SVector(0.0, 2.0)) == SVector(0.0, 1.0) && boundary_tag(ball, SVector(0.0, 2.0)) == 1
+    @test shape_volume(ball) ≈ π && shape_volume(Ball((0.0, 0.0, 0.0), 2.0)) ≈ 32π / 3 && shape_volume(Ball((0.0,), 1.0)) == 2
+    @test_throws ArgumentError Ball((0.0,), 0.0)
+
+    hs = HalfSpace((0.0, 0.0), (2.0, 0.0))                                # the normal is normalised
+    @test hs.normal == SVector(1.0, 0.0) && signed_distance(hs, SVector(3.0, 7.0)) == 3.0
+    @test boundary_normal(hs, SVector(-1.0, 0.0)) == SVector(1.0, 0.0)
+    @test_throws ArgumentError HalfSpace((0.0,), (0.0,))
+    @test_throws ArgumentError shape_volume(hs)                             # unbounded
+
+    # the Mach 3 step: a channel minus a tagged block; the active piece provides normal and tag
+    step = Tagged(Cuboid((0.6, -1.0), (4.0, 0.2)), t -> t + 4)
+    dom  = b - step
+    @test signed_distance(dom, SVector(1.0, 0.1)) > 0 && signed_distance(dom, SVector(0.5, 0.1)) < 0
+    @test signed_distance(dom, SVector(0.5, 0.1)) ≈ -0.1                   # nearest: the step front
+    @test boundary_tag(dom, SVector(0.65, 0.1)) == 5 && boundary_tag(dom, SVector(1.0, 0.15)) == 8
+    @test boundary_normal(dom, SVector(0.65, 0.1)) ≈ SVector(1.0, 0.0)    # outward of the fluid: into the step
+    @test boundary_normal(dom, SVector(1.0, 0.15)) ≈ SVector(0.0, -1.0)
+    @test boundary_tag(dom, SVector(-0.1, 0.5)) == 1 && boundary_tag(dom, SVector(1.0, 1.1)) == 4
+    @test isapprox(shape_volume(dom), 3.0 - 2.4 * 0.2; rtol = 1e-5)      # lattice integration
+    @test shape_volume(Tagged(b, 7)) == 3.0 && boundary_tag(Tagged(b, 7), SVector(-1.0, 0.5)) == 7
+    @test complement(complement(b)) === b && signed_distance(complement(b), SVector(1.0, 0.5)) == 0.5
+    @test boundary_normal(complement(b), SVector(1.0, 0.9)) == SVector(0.0, -1.0)
+    @test_throws ArgumentError union(b, Ball((0.0,), 1.0))
+
+    # transforms and unions
+    tb = Translated(ball, (2.0, 0.0))
+    @test signed_distance(tb, SVector(2.0, 0.0)) == -1.0 && shape_volume(tb) ≈ π
+    u = union(ball, tb)
+    @test signed_distance(u, SVector(2.5, 0.0)) == -0.5 && boundary_normal(u, SVector(3.5, 0.0)) == SVector(1.0, 0.0)
+    @test bounding_box(u) == (SVector(-1.0, -1.0), SVector(3.0, 1.0))
+    @test isapprox(shape_volume(u), 2π; rtol = 1e-5)                      # two tangent unit discs: lattice integration
+    @test bounding_box(intersect(b, hs)) == (SVector(0.0, 0.0), SVector(3.0, 1.0))
+    @test signed_distance(intersect(b, HalfSpace((0.0, 0.0), (1.0, 1.0))), SVector(1.0, 1.0)) ≈ sqrt(2)
+    rb = Rotated(Cuboid((-1.0, -0.5), (1.0, 0.5)), π / 2)
+    @test signed_distance(rb, SVector(0.0, 0.9)) < 0 && signed_distance(rb, SVector(0.9, 0.0)) > 0
+    @test boundary_normal(rb, SVector(0.0, 1.5)) ≈ SVector(0.0, 1.0) && boundary_tag(rb, SVector(0.0, 1.5)) == 2   # the box's x-max face
+    lo, hi = bounding_box(rb)
+    @test isapprox(lo, SVector(-0.5, -1.0); atol = 1e-12) && isapprox(hi, SVector(0.5, 1.0); atol = 1e-12)
+    @test shape_volume(rb) == 2.0
+    rc = Rotated(Cuboid((0.0, 0.0), (1.0, 1.0)), π / 2; center = (1.0, 0.0))   # about its lower right corner: now below the axis
+    @test signed_distance(rc, SVector(0.5, -0.5)) < 0 && signed_distance(rc, SVector(0.5, 0.5)) > 0
+    r3 = Rotated(Ball((0.0, 0.0, 0.0), 1.0), (0.0, 0.0, 1.0), 0.3)
+    @test signed_distance(r3, SVector(0.5, 0.5, 0.5)) ≈ sqrt(0.75) - 1
+    @test_throws ArgumentError Rotated(b, SMatrix{2, 2}(1.0, 1.0, 0.0, 1.0))
+
+    # a user shape only needs the signed distance: the normal falls back to central differences
+    struct TestParaboloid <: AbstractShape{2, Float64} end
+    HyperCloudCore.signed_distance(::TestParaboloid, x::SVector{2, Float64}) = x[2] - x[1]^2   # not a true distance, a level set
+    HyperCloudCore.bounding_box(::TestParaboloid) = (SVector(-1.0, -1.0), SVector(1.0, 1.0))
+    n = boundary_normal(TestParaboloid(), SVector(1.0, 1.0))
+    @test n ≈ SVector(-2.0, 1.0) / sqrt(5) atol = 1e-6
+    @test boundary_tag(TestParaboloid(), SVector(1.0, 1.0)) == 1
+end
+
+@testset "Shape domains: the box tags are the former ones, wall geometry per particle" begin
+    for D in (1, 2, 3), per in (false, true)
+        mins = ntuple(_ -> -1.0, D); maxs = ntuple(_ -> 1.0, D)
+        isper = ntuple(d -> per && d == 1, D)
+        geom = get_rectangular_domain(Float64, mins, maxs; is_periodic = isper)
+        @test geom.shape isa Cuboid && geom.label == Val(:rectangular)
+        dx = ntuple(_ -> 2.0 / (D == 3 ? 8 : 12), D)
+        pg = ParticleGrid(geom, dx, ExponentialWeightFunction(1.0, 2.5 * dx[1]), 1;
+                          randomness = ntuple(_ -> 0.2 * dx[1], D), rng = MersenneTwister(D))
+        for i in 1:pg.meta.N
+            x = pg.core.positions[i]
+            inside = all(d -> mins[d] <= x[d] <= maxs[d], 1:D)
+            @test pg.core.is_boundary[i] == !inside
+            n = pg.core.normals[i]
+            @test norm(n) ≈ 1
+            if inside
+                @test pg.core.wall_distances[i] <= 0
+            else
+                best_tag, best_out = 0, 0.0                       # the rule of get_rectangular_domain up to 0.8
+                for d in 1:D
+                    isper[d] && continue
+                    o_lo = mins[d] - x[d]; o_hi = x[d] - maxs[d]
+                    o_lo > best_out && (best_tag = 2d - 1; best_out = o_lo)
+                    o_hi > best_out && (best_tag = 2d; best_out = o_hi)
+                end
+                @test pg.core.tags[i] == best_tag
+                @test pg.core.wall_distances[i] > 0
+                # the stored normal is that of the tagged face (behind an edge or corner too: the ghost is reflected in
+                # its own face), the stored distance the one to that face's plane
+                ax = (best_tag + 1) ÷ 2
+                @test n == SVector(ntuple(d -> d == ax ? (isodd(best_tag) ? -1.0 : 1.0) : 0.0, D))
+                @test pg.core.wall_distances[i] ≈ best_out
+            end
+        end
+        @test domain_volume(pg) == 2.0^D
+    end
+    # a disc: radial normals, distance to the circle
+    disc = get_spherical_domain(Float64, (0.0, 0.0), 1.0)
+    @test disc.shape isa Ball && domain_volume(disc) ≈ π
+    pg = ParticleGrid(disc, (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
+    for i in 1:pg.meta.N
+        x = pg.core.positions[i]
+        @test pg.core.wall_distances[i] ≈ norm(x) - 1 && (norm(x) == 0 || pg.core.normals[i] ≈ x / norm(x))
+    end
+    # a general shape: channel minus a block; its ghosts carry the block's tags and the volume is integrated
+    shape = Cuboid((0.0, 0.0), (1.5, 1.0)) - Tagged(Cuboid((0.6, -1.0), (2.0, 0.2)), t -> t + 4)
+    geom  = GeometricDomain(shape; bc_map = Dict{Int, AbstractBoundaryCondition}(t => OutflowBC() for t in (1, 2, 3, 4, 5, 8)))
+    @test geom.label == Val(:shape) && geom.mins == SVector(0.0, 0.0) && geom.maxs == SVector(1.5, 1.0)
+    pg = ParticleGrid(geom, (0.05, 0.05), ExponentialWeightFunction(1.0, 0.125), 1)
+    tags = unique(pg.core.tags[i] for i in 1:pg.meta.N if pg.core.is_boundary[i])
+    @test sort(tags) == [1, 2, 3, 4, 5, 8]
+    @test all(i -> !pg.core.is_boundary[i] || !(0.6 < pg.core.positions[i][1] <= 1.5 && 0 <= pg.core.positions[i][2] < 0.2) ||
+                   pg.core.tags[i] in (5, 8), 1:pg.meta.N)                 # (beyond x = 1.5 the right wall may be the farther face)
+    @test isapprox(domain_volume(pg), 1.5 - 0.9 * 0.2; rtol = 1e-5)
+    # Behind the corner where the floor meets the step (outside the floor and inside the step) the max of the two
+    # signed distances is not the distance to the region: the wall point is found by repeated projection, the
+    # normal points to the corner. Every ghost's mirror image lies in the region.
+    n, d = wall_geometry(geom, SVector(0.7, -0.05))
+    @test n ≈ SVector(2.0, -1.0) / sqrt(5) && d ≈ sqrt(0.1^2 + 0.05^2)
+    @test wall_geometry(geom, SVector(0.3, -0.05)) == (SVector(0.0, -1.0), 0.05)       # one projection: unchanged
+    n2, d2 = wall_geometry(geom, SVector(0.5, 0.3))                                       # the step's top-front corner
+    @test n2 ≈ SVector(1.0, -1.0) / sqrt(2) && d2 ≈ -sqrt(0.02)
+    # What a ghost stores: behind a convex corner (outside two faces) the face it is farther outside of, with the
+    # distance to that face's plane, so that it is reflected in its own face (the point reflection through the corner
+    # with the diagonal normal rotated a slip wall's velocity along the wall into the wall at the inflow corner)
+    gg = HyperCloudCore._ghost_geometry
+    @test gg(geom, SVector(-0.03, -0.02))[1] == SVector(-1.0, 0.0) && gg(geom, SVector(-0.03, -0.02))[2] ≈ 0.03
+    @test gg(geom, SVector(-0.02, -0.03))[1] == SVector(0.0, -1.0) && gg(geom, SVector(-0.02, -0.03))[2] ≈ 0.03
+    @test gg(geom, SVector(0.3, -0.05)) == (SVector(0.0, -1.0), 0.05)                   # outside one face: unchanged
+    @test gg(geom, SVector(0.7, -0.05))[1] == SVector(1.0, 0.0) && gg(geom, SVector(0.7, -0.05))[2] ≈ 0.1     # under the step, farther inside it than below the floor: the step's front, tag 5
+    @test gg(geom, SVector(0.5, 0.3)) == (n2, d2)                                        # inside: the nearest point
+    # 3-D edges and corners alike: the face with the largest outside distance
+    g3 = GeometricDomain(Cuboid((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)))
+    @test gg(g3, SVector(-0.01, -0.03, -0.02))[1] == SVector(0.0, -1.0, 0.0) && gg(g3, SVector(-0.01, -0.03, -0.02))[2] ≈ 0.03
+    @test gg(g3, SVector(1.02, 0.5, -0.01))[1] == SVector(1.0, 0.0, 0.0) && gg(g3, SVector(1.02, 0.5, -0.01))[2] ≈ 0.02
+    # a rotated box: the face normal rotates with it
+    rb = GeometricDomain(Rotated(Cuboid((0.0, 0.0), (1.0, 1.0)), π / 6))
+    nr, dr = gg(rb, SVector(cos(π / 6), sin(π / 6)) * 1.03 + SVector(-sin(π / 6), cos(π / 6)) * (-0.02))   # beyond the far x face, below the y face
+    @test nr ≈ SVector(cos(π / 6), sin(π / 6)) && dr ≈ 0.03
+    # every ghost's mirror image lies in the region, except behind a convex corner, where it lies behind the other face
+    for i in 1:pg.meta.N
+        pg.core.is_boundary[i] || continue
+        x  = pg.core.positions[i]
+        xm = x - 2 * pg.core.wall_distances[i] * pg.core.normals[i]
+        n_near = wall_geometry(geom, x)[1]
+        if maximum(abs, n_near) > 1 - 1e-9                                                # outside one face
+            @test signed_distance(shape, xm) <= 1e-12
+        else                                                                              # a corner ghost: an axis normal
+            @test maximum(abs, pg.core.normals[i]) ≈ 1 && pg.core.wall_distances[i] < wall_geometry(geom, x)[2]
+        end
+    end
+    # unbounded shapes need the box
+    @test_throws ArgumentError GeometricDomain(HalfSpace((0.0, 0.0), (1.0, 0.0)))
+    g2 = GeometricDomain(HalfSpace((0.5, 0.0), (1.0, 0.0)); mins = (0.0, 0.0), maxs = (1.0, 1.0))
+    @test g2.mins == SVector(0.0, 0.0) && g2.get_tag(SVector(0.7, 0.5)) == 1 && g2.is_interior(SVector(0.3, 0.5))
+    # ... and they can be gridded: the volume is that of the shape within the box, computed once (it used to
+    # integrate over the unbounded shape: an ArgumentError, or Inf for an open box)
+    @test domain_volume(g2) ≈ 0.5 rtol = 1e-4
+    plate = Rotated(Cuboid((-0.2, -0.02), (0.2, 0.02)), π / 6)
+    gp = GeometricDomain(Cuboid((-1.0, -0.5), (1.0, 0.5); open = (true, false)) - Tagged(plate, 5);
+                         is_periodic = (true, false), mins = (-1.0, -0.5), maxs = (1.0, 0.5))
+    @test domain_volume(gp) ≈ 2 - 0.4 * 0.04 rtol = 1e-3
+    pgp = ParticleGrid(gp, (0.05, 0.05), ExponentialWeightFunction(1.0, 0.125), 1)
+    @test all(isfinite, view(pgp.core.volumes, 1:pgp.meta.N)) && domain_volume(pgp) === gp.volume
+    @test domain_volume(GeometricDomain(Cuboid((0.0, 0.0), (1.0, 1.0); open = (true, false));
+                                        is_periodic = (true, false), mins = (0.0, 0.0), maxs = (2.0, 1.0))) == 2.0
+    # a box that would crop a bounded shape is refused (the cut had no ghosts); a larger one is used (it anchors the
+    # lattice), and the volume is still that of the shape
+    @test_throws ArgumentError GeometricDomain(Ball((0.0, 0.0), 1.0); mins = (0.0, 0.0), maxs = (1.0, 1.0))
+    gl = GeometricDomain(Ball((0.0, 0.0), 1.0); mins = (-2.0, -2.0), maxs = (2.0, 2.0))
+    @test gl.mins == SVector(-2.0, -2.0) && isapprox(domain_volume(gl), π; rtol = 1e-4)
+    # boundary tags are positive (a tag 0 marked ghosts interior)
+    @test_throws ArgumentError Tagged(Cuboid((0.0, 0.0), (1.0, 1.0)), 0)
+    # A shape string with an anonymous function (a tag map, a motion) builds and its functions can be called from the
+    # world the build runs in (the closure is defined by `Core.eval` in a newer world: a MethodError "method too new")
+    function string_shape_world()
+        ctx = Dict{Symbol, Any}(:T => Float64, :D => 2)
+        s = "box = Cuboid((T(0), T(0)), (T(2), T(1))); box - Tagged(Moving(Ball((T(1), T(0.5)), T(0.2)), t -> RigidMotion(Val(2), T)), t -> t + 4)"
+        g = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => s, :bc => Dict(1 => :outflow)), ctx)
+        return g.get_tag(SVector(1.0, 0.6)), g.get_tag(SVector(-0.01, 0.5)), wall_velocity(g.shape, SVector(1.0, 0.7), 0.3)
+    end
+    @test string_shape_world() == (5, 1, SVector(0.0, 0.0))
+    g0 = GeometricDomain(Tagged(Cuboid((0.0, 0.0), (1.0, 1.0)), t -> t - 1))
+    @test_throws ArgumentError g0.get_tag(SVector(-0.1, 0.5))
+    # Wedges: behind a convex corner of any angle the wall point is the nearest boundary point (the projections
+    # alone stopped on a face at obtuse corners, 15 % off at 120°, and had not converged at acute ones)
+    segdist(p, a, b) = (t = clamp(dot(p - a, b - a) / dot(b - a, b - a), 0, 1); norm(p - (a + t * (b - a))))
+    for α in (30, 120, 150)
+        a  = deg2rad(α)
+        gw = GeometricDomain(intersect(Cuboid((-5.0, 0.0), (5.0, 5.0)), HalfSpace((0.0, 0.0), (-sin(a), cos(a)))))
+        for x in (SVector(-0.04, -0.07), SVector(-0.1, -0.02), SVector(0.03, -0.05), 0.08 * SVector(cos(a + 0.6), sin(a + 0.6)))
+            signed_distance(gw.shape, x) > 0 || continue
+            exact = min(segdist(x, SVector(0.0, 0.0), SVector(5.0, 0.0)), segdist(x, SVector(0.0, 0.0), 5 * SVector(cos(a), sin(a))))
+            @test isapprox(wall_geometry(gw, x)[2], exact; rtol = 1e-6)
+        end
+    end
+    # a disc decides inside/outside on the squared distance, as the spherical domain did before shapes (the sqrt
+    # rounded lattice points one ulp outside onto the circle: N 541 -> 545)
+    pgd = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
+    @test all(i -> pgd.core.is_boundary[i] == (sum(abs2, pgd.core.positions[i]) > 1), 1:pgd.meta.N)
+    @test pgd.meta.N_interior == count(i -> sum(abs2, pgd.core.positions[i]) <= 1, 1:pgd.meta.N)
+    # the builder
+    ctx = Dict{Symbol, Any}(:T => Float64, :D => 2)
+    gb = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => shape, :bc => Dict(1 => :outflow)), ctx)
+    @test gb.shape === shape && gb.bc_map[1] isa OutflowBC
+    @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => Ball((0f0, 0f0), 1f0)), ctx)
+    @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => Ball((0.0,), 1.0)), ctx)
+    gs = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => "shape", :shape => "Ball((0.0, 0.0), 1.0)"), ctx)
+    @test gs.shape isa Ball
+    # The fits' Cholesky factorisation takes an exact square root (StaticArrays' takes `sqrt_fast`, which the device
+    # compilers turn into an approximate one: single-precision fits in Float64 on CUDA); same factor as StaticArrays'
+    for B in (1, 3, 6), T in (Float64, Float32)
+        Xc = SMatrix{B, B, T}(reshape(T.(sin.(1:B * B)), B, B)); Ac = Xc' * Xc + T(0.1) * I
+        C1, C2 = cholesky(Symmetric(Ac)), HyperCloudCore._cholesky_sym(Ac)
+        @test issuccess(C2) && isapprox(C2.factors, C1.factors; rtol = 16eps(T))
+    end
+    @test !issuccess(HyperCloudCore._cholesky_sym(SMatrix{2, 2}(1.0, 2.0, 2.0, 1.0)))
+    # (on the CPU both roots are exact, so look at the typed code: no fast-math square root, which a device compiler would
+    # turn into an approximate one)
+    ir_chol = string(Base.code_typed(HyperCloudCore._cholesky_sym, (SMatrix{3, 3, Float64, 9},))[1].first)
+    @test occursin("sqrt", ir_chol) && !occursin("fast", ir_chol)
+    # the finite-difference curvature of a user shape: right on a smooth wall, zero across a corner (no 1/h garbage)
+    struct _UserDisc <: AbstractShape{2, Float64} end
+    HyperCloudCore.signed_distance(::_UserDisc, x::SVector{2, Float64}) = sqrt(sum(abs2, x)) - 0.5
+    struct _UserSquare <: AbstractShape{2, Float64} end
+    HyperCloudCore.signed_distance(::_UserSquare, x::SVector{2, Float64}) =
+        (q = abs.(x) .- 0.5; sqrt(sum(abs2, max.(q, 0.0))) + min(maximum(q), 0.0))
+    @test HyperCloudCore._sdf_hessian(_UserDisc(), SVector(0.3, 0.4)) ≈ HyperCloudCore._sdf_hessian(Ball((0.0, 0.0), 0.5), SVector(0.3, 0.4)) atol = 1e-6
+    @test HyperCloudCore._sdf_hessian(_UserSquare(), SVector(0.5, 0.5)) == zero(SMatrix{2, 2, Float64, 4})
+    @test HyperCloudCore._sdf_hessian(_UserSquare(), SVector(0.5, 0.1)) == zero(SMatrix{2, 2, Float64, 4})   # (a flat face)
+    # ... also next to the apex of a polygon whose edges are not axis-aligned (two steps agreed there by coincidence:
+    # 1/h curvatures at wall points 1-1.5 steps from the vertex); a triangle with apex (0, 0.5), scanned along an edge
+    struct _UserTriangle <: AbstractShape{2, Float64} end
+    function HyperCloudCore.signed_distance(::_UserTriangle, x::SVector{2, Float64})
+        vs = (SVector(0.0, 0.5), SVector(-0.433, -0.25), SVector(0.433, -0.25))
+        d, s = Inf, 1.0
+        for k in 1:3
+            a, b = vs[k], vs[mod1(k + 1, 3)]
+            e, w = b - a, x - a
+            q = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0)
+            d = min(d, sqrt(dot(q, q)))
+            (e[1] * w[2] - e[2] * w[1]) < 0 && (s = -s)
+        end
+        return -s * d
+    end
+    hfd = eps(Float64)^(1 / 4)
+    tri_e = normalize(SVector(-0.433, -0.75))
+    @test all(δ -> maximum(abs, HyperCloudCore._sdf_hessian(_UserTriangle(), SVector(0.0, 0.5) + δ * hfd * tri_e)) * hfd <= 0.1,
+              range(0.25, 6.0; length = 400))
+    # `T` in a string is the run's float type
+    g32 = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), T(1))"), Dict{Symbol, Any}(:T => Float32, :D => 2))
+    @test g32.shape isa Ball{2, Float32}
+    gm = HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "r = T(0.5); Ball((T(0), T(0)), r)"), Dict{Symbol, Any}(:T => Float32, :D => 2))
+    @test gm.shape isa Ball{2, Float32}
+    @test HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "r = T(0.5)\nBall((T(0), T(0)), r)"), Dict{Symbol, Any}(:T => Float32, :D => 2)).shape isa Ball{2, Float32}
+    @test_throws ArgumentError HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape, :shape => "Ball((T(0), T(0)), "), ctx)
+    @test_throws ErrorException HyperCloudCore.build_domain(Dict{Symbol, Any}(:domain => :shape), ctx)
+    # the former constructor still works, without wall geometry
+    legacy = GeometricDomain(Val(:legacy_square), SVector(0.0, 0.0), SVector(1.0, 1.0), SVector(false, false),
+                             x -> all(0 .<= x .<= 1), x -> all(0 .<= x .<= 1) ? 0 : 1, Dict{Int, AbstractBoundaryCondition}())
+    @test legacy.shape === nothing
+    HyperCloudCore.domain_volume(::GeometricDomain{Val{:legacy_square}}) = 1.0
+    pgl = ParticleGrid(legacy, (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
+    @test all(isnan, view(pgl.core.wall_distances, 1:pgl.meta.N)) && all(x -> all(isnan, x), view(pgl.core.normals, 1:pgl.meta.N))
+end
+
+@testset "Ghost states from one-sided fits: ExtrapolationBC and MirrorBC" begin
+    dx = 1 / 20
+    f(x) = 1 + 2x[1] + 3x[2] + 0.5x[1]^2 - x[1] * x[2] + 0.25x[2]^2
+    eq     = LinearAdvection(((1.0,), (0.7,)), Float64)
+    interp = MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux())
+    ts     = GeneralRKTimeStepper(eq, interp, MOOD(), RK3_SSP_Tableau(Float64))
+    negate(eq, U, wall) = -U
+    function make(bc_map; seed = 1)
+        geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); bc_map = bc_map)
+        pg   = ParticleGrid(geom, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1; randomness = (0.2dx, 0.2dx), rng = MersenneTwister(seed))
+        for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(f(pg.core.positions[i])); end
+        return pg
+    end
+    function apply(pg)
+        buf = copy(pg.rhos)
+        for i in 1:pg.meta.N; pg.core.is_boundary[i] && (buf[i] = State{1, Float64}(99.0)); end
+        HyperCloudCore.apply_boundary_conditions!(pg, buf, ts, eq, 0.0)
+        return buf
+    end
+    mirror(pg, i) = pg.core.positions[i] - 2 * pg.core.wall_distances[i] * pg.core.normals[i]
+    ghosts(pg) = findall(view(pg.core.is_boundary, 1:pg.meta.N))
+
+    @testset "Exact for quadratics at degree 2 (every ghost, including the outermost layer and the corners)" begin
+        for seed in 1:3
+            pg = make(Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(; degree = 2, bounded = false), 2 => ExtrapolationBC(2),
+                                                           3 => MirrorBC(negate; degree = 2, bounded = false), 4 => ExtrapolationBC(2)); seed = seed)
+            buf = apply(pg)
+            for i in ghosts(pg)
+                t = pg.core.tags[i]
+                ref = t == 1 ? f(mirror(pg, i)) : t == 3 ? -f(mirror(pg, i)) : f(pg.core.positions[i])
+                @test buf[i][1] ≈ ref atol = 1e-10
+            end
+            @test all(i -> buf[i] == pg.rhos[i], interior_indices(pg))
+        end
+    end
+
+    @testset "Degree 1 is first order on a quadratic; degree 0 is a weighted average" begin
+        pg  = make(Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(; degree = 1, bounded = false), 2 => ExtrapolationBC(1), 3 => ExtrapolationBC(0), 4 => OutflowBC()))
+        buf = apply(pg)
+        e1 = maximum(abs(buf[i][1] - f(pg.core.positions[i])) for i in ghosts(pg) if pg.core.tags[i] == 2)
+        e0 = maximum(abs(buf[i][1] - f(pg.core.positions[i])) for i in ghosts(pg) if pg.core.tags[i] == 3)
+        @test 1e-4 < e1 < 0.05 < e0 < 1.0
+        lo, hi = extrema(buf[i][1] for i in interior_indices(pg))
+        @test all(i -> pg.core.tags[i] != 3 || lo <= buf[i][1] <= hi, ghosts(pg))          # a convex combination of interior states
+        # linear fields are exact at degree 1, in the mirror as well
+        for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(1 + 2pg.core.positions[i][1] - pg.core.positions[i][2]); end
+        buf = apply(pg)
+        g(x) = 1 + 2x[1] - x[2]
+        @test all(i -> pg.core.tags[i] in (3, 4) || isapprox(buf[i][1], pg.core.tags[i] == 1 ? g(mirror(pg, i)) : g(pg.core.positions[i]); atol = 1e-12), ghosts(pg))
+    end
+
+    @testset "Bounded mirror: within the range of its data, exact where that range contains the value" begin
+        pg  = make(Dict{Int, AbstractBoundaryCondition}(t => MirrorBC(; degree = 2) for t in 1:4))
+        buf = apply(pg)
+        lo, hi = extrema(buf[i][1] for i in interior_indices(pg))
+        @test all(i -> lo <= buf[i][1] <= hi, ghosts(pg))
+        n_exact = count(i -> isapprox(buf[i][1], f(mirror(pg, i)); atol = 1e-10), ghosts(pg))
+        @test n_exact > 0.9 * length(ghosts(pg))                  # the clamp acts only on ghosts whose mirror point is shallower than every datum
+        @test MirrorBC() isa MirrorBC{1, Nothing, true} && MirrorBC(; bounded = false) isa MirrorBC{1, Nothing, false}
+    end
+
+    @testset "The donor's MOOD order caps the degree" begin
+        pg = make(Dict{Int, AbstractBoundaryCondition}(t => ExtrapolationBC(2) for t in 1:4))
+        fill!(view(pg.core.particle_orders, 1:pg.meta.N), 2)      # second order: linear fits only
+        buf = apply(pg)
+        e = maximum(abs(buf[i][1] - f(pg.core.positions[i])) for i in ghosts(pg))
+        @test 1e-4 < e < 0.1
+        fill!(view(pg.core.particle_orders, 1:pg.meta.N), 0)      # 0 = never set: no cap
+        buf = apply(pg)
+        @test maximum(abs(buf[i][1] - f(pg.core.positions[i])) for i in ghosts(pg)) < 1e-10
+    end
+
+    @testset "A ghost without an interior particle in reach keeps its state" begin
+        pg = make(Dict{Int, AbstractBoundaryCondition}(t => ExtrapolationBC(1) for t in 1:4))
+        fill!(view(pg.core.is_boundary, 1:pg.meta.N), true)
+        buf = fill(State{1, Float64}(99.0), pg.meta.N)
+        HyperCloudCore.apply_boundary_conditions!(pg, buf, ts, eq, 0.0)
+        @test all(buf[i][1] == 99.0 for i in 1:pg.meta.N)
+    end
+
+    @testset "Backends agree; the launch does not allocate" begin
+        bc  = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(negate; degree = 2), 2 => ExtrapolationBC(2), 3 => MirrorBC(; degree = 1), 4 => ExtrapolationBC(0))
+        pg  = make(bc)
+        ref = apply(pg)
+        try
+            set_backend!(ThreadsBackend())
+            @test apply(pg) == ref
+            set_backend!(KABackend(HyperCloudCore.KA.CPU(); workgroupsize = 32))
+            dev = apply(pg)
+            @test all(isapprox(dev[i][1], ref[i][1]; atol = 1e-12) for i in 1:pg.meta.N)
+        finally
+            set_backend!(PolyesterBackend())
+        end
+        buf = copy(pg.rhos)
+        alloc_of(cond, tag) = (cond(pg, buf, tag, ts, eq, 0.0); @allocated cond(pg, buf, tag, ts, eq, 0.0))   # function barrier: a concrete `cond`
+        for (tag, cond) in bc                                      # (the Dict loop of apply_boundary_conditions! itself allocates)
+            @test alloc_of(cond, tag) == 0
+        end
+    end
+
+    @testset "A MirrorBC needs a shape; an operator must be a bits type; degrees 0-5" begin
+        legacy = GeometricDomain(Val(:legacy_square), SVector(0.0, 0.0), SVector(1.0, 1.0), SVector(false, false),
+                                 x -> all(0 .<= x .<= 1), x -> all(0 .<= x .<= 1) ? 0 : 1,
+                                 Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC()))
+        @test_throws ArgumentError ParticleGrid(legacy, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1)
+        @test requires_shape(MirrorBC()) && !requires_shape(ExtrapolationBC()) && !requires_shape(OutflowBC())
+        v = [1.0]
+        @test_throws ArgumentError MirrorBC((eq, U, w) -> U * v[1])
+        @test_throws ArgumentError ExtrapolationBC(6)
+        @test_throws ArgumentError MirrorBC(; degree = -1)
+        @test MirrorBC(negate; degree = 3) isa MirrorBC{3, typeof(negate)}
+    end
+
+    @testset "A wall of a 2-D channel: the bounded mirror stays bounded and beats the donor copy" begin
+        # Advection along the walls (velocity (1, 0)) of a Gaussian centred on the bottom wall: its even extension is
+        # exact, the wall values are O(1), the exact solution only translates. The walls (tags 3, 4) are symmetry
+        # planes: MirrorBC without an operator. A long run (one period) at the scheme's own time step.
+        eqx = LinearAdvection(((1.0,), (0.0,)), Float64)
+        u0(x, t) = exp(-((mod(x[1] - t, 1.0) - 0.5)^2 + x[2]^2) / 0.02)
+        function run(bc, N, order, tab; tend = 1.0)
+            h    = 1 / N
+            geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = (true, false),
+                                          bc_map = Dict{Int, AbstractBoundaryCondition}(3 => bc, 4 => bc))
+            pg   = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; randomness = (0.2h, 0.2h), rng = MersenneTwister(7))
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i], 0.0)); end
+            interp = MUSCL(Float64, 2, 1, order, NoLimiter(), RusanovFlux())
+            ts  = GeneralRKTimeStepper(eqx, interp, MOOD(), tab)
+            dt  = 0.5 * get_time_step(pg, eqx, interp)
+            t   = 0.0
+            while t < tend - 1e-12
+                d = min(dt, tend - t); ts(eqx, pg, t, d); t += d
+            end
+            err = maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i], t)) for i in interior_indices(pg))
+            return err, maximum(abs(pg.rhos[i][1]) for i in 1:pg.meta.N)
+        end
+        e_mirror, m_mirror = run(MirrorBC(; degree = 2), 20, 3, RK3_SSP_Tableau(Float64))
+        @test m_mirror <= 1.05
+        e5, m5 = run(MirrorBC(; degree = 2), 20, 5, RK4_SSP_Tableau(Float64))          # unbounded: 1.25 at t = 1, 2.4 at t = 2
+        @test m5 <= 1.05 && e5 < 1.0
+        # ... and converges on the jittered cloud. With the ghosts the jitter used to push just across the wall (half
+        # of the wall row, down to 1e-3 h outside) the error stalled at 0.17 for N = 20, 40, 80 at t = 0.25 (and grew
+        # in time); the point generator now reflects them back inside
+        e40, _ = run(MirrorBC(; degree = 2), 40, 3, RK3_SSP_Tableau(Float64); tend = 0.25)
+        e80, _ = run(MirrorBC(; degree = 2), 80, 3, RK3_SSP_Tableau(Float64); tend = 0.25)
+        @test e80 < 0.75 * e40 && e80 < 0.05
+        e_copy80, _ = run(OutflowBC(), 80, 3, RK3_SSP_Tableau(Float64); tend = 0.25)
+        @test e80 < e_copy80                                                       # the mirror beats the donor copy
+        # A wall 0.1h above a lattice row, no jitter: that row's points used to be ghosts 0.1h outside, whose mirror
+        # points fell between the wall and the first interior row (0.23/0.28/0.33 at N = 20/40/80); they are snapped
+        # onto the wall now, and the mirror converges (0.17/0.033/0.014)
+        function run_off(N)
+            h  = 1 / N
+            y0 = 0.1h
+            u(x, t) = exp(-((mod(x[1] - t, 1.0) - 0.5)^2 + (x[2] - y0)^2) / 0.02)
+            shape = intersect(Tagged(Cuboid((0.0, 0.0), (1.0, 1.0); open = (true, false)), 4), Tagged(HalfSpace((0.0, y0), (0.0, -1.0)), 3))
+            bc = MirrorBC(; degree = 2)
+            pg = ParticleGrid(GeometricDomain(shape; is_periodic = (true, false), mins = (0.0, 0.0), maxs = (1.0, 1.0),
+                                              bc_map = Dict{Int, AbstractBoundaryCondition}(3 => bc, 4 => bc)),
+                              (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+            @test all(i -> !pg.core.is_boundary[i] || pg.core.wall_distances[i] >= h / 2 - 1e-12, 1:pg.meta.N)
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u(pg.core.positions[i], 0.0)); end
+            interp = MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux())
+            ts = GeneralRKTimeStepper(eqx, interp, MOOD(), RK3_SSP_Tableau(Float64))
+            dt = 0.5 * get_time_step(pg, eqx, interp); t = 0.0
+            while t < 0.25 - 1e-12; d = min(dt, 0.25 - t); ts(eqx, pg, t, d); t += d; end
+            return maximum(abs(pg.rhos[i][1] - u(pg.core.positions[i], t)) for i in interior_indices(pg))
+        end
+        eo40, eo80 = run_off(40), run_off(80)
+        @test eo80 < 0.6 * eo40 && eo80 < 0.025
+        # Ghost gradients: boundary particles take part in the gather pass, so both sides of a wall pair are
+        # reconstructed. With the ghost side piecewise constant the wall rows were first order, and the mirror fed
+        # that back: exact ghost values 4.1e-2 -> 1.4e-2 (N = 40 -> 80, t = 0.5, order 1.5) and the mirror 1.9x the
+        # exact-ghost error; now 4.7e-2 -> 8.7e-3 (order 2.4) and the mirror within 1.2x
+        struct ExactGhosts <: AbstractBoundaryCondition end
+        function (::ExactGhosts)(pg, buf, tag, ts, eq, t)
+            for i in 1:pg.meta.N
+                (pg.core.is_boundary[i] && pg.core.tags[i] == tag) && (buf[i] = State{1, Float64}(u0(pg.core.positions[i], t)))
+            end
+            return nothing
+        end
+        function run_lattice(bc, N; mood = MOOD(), drops = nothing)
+            h    = 1 / N
+            geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = (true, false),
+                                          bc_map = Dict{Int, AbstractBoundaryCondition}(3 => bc, 4 => bc))
+            pg   = ParticleGrid(geom, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1)
+            for i in 1:pg.meta.N; pg.rhos[i] = State{1, Float64}(u0(pg.core.positions[i], 0.0)); end
+            interp = MUSCL(Float64, 2, 1, 3, NoLimiter(), RusanovFlux())
+            ts = GeneralRKTimeStepper(eqx, interp, mood, RK3_SSP_Tableau(Float64))
+            dt = 0.5 * get_time_step(pg, eqx, interp); t = 0.0
+            while t < 0.5 - 1e-12
+                d = min(dt, 0.5 - t); ts(eqx, pg, t, d); t += d
+                drops === nothing || (drops[] += count(i -> ts.work.triggered_step[i] && pg.core.positions[i][2] < 2.5h, interior_indices(pg)))
+            end
+            return maximum(abs(pg.rhos[i][1] - u0(pg.core.positions[i], t)) for i in interior_indices(pg))
+        end
+        ex40, ex80 = run_lattice(ExactGhosts(), 40), run_lattice(ExactGhosts(), 80)
+        @test ex80 < 0.25 * ex40
+        @test run_lattice(MirrorBC(; degree = 2), 80) < 1.3 * ex80
+        # The ghosts' gradients and curvatures enter MOODu2's smooth-extremum test of the wall rows. With zero ghost
+        # curvatures the test always failed there and MOODu2 acted as MOODu1 on the first rows: MOODu2(1e-4) with a
+        # mirror, N = 40, dropped orders 4.2 times per step on the wall rows (error 0.21); now never (0.068)
+        nd = Ref(0)
+        @test run_lattice(MirrorBC(; degree = 2), 40; mood = MOOD(MOODu2(1e-4)), drops = nd) < 0.1
+        @test nd[] == 0
+    end
+
+    @testset "Jitter does not push interior points across a wall" begin
+        # the jittered grid has the interior points of the unjittered one (none became a ghost on the wall), and the
+        # ghosts of a box keep their lattice distance from it (rows at h, 2h, ... minus the jitter)
+        geom = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0))
+        pg0  = ParticleGrid(geom, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1)
+        for jit in (0.2, 0.45)
+            pgj = ParticleGrid(geom, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1; randomness = (jit * dx, jit * dx), rng = MersenneTwister(2))
+            @test pgj.meta.N_interior == pg0.meta.N_interior
+            @test all(i -> !pgj.core.is_boundary[i] || pgj.core.wall_distances[i] >= (1 - jit) * dx - 1e-12, 1:pgj.meta.N)
+            @test all(i -> pgj.core.is_boundary[i] || pgj.core.wall_distances[i] <= 0, 1:pgj.meta.N)
+        end
+        # walls off the lattice: points less than h/2 outside are snapped onto the wall, no ghost is closer than h/2
+        for g in (get_rectangular_domain(Float64, (0.0, 0.0), (1.03, 1.0)), get_spherical_domain(Float64, (0.0, 0.0), 1.0))
+            for jit in (0.0, 0.2)
+                p = ParticleGrid(g, (dx, dx), ExponentialWeightFunction(1.0, 2.5dx), 1; randomness = (jit * dx, jit * dx), rng = MersenneTwister(4))
+                @test all(i -> !p.core.is_boundary[i] || p.core.wall_distances[i] >= dx / 2 - 1e-12, 1:p.meta.N)
+                @test all(i -> p.core.is_boundary[i] || p.core.wall_distances[i] <= 0, 1:p.meta.N)
+                xs = view(p.core.positions, 1:p.meta.N)
+                @test jit > 0 || minimum(sum(abs2, xs[i] - xs[j]) for i in eachindex(xs) for j in (i + 1):length(xs)) >= (dx / 2 - 1e-12)^2
+                # snapped points (on the wall) keep dx/4 from every other particle, also on a jittered cloud
+                onwall = [i for i in eachindex(xs) if abs(p.core.wall_distances[i]) <= 1e-12]
+                @test isempty(onwall) || minimum(sum(abs2, xs[i] - xs[j]) for i in onwall for j in eachindex(xs) if j != i) >= (dx / 4 - 1e-12)^2
+            end
+        end
+        # a case where snapped points landed next to jittered interior ones before the clash check included them
+        # (0.19h apart); now they keep h/4
+        hj = 0.037
+        pj = ParticleGrid(GeometricDomain(Ball((0.0, 0.0), 1.0)), (hj, hj), ExponentialWeightFunction(1.0, 2.5hj), 1;
+                          randomness = (0.3hj, 0.3hj), rng = MersenneTwister(3))
+        xj = view(pj.core.positions, 1:pj.meta.N)
+        wj = [i for i in eachindex(xj) if abs(pj.core.wall_distances[i]) <= 1e-12]
+        @test !isempty(wj) && minimum(sum(abs2, xj[i] - xj[j]) for i in wj for j in eachindex(xj) if j != i) >= (hj / 4 - 1e-12)^2
+        # also behind a curved wall: no jittered interior point ends up outside the disc
+        pgd = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1)
+        pgdj = ParticleGrid(get_spherical_domain(Float64, (0.0, 0.0), 1.0), (0.1, 0.1), ExponentialWeightFunction(1.0, 0.25), 1;
+                            randomness = (0.03, 0.03), rng = MersenneTwister(3))
+        @test pgdj.meta.N_interior >= pgd.meta.N_interior - count(i -> !pgd.core.is_boundary[i] && pgd.core.wall_distances[i] > -0.03, 1:pgd.meta.N)
+    end
+
+    @testset "Degree fallback is monotone; 3-D degree cap; Float32 3-D" begin
+        # 1-D, R = 3.5Δx: the wall donor carries degree 1 only, its neighbours degree 3; degree 4 used to fall back to
+        # what the wall donor supports (degree 1) while degree 3 found the better donor. Now both fit degree 3: exact
+        # for cubics.
+        f3(x) = 1 + x[1] - 2x[1]^2 + 3x[1]^3
+        g1 = get_rectangular_domain(Float64, (0.0,), (1.0,); bc_map = Dict{Int, AbstractBoundaryCondition}(1 => ExtrapolationBC(4), 2 => ExtrapolationBC(3)))
+        p1 = ParticleGrid(g1, (0.05,), ExponentialWeightFunction(1.0, 3.5 * 0.05), 1)
+        for i in 1:p1.meta.N; p1.rhos[i] = State{1, Float64}(f3(p1.core.positions[i])); end
+        b1 = copy(p1.rhos)
+        for (tag, bc) in g1.bc_map; bc(p1, b1, tag, nothing, nothing, 0.0); end
+        @test all(i -> !p1.core.is_boundary[i] || isapprox(b1[i][1], f3(p1.core.positions[i]); atol = 1e-8), 1:p1.meta.N)
+        # degrees 4-5 are capped at 3 in 3-D (they would need an allocating, host-only Cholesky in the kernel)
+        @test HyperCloudCore._ghost_degree(Val(5), Val(3)) === Val(3) && HyperCloudCore._ghost_degree(Val(5), Val(2)) === Val(5)
+        # Float32 3-D degree 2: the extrapolated ghosts of a quadratic to Float32 accuracy on the CPU backends (a
+        # miscompile of the fit kernel by Julia 1.13.3 / LLVM 20 gave errors of 2-7 on data of size 4, depending on the
+        # thread count; the out-of-line moment accumulation avoids that code shape, this test guards it)
+        T  = Float32
+        q3(x) = 1 + x[1] + x[2] + x[3] + x[1]^2 - x[2] * x[3]
+        g3 = get_rectangular_domain(T, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0); bc_map = Dict{Int, AbstractBoundaryCondition}(t => ExtrapolationBC(2) for t in 1:6))
+        p3 = ParticleGrid(g3, (T(0.1), T(0.1), T(0.1)), ExponentialWeightFunction(T(1), T(0.25)), 1; randomness = (T(0.02), T(0.02), T(0.02)),
+                          rng = MersenneTwister(1))
+        for i in 1:p3.meta.N; p3.rhos[i] = State{1, T}(T(q3(Float64.(p3.core.positions[i])))); end
+        eq3 = LinearAdvection(((1.0,), (1.0,), (1.0,)), T)
+        b3 = copy(p3.rhos)
+        for (tag, bc) in g3.bc_map; bc(p3, b3, tag, nothing, eq3, 0.0); end
+        @test maximum(i -> p3.core.is_boundary[i] ? abs(b3[i][1] - q3(Float64.(p3.core.positions[i]))) : 0.0, 1:p3.meta.N) < 0.05
     end
 end
 
