@@ -1,7 +1,6 @@
 # AI declarations, checked by aisignoff: file-level annotations below, line-level declarations from [history].
 # Scheme: https://github.com/industrial-mathematics-group/.github/blob/main/.github/CONTRIBUTING.md#ai-assisted-contributions
-version = 3
-exclude = ["reviews/**"]   # committed AI reviews (CONTRIBUTING.md) need no declaration
+version = 4
 
 # Line by line: the commit that landed a line on main declares it. For a pull request into main that is its
 # merge commit, whose message is the PR description with the ticked AI declaration of the template; main_dev
@@ -17,8 +16,8 @@ AI-Generation = "G3"
 Human-Review = "H1"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
 Assisted-by = "Claude (Anthropic), claude-opus-5-5, claude-fable-5-1"
-AI-Review = "A2"
-AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"
+AI-Review = "A1"
+AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"
 
 [[annotations]]
 path = "src/**"
@@ -26,8 +25,8 @@ AI-Generation = "G2"
 Assisted-by = "Claude (Anthropic), claude-opus-5-5, claude-fable-5-1"
 Human-Review = "H2"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
-AI-Review = "A2"
-AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"
+AI-Review = "A1"
+AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"
 
 [[annotations]]
 path = "test/**"
@@ -35,8 +34,8 @@ AI-Generation = "G3"
 Assisted-by = "Claude (Anthropic), claude-opus-5-5, claude-fable-5-1"
 Human-Review = "H1"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
-AI-Review = "A2"
-AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"
+AI-Review = "A1"
+AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"
 
 [[annotations]]
 path = "docs/**"
@@ -44,8 +43,8 @@ AI-Generation = "G3"
 Assisted-by = "Claude (Anthropic), claude-opus-5-5, claude-fable-5-1"
 Human-Review = "H2"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
-AI-Review = "A2"
-AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"
+AI-Review = "A1"
+AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"
 
 [[annotations]]
 path = "logos/**"
@@ -53,91 +52,62 @@ AI-Generation = "G2"
 Assisted-by = "Claude (Anthropic), claude-opus-5-5"
 Human-Review = "H2"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
-AI-Review = "A2"
-AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"
+AI-Review = "A1"
+AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"
 
-# The file lists below stay until SIGNOFF.snapshot.json holds the levels they give: `aisignoff freeze` on main
-# after the next "Main dev" merge, then the lists are deleted. Their review levels are already the
-# attestations at the end of this file; generation, and reviews below the folder defaults, can't be attested.
+# Changed by Claude agents to address the reviews of new AI sessions (and reviewed again by one).
+[[annotations]]
+path = ["CLAUDE.md", "docs/src/gpu_roadmap.md", "docs/src/particle_grids/domains.md", "docs/src/particle_grids/overview.md", "docs/src/particle_grids/volumes.md", "docs/src/spatial/central.md", "docs/src/spatial/muscl.md", "docs/src/spatial/upwind.md", "docs/src/spatial/weno.md", "docs/src/time_integration/tableaus.md", "docs/src/time_integration/time_stepper.md", "src/Backend.jl", "src/Builders/domains.jl", "src/DeviceAdapt.jl", "src/Grid/Adaptivity.jl", "src/Grid/BoundaryConditions.jl", "src/Grid/Domains.jl", "src/Grid/MLSWeightFunctions.jl", "src/Grid/ParticleGrids.jl", "src/Grid/Reordering.jl", "src/Grid/Volumes.jl", "src/Interpolation/Central.jl", "src/Interpolation/FluxFunctions.jl", "src/Interpolation/Limiter.jl", "src/Interpolation/MUSCL.jl", "src/Interpolation/Upwind.jl", "src/Interpolation/WENO.jl", "src/TimeStepping/ButcherTableaus.jl", "src/TimeStepping/MOOD.jl", "src/TimeStepping/TimeSteppers.jl", "src/Types.jl", "src/Utils.jl", "test/gpu_tests.jl", "test/pipeline_tests.jl", "test/runtests.jl", "test/unit_backends.jl", "test/unit_core.jl", "test/unit_schemes.jl"]
+AI-Generation = "G3"
+Human-Review = "H0"
+AI-Review = "A1"
+Assisted-by = ["Claude (Anthropic), claude-opus-5-5"]
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"]
+Reviewed-by = ["blhackslash <dev@blackslash.win>"]
 
-# Further files changed by Claude agents for the A2 reviews (claude/review-numerics), reviewed again in reviews/.
+# Further files changed by Claude agents for the AI reviews (claude/review-numerics), reviewed again by a new session.
 [[annotations]]
 path = ["docs/src/time_integration/mood.md", "src/API.jl", "src/Interpolation/Interpolators.jl", "src/Interpolation/MUSCL_hooks.jl", "src/Types.jl", "test/kinetic_source.jl"]
 AI-Generation = "G3"
 Human-Review = "H0"
-AI-Review = "A2"
+AI-Review = "A1"
 Assisted-by = ["Claude (Anthropic), claude-opus-5-5"]
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation"]
 Reviewed-by = ["blhackslash <dev@blackslash.win>"]
 
 [[annotations]]
 path = [".github/workflows/file-signoff.yml", ".github/workflows/pr-signoff.yml", ".github/workflows/signoff-badges.yml"]
 AI-Generation = "G3"
 Assisted-by = "Claude Opus 5.5 (Anthropic)"
-AI-Review = "A1"
-AI-Reviewed-by = "Claude Opus 5.5 (Anthropic), same session"
+AI-Review = "A0"
 Human-Review = "H1"
 Reviewed-by = "blhackslash <dev@blackslash.win>"
 
-# Reviews of whole files, as of the content that was checked (`aisignoff attest`): lines changed afterwards fall
-# back to the commit that changed them. Taken from the file lists above, with their Human-Review (H1 and up) and
-# AI-Review, for the content each file had at the commit that last set its list.
-[[attestations]]
-path = "docs/src/time_integration/mood.md"
-blob = "6311dcf7d90c649384ba1c71a54b726bb1c9bf5a"
-AI-Review = "A2"
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
+# Pull requests merged before version 4 whose ticked boxes are on the old AI review scale: these
+# entries keep the levels version 3 read (a new session's review is A1, a self-check A0).
 
-[[attestations]]
-path = "src/API.jl"
-blob = "7fc23983f3df4559e0bd7077227cf0ffdc77782a"
-AI-Review = "A2"
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
-
-[[attestations]]
-path = "src/Interpolation/Interpolators.jl"
-blob = "a2ce97645317db4a4cd97131eaaf8bdbd12f96f0"
-AI-Review = "A2"
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
-
-[[attestations]]
-path = "src/Interpolation/MUSCL_hooks.jl"
-blob = "b7c2395ea160d2c1cb63430f18cd315e26cb06a4"
-AI-Review = "A2"
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
-
-[[attestations]]
-path = "src/Types.jl"
-blob = "f6508a589a9edbde66891b8ad1cab45827532599"
-AI-Review = "A2"
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
-
-[[attestations]]
-path = "test/kinetic_source.jl"
-blob = "b60fd2a713f43c739cba0a531042e81b627191fd"
-AI-Review = "A2"
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generating conversation (reviews/)"]
-
-[[attestations]]
-path = ".github/workflows/file-signoff.yml"
-blob = "f7192628ae1080e1bed28d94f1596613face206e"
-Human-Review = "H1"
+[[commits]]
+commit = "79d2620"
+AI-Generation = "G3"
+Assisted-by = ["Claude Opus (Anthropic)"]
+Human-Review = "H0"
+Reviewed-by = ["Pascal Jung <dev@blackslash.win>"]
 AI-Review = "A1"
-Reviewed-by = ["blhackslash <dev@blackslash.win>"]
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), same session"]
+AI-Reviewed-by = ["Claude Opus (Anthropic), new session without the generating conversation"]
 
-[[attestations]]
-path = ".github/workflows/pr-signoff.yml"
-blob = "ab2dcedb2970f8817b72ef54a2e03952a475bf34"
+[[commits]]
+commit = "5409209"
+AI-Generation = "G2"
+Assisted-by = ["Claude Opus (Anthropic)"]
 Human-Review = "H1"
-AI-Review = "A1"
-Reviewed-by = ["blhackslash <dev@blackslash.win>"]
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), same session"]
+Reviewed-by = ["Pascal Jung <dev@blackslash.win>"]
+AI-Review = "A0"
 
-[[attestations]]
-path = ".github/workflows/signoff-badges.yml"
-blob = "4337b163b254e1e6eed94eed6866d089cd594a2b"
+[[commits]]
+commit = "ec0f378"
+AI-Generation = "G2"
+Assisted-by = ["Claude Opus (Anthropic)"]
 Human-Review = "H1"
+Reviewed-by = ["Pascal Jung <dev@blackslash.win>"]
 AI-Review = "A1"
-Reviewed-by = ["blhackslash <dev@blackslash.win>"]
-AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), same session"]
+AI-Reviewed-by = ["Claude Opus (Anthropic), new session without the generating conversation"]
