@@ -16,7 +16,7 @@ links = InterLinks(
 makedocs(
     sitename = "HyperCloudCore.jl",
     modules = [HyperCloudCore],
-    # Explicit, so the build does not depend on the `origin` remote (Forgejo checkouts).
+    # Explicit, so the build does not depend on the name or URL of the `origin` remote.
     repo = Remotes.GitHub("industrial-mathematics-group", "HyperCloudCore.jl"),
     plugins = [links],
     checkdocs = :exports,
