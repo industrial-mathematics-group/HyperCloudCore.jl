@@ -8,7 +8,7 @@ authors:
 title: "HyperCloudCore.jl: High-performance, physics-agnostic meshless solver backend for hyperbolic PDEs"
 version: 0.8.0
 date-released: 2026-11-06
-url: "https://github.com/blhackslash/HyperCloudCore.jl"
+url: "https://github.com/industrial-mathematics-group/HyperCloudCore.jl"
 identifiers:
   - type: doi
     value: 10.5281/zenodo.23124663
