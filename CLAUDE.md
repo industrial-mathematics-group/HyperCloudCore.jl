@@ -13,6 +13,7 @@ julia -t 8 --project=test test/runtests.jl                        # same suite, 
 julia --project=test -e 'using Pkg; Pkg.instantiate()'            # once, for the line above
 julia --project=docs -e 'using Pkg; Pkg.instantiate()'            # docs env, once
 julia --project=docs docs/make.jl                                 # build docs into docs/build
+pipx run --spec aisignoff==1.0.0rc8 aisignoff report --html docs/src/assets/aisignoff.html --with-source  # optional, before make.jl: the AI Signoff Report page (CI does it)
 HYPERCLOUD_BACKEND=amdgpu julia --project=test/gpu test/runtests.jl   # device tests (AMD GPU only)
 julia -t 8 --project benchmark/step.jl                            # step throughput, see BENCH_* in the file
 ```
