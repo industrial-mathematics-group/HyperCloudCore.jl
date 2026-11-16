@@ -137,3 +137,33 @@ blob = "4337b163b254e1e6eed94eed6866d089cd594a2b"
 Human-Review = "H1"
 AI-Review = "A0"
 Reviewed-by = ["blhackslash <dev@blackslash.win>"]
+
+# Pull requests merged before version 4 whose ticked boxes are on the old AI review scale.
+# These entries keep the levels they had (as version 3 read them), so that the change-over
+# raises nothing. A freeze --prune on main after the next Main dev merge archives them.
+
+[[commits]]
+commit = "79d2620"
+AI-Generation = "G3"
+Assisted-by = ["Claude Opus (Anthropic)"]
+Human-Review = "H0"
+Reviewed-by = ["Pascal Jung <dev@blackslash.win>"]
+AI-Review = "A1"
+AI-Reviewed-by = ["Claude Opus (Anthropic), new session without the generating conversation"]
+
+[[commits]]
+commit = "5409209"
+AI-Generation = "G2"
+Assisted-by = ["Claude Opus (Anthropic)"]
+Human-Review = "H1"
+Reviewed-by = ["blhackslash <dev@blackslash.win>"]
+AI-Review = "A0"
+
+[[commits]]
+commit = "ec0f378"
+AI-Generation = "G2"
+Assisted-by = ["Claude Opus (Anthropic)"]
+Human-Review = "H1"
+Reviewed-by = ["Pascal Jung <dev@blackslash.win>"]
+AI-Review = "A1"
+AI-Reviewed-by = ["Claude Opus (Anthropic), new session without the generating conversation"]
