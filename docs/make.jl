@@ -60,6 +60,7 @@ makedocs(
             "Abstract Types" => "extending/types.md",
             "Builders"       => "extending/builders.md",
         ],
+        "AI Signoff Report" => "aisignoff.md",
     ],
 )
 
