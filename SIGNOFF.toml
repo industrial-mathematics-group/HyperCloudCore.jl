@@ -76,7 +76,7 @@ AI-Reviewed-by = ["Claude Opus 5.5 (Anthropic), new sessions without the generat
 Reviewed-by = ["blhackslash <dev@blackslash.win>"]
 
 [[annotations]]
-path = [".github/workflows/file-signoff.yml", ".github/workflows/pr-signoff.yml", ".github/workflows/signoff-badges.yml"]
+path = [".github/workflows/file-signoff.yml", ".github/workflows/pr-signoff.yml"]
 AI-Generation = "G3"
 Assisted-by = "Claude Opus 5.5 (Anthropic)"
 AI-Review = "A0"
