@@ -1,6 +1,0 @@
-== /home/agent/.claude/jobs/a4b4be7c/tmp/rr6/probes/parent/HyperCloudCore.jl/test
-user circle    400 x 400 grid built in 0.26 s
-built-in Ball  400 x 400 grid built in 0.18 s
-== /workspace/julia/HyperCloudDev/HyperCloudCore.jl/.claude/worktrees/rr-retest/test
-user circle    400 x 400 grid built in 0.27 s
-built-in Ball  400 x 400 grid built in 0.2 s

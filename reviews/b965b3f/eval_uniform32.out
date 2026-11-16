@@ -1,4 +1,0 @@
-x_disc_comoving_spin_2d    RK2MUSCL2(VK,AR,MLS2)      100x100    t=0.30  max |u - U| 9.19e-07  max |ρ - 1| 5.96e-08  max |p - 1| 9.54e-07
-x_disc_comoving_spin_2d    RK2MUSCL2(VK,AR,MLS2)      200x200    t=0.30  max |u - U| 2.50e-06  max |ρ - 1| 0.00e+00  max |p - 1| 1.53e-06
-x_disc_comoving_spin_2d    RK3MUSCL3(EPD1,AR,MLS2)    100x100    t=0.30  max |u - U| 1.00e-06  max |ρ - 1| 0.00e+00  max |p - 1| 8.58e-07
-x_disc_comoving_spin_2d    RK3MUSCL3(EPD1,AR,MLS2)    200x200    t=0.30  max |u - U| 2.98e-06  max |ρ - 1| 0.00e+00  max |p - 1| 1.34e-06

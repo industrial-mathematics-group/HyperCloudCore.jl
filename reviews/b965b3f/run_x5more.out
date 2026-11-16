@@ -1,6 +1,0 @@
-=== X5 parent 200,400
-OK   RK2MUSCL2(VK) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=6.231e-02  min(p)=2.664e-02 at x=(0.161,-0.092)  mass drift=1.39e-02  steps=1902  runtime=19.9s
-OK   RK2MUSCL2(VK) MLS=2 N=400x400 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=5.086e-02  min(p)=1.440e-02 at x=(0.139,0.090)  mass drift=1.32e-02  steps=3849  runtime=155.1s
-OK   RK3MUSCL3(EPD1,U2) MLS=2 N=200x200 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=7.759e-02  min(p)=3.823e-02 at x=(0.161,-0.092)  mass drift=1.42e-02  steps=1840  runtime=35.0s
-OK   RK3MUSCL3(EPD1,U2) MLS=2 N=400x400 CFL=0.2 R=2.5 t=0.4/0.4  NaN=0  min(u1)=5.434e-02  min(p)=9.689e-04 at x=(0.150,-0.095)  mass drift=1.32e-02  steps=3831  runtime=302.9s
-X5DONE

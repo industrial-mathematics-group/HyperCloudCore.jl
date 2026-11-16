@@ -1,8 +1,0 @@
-Float32  c = (10.0f0, 10.0f0) r = 0.15: rel. error of t·Ht: median 8.16e-03, max 1.19e-02, rejected (H = 0) 0/360
-Float32  c = (0.0f0, 0.0f0) r = 0.15: rel. error of t·Ht: median 2.45e-03, max 3.81e-03, rejected (H = 0) 0/360
-Float32  c = (0.0f0, 0.0f0) r = 0.05: rel. error of t·Ht: median 1.00e+00, max 1.00e+00, rejected (H = 0) 244/360
-Float32  c = (10.0f0, 10.0f0) r = 0.05: rel. error of t·Ht: median 1.00e+00, max 1.00e+00, rejected (H = 0) 360/360
-Float64  c = (10.0, 10.0)   r = 0.15: rel. error of t·Ht: median 3.28e-07, max 5.27e-07, rejected (H = 0) 0/360
-Float64  c = (0.0, 0.0)     r = 0.15: rel. error of t·Ht: median 1.04e-07, max 1.66e-07, rejected (H = 0) 0/360
-Float64  c = (0.0, 0.0)     r = 0.05: rel. error of t·Ht: median 9.31e-07, max 1.49e-06, rejected (H = 0) 0/360
-Float64  c = (10.0, 10.0)   r = 0.05: rel. error of t·Ht: median 2.95e-06, max 4.72e-06, rejected (H = 0) 0/360

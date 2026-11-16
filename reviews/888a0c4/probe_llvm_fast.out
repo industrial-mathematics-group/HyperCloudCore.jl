@@ -1,3 +1,0 @@
-StaticArrays       fast sqrt calls in the IR: 4, plain sqrt calls: 0
-_cholesky_sym      fast sqrt calls in the IR: 0, plain sqrt calls: 4
-_cholesky_moment   fast sqrt calls in the IR: 0, plain sqrt calls: 8

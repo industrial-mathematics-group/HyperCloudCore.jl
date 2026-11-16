@@ -1,7 +1,0 @@
-HyperCloudCore._cholesky_sym                   test passes: true   fast-tokens: SubString{String}[]
-copy with sqrt                                 test passes: true   fast-tokens: SubString{String}[]
-copy with sqrt_fast                            test passes: false   fast-tokens: SubString{String}["sqrt_llvm_fast"]
-copy with @fastmath sqrt                       test passes: false   fast-tokens: SubString{String}["sqrt_llvm_fast"]
-StaticArrays cholesky (Symmetric not passed)   test passes: false   fast-tokens: SubString{String}["sqrt_llvm_fast"]
-factors equal (sqrt vs real): true, sqrt_fast copy: true
-_cholesky_moment typed code: sqrt true, fast false
