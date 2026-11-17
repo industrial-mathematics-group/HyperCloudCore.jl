@@ -471,7 +471,7 @@ end
         @test all(i -> pg_b.core.particle_orders[i] == 1, outside)
         # scope
         interp = MUSCL(Float64, 1, 2, 2, NoLimiter(), RusanovFlux())
-        @test_throws ArgumentError BlockTimeStepper(eq_b, interp, MOOD(EPD1(), MOODu2(1e-3)), (), RK2_SSP_Tableau(Float64))
+        @test BlockTimeStepper(eq_b, interp, MOOD(EPD1(), MOODu2(1e-3)), (), RK2_SSP_Tableau(Float64)) isa BlockTimeStepper
     end
     @testset "Moving grids on blocks: the frame velocity from a reduction, the ALE frame per particle" begin
         sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
@@ -652,5 +652,47 @@ end
         @test block_vs_full(bs, view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-13
         @test all(i -> pg_b.core.is_boundary[i] || pg_b.core.positions[i][1] < 1.0 - 0.5t + h, 1:pg_b.meta.N)
         @test all(i -> all(isfinite, block_view(bs, 1)[i]), 1:pg_b.meta.N)
+    end
+
+    @testset "MOODu2 on blocks and the additive form of a reduction" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq_f = DiscreteTransport(Val(8), sym)
+        eq_b = DiscreteTransport(Val(2), sym)
+        # MOODu2 (the plateau and the curvature test need the block's own gradients): the same particles drop as in the standard run
+        dev, ts_f, ts_b, bs, pg_f, pg_b = mood_runs(eq_f, eq_b, MOOD(EPD1(), MOODu2(1e-3)), RK3_SSP_Tableau(Float64))
+        @test dev < 1e-12
+        @test any(mood_flags(ts_b)) && mood_flags(ts_b) == mood_flags(ts_f)
+        @test pg_b.core.particle_orders[1:pg_b.meta.N] == pg_f.core.particle_orders[1:pg_f.meta.N]
+        # the additive form: the mean relaxation from partial sums over block ranges
+        struct PartialMean <: AbstractImplicitBlockSource; tau::Float64; end
+        HyperCloudCore.reduction_type(::PartialMean) = Float64
+        HyperCloudCore.reduction_partial_type(::PartialMean) = Tuple{Float64, Int}
+        @inline function HyperCloudCore.block_partial(::PartialMean, p, Y, N, nb, blocks::UnitRange, pg, t)
+            s, n = 0.0, 0
+            @inbounds for b in blocks
+                U = Y[(b - 1) * N + p]
+                for k in eachindex(U)
+                    s += U[k]
+                end
+                n += length(U)
+            end
+            return (s, n)
+        end
+        @inline HyperCloudCore.finalize_reduction(::PartialMean, p, partial, pg, t, dt_coeff) = partial[1] / partial[2]
+        @inline HyperCloudCore.block_source(st::PartialMean, U, b, m, p, pg, t) = (m .- U) ./ st.tau
+        @inline HyperCloudCore.block_implicit_solve(st::PartialMean, U, b, m, dt_coeff, p, pg, t) = (U .+ (dt_coeff / st.tau) * m) ./ (1 + dt_coeff / st.tau)
+        # partials over two ranges add up to the whole; the stepper's reduction equals the direct one
+        pg = block_pg_1d(10, 2)
+        bs0 = BlockState(eq_b, pg)
+        set_block_states!((x, b) -> State{2, Float64}(1 + x[1] + 0.1b, 2 - x[1] + 0.2b), bs0, pg)
+        Y = parent(bs0.data)
+        pa = HyperCloudCore.block_partial(PartialMean(0.1), 3, Y, 10, 4, 1:2, pg, 0.0)
+        pb = HyperCloudCore.block_partial(PartialMean(0.1), 3, Y, 10, 4, 3:4, pg, 0.0)
+        whole = HyperCloudCore.block_partial(PartialMean(0.1), 3, Y, 10, 4, 1:4, pg, 0.0)
+        @test (pa[1] + pb[1], pa[2] + pb[2]) == whole
+        @test HyperCloudCore.block_reduce(PartialMean(0.1), 3, Y, 10, 4, pg, 0.0, 0.01) ≈ HyperCloudCore.block_reduce(MeanRelaxation(0.1), 3, Y, 10, 4, pg, 0.0, 0.01)
+        # the run with the additive source equals the run with the direct one, hence the standard run, to round-off
+        dev3, _, _ = relaxation_runs((BlockSourceTerm(PartialMean(0.05)),), (MeanRelaxationFull(0.05),), IMEX_ARS222_Tableau(Float64))
+        @test dev3 < 1e-13
     end
 end

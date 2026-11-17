@@ -1,6 +1,7 @@
 export BlockState, BlockTimeStepper, BlockOf, num_blocks, block_flux, block_max_eigenvalue, block_admissible, block_view, set_block_states!
 export AbstractBlockSource, AbstractExplicitBlockSource, AbstractImplicitBlockSource, BlockSourceTerm
 export reduction_type, block_reduce, block_source, block_implicit_solve
+export reduction_partial_type, block_partial, finalize_reduction
 export block_fluid_velocity, wall_reduction_type, block_wall_reduce, block_wall_apply
 export reorder!
 
@@ -141,13 +142,36 @@ abstract type AbstractImplicitBlockSource <: AbstractBlockSource end
 
 "The parameter type of a block source's reduction (see [`AbstractBlockSource`](@ref))."
 reduction_type(st::AbstractBlockSource) = error("`reduction_type` not implemented for $(typeof(st))")
-"The reduction of a block source over the blocks of particle `p` (see [`AbstractBlockSource`](@ref))."
-block_reduce(st::AbstractBlockSource, p, Y, N, nb, pg, t, dt_coeff) = error("`block_reduce` not implemented for $(typeof(st))")
 "The source of block `b` from the reduced parameters (see [`AbstractBlockSource`](@ref))."
 block_source(st::AbstractBlockSource, U, b, params, p, pg, t) = error("`block_source` not implemented for $(typeof(st))")
 "The implicit stage solution of block `b` from the reduced parameters (see [`AbstractBlockSource`](@ref))."
 block_implicit_solve(st::AbstractImplicitBlockSource, U, b, params, dt_coeff, p, pg, t) =
     error("`block_implicit_solve` not implemented for $(typeof(st))")
+
+"""
+    reduction_partial_type(st) -> Type or nothing
+    block_partial(st, p, Y, N, nb, blocks::UnitRange, pg, t) -> partial
+    finalize_reduction(st, p, partial, pg, t, dt_coeff) -> params
+
+The **additive form** of a block source's reduction, for a state whose blocks are split over several devices: the
+contribution of the blocks `blocks` of particle `p` is a bits value that adds up over block ranges (`+`; for a
+discrete-velocity model the moments of those velocities), and `finalize_reduction` turns the sum over all blocks into
+the parameters of [`block_reduce`](@ref) (the Maxwellian, the stiffness, …). A source that gives
+`reduction_partial_type` (default `nothing`: the reduction reads all blocks at once) gets `block_reduce` for free,
+`finalize_reduction(st, p, block_partial(st, p, Y, N, nb, 1:nb, pg, t), pg, t, dt_coeff)` (the default `block_reduce`). The decomposition of a
+block state over devices exchanges these partials only (one per particle and device); the stepper of one device
+still runs the whole reduction.
+"""
+reduction_partial_type(st::AbstractBlockSource) = nothing
+"The contribution of the blocks `blocks` of particle `p` to the reduction, additive over block ranges (see [`reduction_partial_type`](@ref))."
+block_partial(st::AbstractBlockSource, p, Y, N, nb, blocks::UnitRange, pg, t) = error("`block_partial` not implemented for $(typeof(st))")
+"The parameters of [`block_reduce`](@ref) from the sum of the partials over all blocks (see [`reduction_partial_type`](@ref))."
+finalize_reduction(st::AbstractBlockSource, p, partial, pg, t, dt_coeff) = error("`finalize_reduction` not implemented for $(typeof(st))")
+
+"The reduction of a block source over the blocks of particle `p` (see [`AbstractBlockSource`](@ref)); by default the additive form over all blocks (`finalize_reduction` of `block_partial` over `1:nb`) when the source gives one."
+@inline block_reduce(st::AbstractBlockSource, p, Y, N, nb, pg, t, dt_coeff) = _block_reduce(reduction_partial_type(st), st, p, Y, N, nb, pg, t, dt_coeff)
+@inline _block_reduce(::Nothing, st, p, Y, N, nb, pg, t, dt_coeff) = error("`block_reduce` not implemented for $(typeof(st))")
+@inline _block_reduce(::Type, st, p, Y, N, nb, pg, t, dt_coeff) = finalize_reduction(st, p, block_partial(st, p, Y, N, nb, 1:nb, pg, t), pg, t, dt_coeff)
 
 """
     BlockSourceTerm(st::AbstractBlockSource; storage = Array)
@@ -303,7 +327,7 @@ end
 # can grow; the block-major array cannot (its layout depends on N). They get per-block copies and the blocks are put
 # back for the particle count the call leaves.
 function _block_vectors(bs::BlockState{W, T}) where {W, T}
-    return [Vector{State{W, T}}(block_view(bs, b)) for b in 1:bs.nb]
+    return [Vector{State{W, T}}(Array(block_view(bs, b))) for b in 1:bs.nb]  # a device array is copied to the host
 end
 function _set_block_vectors!(bs::BlockState{W, T}, vecs, N::Int) where {W, T}
     bs.N[] = N
@@ -389,11 +413,12 @@ evaluated explicitly at the others; they need an IMEX tableau. The explicit part
 any explicit RK method.
 
 `mood` works as in the standard stepper (the stage-wise fixed point, the Euler substeps of SSP tableaus, the
-forcing halos), with the particle's order shared by all its blocks: the criterion (`MOODu1`, `OnlyMOOD`,
+forcing halos), with the particle's order shared by all its blocks: the criterion (`MOODu1`, `MOODu2`, `OnlyMOOD`,
 `MOODPAD`) checks every block's components, the per-block admissibility is that every block is finite, and
 [`block_admissible`](@ref) adds the cross-block check (e.g. positive moments); a flagged particle drops one
 order, and the previous stage's right-hand side is recomputed on the affected particles for all blocks.
-`MOODu2` is not available yet (its curvature test reads the gradient cache, which holds the last block's).
+`MOODu2`'s curvature test reads the scheme's gradient cache, so the block's gradients at the previous stage are
+gathered before its flag pass (one pre-pass per block and checkpoint).
 
 On a moving grid (`pg.mover`) the frame velocity of every particle is reduced before each flux pass
 ([`block_fluid_velocity`](@ref) for the Lagrangian movers, the mover's velocity otherwise) and the pass runs in the
@@ -438,8 +463,6 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
         throw(ArgumentError("BlockTimeStepper: implicit block sources need an IMEX tableau with an implicit diagonal " *
                             "(e.g. IMEX_ARS222_Tableau); explicit sources work with any tableau"))
     end
-    inner.mood.criterion isa MOODu2 && throw(ArgumentError("BlockTimeStepper: MOODu2 is not available in the block pipeline yet " *
-                                                           "(its curvature test needs the gradient cache of the checked block); use MOODu1 or MOODPAD"))
     AT = typeof(parent(inner.rho_n))
     gw = Growable{Space{D, T}}(AT.name.wrapper)
     gs = Growable{State{W, T}}(AT.name.wrapper)
@@ -684,8 +707,14 @@ function _block_detect_and_drop!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub:
     N  = pg.meta.N
     nb = num_blocks(eq)
     _mood_reset!(work, N)
+    interp = inner.divergence_interpolator
+    regather = inner.mood.criterion isa MOODu2 && has_cached_gradients(interp)
     for b in 1:nb
-        _mood_flag_pass!(inner.mood, work, inner.divergence_interpolator, pg, _blk(inner.Y_stages[i - 1], b, N),
+        # MOODu2 reads the scheme's gradient cache (its curvature test), which holds the last block's gradients:
+        # the block's own gradients at the previous stage are gathered first (one pre-pass per block and checkpoint)
+        regather && foreach_particle(_rhs_gather!, get_backend(), N,
+            (_blk(inner.Y_stages[i - 1], b, N), pg.core.is_boundary, pg.neighbor.ranges, inner.int_buffer, interp, pg, parent(work.changed), true))
+        _mood_flag_pass!(inner.mood, work, interp, pg, _blk(inner.Y_stages[i - 1], b, N),
                          _block_candidate_view(ts, i, cand_sub, b, N), full, BlockOf(eq, b))
     end
     foreach_particle(_block_admissible_flag!, get_backend(), N,
