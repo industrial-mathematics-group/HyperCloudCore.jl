@@ -26,7 +26,31 @@ The second equation is the original PDE seen from a frame moving with $w_i$. Hyp
 | `max_eigenvalue(a, U, d)` | `max_eigenvalue(eq, U, d, w_d)` = $\max \lvert\lambda_d - w_d\rvert$ |
 | `evaluate_nc_jump`, `prim2cons`, `cons2prim` | forwarded to `eq` |
 
-Every scheme therefore reconstructs, upwinds and dissipates with respect to the *relative* velocity, without knowing that the grid moves. For $w = u$ in linear advection the relative flux vanishes identically and the state is carried exactly; the test suite checks this for every scheme.
+Every scheme therefore reconstructs, upwinds and dissipates with respect to the *relative* velocity, without knowing that the grid moves. For $w = u$ in linear advection the relative flux vanishes identically and the state is carried exactly; the test suite checks this for every scheme. This frame is used for the `PrescribedMover` (a smooth velocity) and for every scheme other than MUSCL.
+
+### The Lagrangian frame (conservative form)
+
+Where $w$ jumps, as at a shock on a Lagrangian cloud, $w_i\cdot\nabla U$ is a non-conservative product: the frozen-velocity form gained mass at the shock at a rate independent of the resolution, and the shock did not converge to its position (Sod on Lagrangian particles with Euler and BGK, VK and EPD2: +0.1 to 0.5 % of the mass by $t = 0.2$, the shock 0.011 to 0.017 too far at every $N$; `study/bgk-lagrangian-contact` of the simulations). For the `LagrangianMover` and the `ScaledLagrangianMover` with the MUSCL scheme the stepper therefore uses the **`LagrangianFrame(eq, α)`**, whose velocity is a function of the state, $w(U) = \alpha\,$`fluid_velocity(eq, U)`, with two additions to the scheme:
+
+1. **The volume term.** The particle's update is the conservative form in point values,
+   ```math
+   \frac{\mathrm d U_i}{\mathrm d t} = -\nabla\cdot\big(F(U) - w(U)\, U\big)\Big|_{x_i} - U_i\, \nabla\cdot w\big|_{x_i} ,
+   ```
+   which is $\mathrm d(V U)/\mathrm dt = -V \nabla\cdot(F - wU)$ with $\mathrm dV/\mathrm dt = V\nabla\cdot w$ through one and the same discrete divergence. MUSCL adds the term $(w_{ij} - w_i)\otimes U_i$ to every pair's flux difference ([`ale_volume_term`](@ref HyperCloudCore.ale_volume_term)), with the interface velocity $w_{ij} = \tfrac12(w(U_{ij}) + w(U_{ji}))$ of the reconstructed states.
+2. **Pair-antisymmetric dissipation.** Through a shock the Lagrangian particles compress by the density ratio, and the MLS divergence weights of the pairs across it are systematically non-antisymmetric ($V_i c_{ij} + V_j c_{ji} \neq 0$; on a jittered static cloud the asymmetry is random and averages out). In the Lagrangian frame the mass flux $\rho(u - w)$ vanishes, so the Rusanov dissipation of the density is the only pair term of the mass equation, and its asymmetry was the mass source. MUSCL therefore contracts the dissipative part $F^*_{ij} - \tfrac12(F_L + F_R)$ of every pair with the antisymmetrised face vector $\tfrac12(V_i c_{ij} - V_j c_{ji})$ (the partner's weight is its cached full-order one, found through the reverse neighbour slot; the central part keeps the consistent weight, so the order is unchanged). Pairs the aligned flux orients (either particle below full order) keep their LED weights, wall pairs and one-sided pairs their plain ones.
+
+Measured on the Euler Sod of HyperCloud (`euler_1d_sod`, jitter 0.2, $R = 5.5$, ARS222 MUSCL2 with the VK limiter, MLS volumes of degree 2, $t = 0.2$; the shock is at 0.3504):
+
+| cloud | shock, $N = 800 / 3200$ | mass change $\Sigma h_i \rho_i$, $N = 800 / 3200$ |
+|---|---|---|
+| static | 0.3523 / 0.3509 | +1.3e-4 / +1.5e-5 |
+| Lagrangian, frozen velocity (`ALEFrame`) | 0.3628 / 0.3616 | +1.0e-3 / +1.0e-3 (linear in time) |
+| Lagrangian, `LagrangianFrame` without the pair term | 0.3602 / 0.3591 | +7.7e-4 / +7.2e-4 |
+| Lagrangian, `LagrangianFrame` | 0.3538 / 0.3522 | +1.7e-4 / −4.2e-5 |
+| static, EPD2 with the aligned flux | 0.3519 / 0.3508 | +1.2e-4 / +1.4e-5 |
+| Lagrangian, `LagrangianFrame`, EPD2 with the aligned flux | 0.3515 / 0.3504 | +6.6e-5 / −2.0e-4 |
+
+With both parts the Lagrangian shock converges like the static one and the mass drift shrinks with $N$ (what is left at $N = 800$ is mostly the start-up transient of the discontinuous data that the static run shows as well). The scalar Burgers test of the suite (a cloud moving at $0.2 u$ through the shock of $\tfrac12 + \tfrac12\sin\pi x$, MLS volumes) goes from +1.0e-2 / +8.8e-3 to +3.1e-3 / +2.8e-3 at $N = 100 / 200$ by $t = 1.2$; in the smooth phase the drift converges (3.7e-4 / 1.4e-6 at $t = 0.6$). The remaining defect is the asymmetry of the central part and of the pairs the aligned flux orients.
 
 Positions use only the explicit part of the tableau: $X_k = x^n + \Delta t \sum_{j<k} \tilde a_{kj} K_{X,j}$ with $K_{X,j} = w(X_j, Y_j)$.
 
@@ -68,7 +92,7 @@ The default of the four-argument `max_eigenvalue` is the safe bound $\max|\lambd
 
 - **Time step.** `get_time_step` uses the absolute wave speeds $|\lambda|$, not $|\lambda - w|$. For co-moving grids this is conservative. If the grid moves *against* the waves, the relative speed is larger, and the CFL number has to be reduced accordingly. The particle displacement $|w|\,\Delta t$ should also stay well below the cutoff radius.
 - **Volumes** in `pg.core.volumes` are recomputed after every step from the new geometry with the stepper's `volume_estimator`; see [Particle Volumes and Adaptivity](@ref).
-- **Conservation.** Like the static collocation scheme, the ALE scheme is not exactly conservative; mass errors converge with the scheme's order. Particle insertion and merging between steps (`adapt_particles!`) *are* exactly conservative with respect to `total_mass`, also for calls with several events and, with the adaptivity's `volume_estimator` set to the stepper's (the builders do this), across the following volume re-estimation. Mass on a moving grid is only a convergent quantity with `MLSVolumes`; `ShepardVolumes` have a resolution-independent bias on stretched clouds.
+- **Conservation.** Like the static collocation scheme, the ALE scheme is not exactly conservative; mass errors converge with the scheme's order (on Lagrangian clouds only with the `LagrangianFrame` of the MUSCL scheme, see above; the other schemes keep the frozen-velocity frame and its resolution-independent gain at shocks). Particle insertion and merging between steps (`adapt_particles!`) *are* exactly conservative with respect to `total_mass`, also for calls with several events and, with the adaptivity's `volume_estimator` set to the stepper's (the builders do this), across the following volume re-estimation. Mass on a moving grid is only a convergent quantity with `MLSVolumes`; `ShepardVolumes` have a resolution-independent bias on stretched clouds.
 - **Particle distribution.** Lagrangian motion clusters particles in compressions. Use `ParticleAdaptivity` between steps, and/or a mover that adds a smoothing velocity.
 - **Reordering** has to happen between steps, as for static grids.
 
@@ -78,4 +102,11 @@ The default of the four-argument `max_eigenvalue` is the safe bound $\max|\lambd
 Modules = [HyperCloudCore]
 Pages   = ["GridMovers.jl"]
 Private = false
+```
+
+The hooks of the Lagrangian frame that a scheme uses (not exported):
+
+```@docs
+HyperCloudCore.ale_volume_term
+HyperCloudCore.frame_velocity
 ```

@@ -51,3 +51,4 @@ function analytical_solution(shared_params::ParamDict)
 end
 
 include("linear_advection.jl")
+include("burgers.jl")

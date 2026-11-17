@@ -409,7 +409,7 @@ end
     if moving
         w      = grid_velocity(mover, eq, p, fi, pg, t)
         K_X[p] = w
-        div_F  = interp(ALEFrame(eq, w), p, fi, nb, pg, Y, ib, strategy)   # relative flux F − w_i ρ
+        div_F  = interp(_moving_frame(interp, mover, eq, w), p, fi, nb, pg, Y, ib, strategy)   # F − w ρ in the moving frame
     else
         div_F  = interp(eq, p, fi, nb, pg, Y, ib, strategy)
     end
