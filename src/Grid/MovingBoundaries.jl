@@ -196,10 +196,11 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
     mass0 = interior_mass(pg)
 
     on_host = parent(pg.rhos) isa Array
-    (on_host || isempty(states)) || throw(ArgumentError("sweep_boundaries!: extra state arrays are supported on host grids only"))
+    (on_host || _host_states(states)) ||
+        throw(ArgumentError("sweep_boundaries!: extra state arrays of a device grid must be host arrays (the sweep runs on a host copy)"))
     hg = on_host ? pg : device_grid(Array, pg)
     N  = hg.meta.N
-    all_states = _state_list(hg, states)
+    all_states = states isa _LazyStates ? states : _state_list(hg, states)     # (made by the first event that remaps)
     shape_t = at_time(geom.shape, t)
     dx  = minimum(hg.meta.dx)
     R   = hg.meta.R
@@ -320,7 +321,8 @@ function _drop_empty!(hg::ParticleGrid{D, M, T}, max_order::Int, states = _state
         n += mask[i]
     end
     n == 0 && return 0
-    _apply_topology!(hg, mask, Space{D, T}[], [State{M, T}[] for _ in states], T[], max_order; states = states)
+    sts = _states_now(states, hg)
+    _apply_topology!(hg, mask, Space{D, T}[], [State{M, T}[] for _ in sts], T[], max_order; states = sts)
     hg.neighbor(hg)
     return n
 end
@@ -416,6 +418,7 @@ end
 # row of removals changed states by 0.2 and volumes by a factor up to 2.8 as far as 12 spacings from the face.)
 function _sweep_round!(hg::ParticleGrid{D, M, T}, ad, events::Vector{_AdaptEvent{D, T}}, max_order::Int,
                        df::Vector{State{M, T}}, states = _state_list(hg, ())) where {D, M, T}
+    sts   = _states_now(states, hg)
     N     = hg.meta.N
     N_new = N + sum(ev -> length(ev.added) - length(ev.removed), events)
     N_new > N && ensure_capacity!(hg, N_new)
@@ -427,12 +430,12 @@ function _sweep_round!(hg::ParticleGrid{D, M, T}, ad, events::Vector{_AdaptEvent
         mask[r] = true
     end
     new_pos, new_vol = Space{D, T}[], T[]
-    new_rho = [State{M, T}[] for _ in states]
+    new_rho = [State{M, T}[] for _ in sts]
     length(df) < length(hg.neighbor.indices) && resize!(df, length(hg.neighbor.indices))
     for ev in events
-        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask, point_values = true, states = states)
+        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask, point_values = true, states = sts)
     end
-    _apply_topology!(hg, mask, new_pos, new_rho, new_vol, max_order; states = states)
+    _apply_topology!(hg, mask, new_pos, new_rho, new_vol, max_order; states = sts)
     hg.neighbor(hg)
     return nothing
 end
@@ -469,16 +472,17 @@ function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, box
         end
     end
     isempty(xs) && return 0
+    sts  = _states_now(states, hg)
     N, n = hg.meta.N, length(xs)
     total_nb, max_nb = _slots_after_events(hg, [_AdaptEvent{D, T}(x, Int[], [x]) for x in xs])
     ensure_capacity!(hg, N + n)
     ensure_particle_capacity!(hg.neighbor, N + n)
     ensure_capacity!(hg.neighbor, _slot_capacity(eltype(hg.neighbor.ranges), total_nb, max_nb, N + n))
     core = hg.core
-    for st in states
+    for st in sts
         _grow_state!(st, N + n)
     end
-    donors = [[st[us[a]] for a in 1:n] for st in states]          # (read before any write: a donor is never a new ghost)
+    donors = [[st[us[a]] for a in 1:n] for st in sts]             # (read before any write: a donor is never a new ghost)
     for a in 1:n
         p = N + a
         core.positions[p]       = xs[a]
@@ -487,7 +491,7 @@ function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, box
         core.particle_orders[p] = max_order
         core.volumes[p]         = zero(T)
         core.normals[p], core.wall_distances[p], core.wall_curvatures[p] = _ghost_geometry_curv(geom, xs[a], t)  # (as generated ghosts)
-        for (s, st) in enumerate(states)
+        for (s, st) in enumerate(sts)
             st[p] = donors[s][a]
         end
         hg.curvatures[p]        = zero(State{M, T})

@@ -102,13 +102,15 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     mass0 = interior_mass(pg)
 
     on_host = parent(pg.rhos) isa Array
-    (on_host || isempty(states)) || throw(ArgumentError("adapt_particles!: extra state arrays are supported on host grids only"))
+    (on_host || _host_states(states)) ||
+        throw(ArgumentError("adapt_particles!: extra state arrays of a device grid must be host arrays (the events run on a host copy)"))
     hg = on_host ? pg : device_grid(Array, pg)            # the event work is serial: on a host copy of a device grid
     N  = hg.meta.N
-    all_states = _state_list(hg, states)
+    st_list = states isa _LazyStates ? states : _state_list(hg, states)
 
     events = _detect_events(hg, ad, max_order)
     isempty(events) && return nothing_done
+    all_states = _states_now(st_list, hg)
     # Capacity first: the remaps below rewrite states and volumes in place, so a `CapacityError` (buffers frozen
     # by `reserve!`) thrown by `_apply_topology!` would leave the grid in a non-conservative intermediate state
     N_new = N + sum(ev -> length(ev.added) - length(ev.removed), events)
@@ -143,6 +145,19 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
 end
 
 # The state arrays an event changes: the grid's own first, then the extra ones (the blocks of a block state)
+# Extra state arrays made on first use (the `states` of `adapt_particles!`/`sweep_boundaries!`): the block pipeline
+# copies its blocks to host vectors only when an event remaps them. `vecs` are the arrays made, `list` the state list.
+mutable struct _LazyStates{F}
+    make::F
+    vecs::Any
+    list::Any
+end
+_LazyStates(make) = _LazyStates(make, nothing, nothing)
+_states_now(ls::_LazyStates, hg) = ls.list === nothing ? (ls.vecs = ls.make(); ls.list = _state_list(hg, ls.vecs)) : ls.list
+_states_now(list, hg) = list
+_host_states(::_LazyStates) = true                        # (host vectors)
+_host_states(states) = all(st -> parent(st) isa Array, states)
+
 function _state_list(hg::ParticleGrid{D, M, T}, states) where {D, M, T}
     all_states = AbstractVector{State{M, T}}[hg.rhos]
     for st in states
