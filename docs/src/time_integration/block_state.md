@@ -97,7 +97,20 @@ a scratch array first (the even reflection), the reduction runs once per ghost o
 application gives every block's ghost state from its mirrored value, the parameters and, where it needs them,
 the other mirrored blocks of the ghost. An operator without a reduction acts block by block.
 
-Scope of this version: static boundary pieces; MOOD without `MOODu2`. Checked against the standard pipeline: a one-block Burgers run is
+## Adaptivity, reordering and moving pieces on blocks
+
+The host routines that change the particle set take further state arrays and treat them exactly like the grid's
+own state (the geometric decisions are shared, the remap of every array is that of the single state, the
+compaction and the new particles' states follow): `adapt_particles!(pg, ad, order; states)`,
+`sweep_boundaries!(pg, t_old, t, order; states)` and the reordering `pg.reorder(pg; extra)`. The block
+pipeline uses them with its blocks: [`adapt_particles!`](@ref)`(pg, ad, order, bs)` between steps (the blocks
+are copied into per-block vectors around an event, since the block-major layout depends on the particle count,
+and laid out again afterwards; nothing is copied when no pair violates the spacing rules), the moving pieces
+inside the step (the ghosts placed at every stage, the sweep at the end with every block remapped), and
+[`reorder!`](@ref)`(pg, bs)`. Checked: with a compressing prescribed mover and the adaptivity, with a piston
+sweeping a tube, the block runs reproduce the standard runs bit for bit, particle set included.
+
+Scope of this version: MOOD without `MOODu2`; host backends. Checked against the standard pipeline: a one-block Burgers run is
 bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
 state vector as a whole) and converges to the exact solution at second order, in 1-D and 2-D, with inflow
@@ -114,9 +127,8 @@ Checked: a prescribed mover gives the standard run bit for bit (positions and vo
 mover with one common velocity transports every state exactly; a reflecting wall operator that reads the mirror
 partner's block reproduces the permutation operator of the standard run to round-off.
 
-What comes next, in this order: adaptivity and reordering of all blocks together, moving boundary pieces, the
-velocity decomposition across devices (the only exchange per stage is the reduction), and `MOODu2` with a per-block
-gradient cache.
+What comes next, in this order: the velocity decomposition across devices (the only exchange per stage is the
+reduction), `MOODu2` with a per-block gradient cache, and the specular reflection at oblique and curved walls.
 
 ## API
 
@@ -129,6 +141,8 @@ block_fluid_velocity
 wall_reduction_type
 block_wall_reduce
 block_wall_apply
+reorder!
+HyperCloudCore.adapt_particles!(::ParticleGrid{D, W, T}, ::ParticleAdaptivity{T}, ::Int, ::BlockState{W, T}) where {D, W, T}
 BlockOf
 BlockState
 block_view

@@ -2,6 +2,7 @@ export BlockState, BlockTimeStepper, BlockOf, num_blocks, block_flux, block_max_
 export AbstractBlockSource, AbstractExplicitBlockSource, AbstractImplicitBlockSource, BlockSourceTerm
 export reduction_type, block_reduce, block_source, block_implicit_solve
 export block_fluid_velocity, wall_reduction_type, block_wall_reduce, block_wall_apply
+export reorder!
 
 # =========================================================================
 # BLOCK EQUATIONS
@@ -85,7 +86,9 @@ reflected into another block), the scratch array. `wall_reduction_type(op, eq)` 
 reflection. Kernel functions, as the operators themselves.
 """
 wall_reduction_type(op, eq) = nothing
+"The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref))."
 block_wall_reduce(op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
+"The ghost state of block `b` from its mirrored value and the wall parameters (see [`wall_reduction_type`](@ref))."
 block_wall_apply(op, eq, U, b, params, wall, Y, N, nb, g) = error("`block_wall_apply` not implemented for $(typeof(op)) on $(typeof(eq))")
 
 """
@@ -296,6 +299,53 @@ The states of block `b` over the particles (a view of the block state's array, s
     return view(parent(bs.data), ((b - 1) * N + 1):(b * N))
 end
 
+# The host routines that change the particle set (adaptivity, the sweep of moving pieces) work on state arrays that
+# can grow; the block-major array cannot (its layout depends on N). They get per-block copies and the blocks are put
+# back for the particle count the call leaves.
+function _block_vectors(bs::BlockState{W, T}) where {W, T}
+    return [Vector{State{W, T}}(block_view(bs, b)) for b in 1:bs.nb]
+end
+function _set_block_vectors!(bs::BlockState{W, T}, vecs, N::Int) where {W, T}
+    bs.N[] = N
+    ensure_capacity!(bs.data, bs.nb * N)
+    for b in 1:bs.nb
+        copyto!(parent(bs.data), (b - 1) * N + 1, vecs[b], 1, N)
+    end
+    return nothing
+end
+function _with_block_vectors(f, bs::BlockState, pg::ParticleGrid)
+    vecs = _block_vectors(bs)
+    out  = f(vecs)
+    _set_block_vectors!(bs, vecs, pg.meta.N)
+    return out
+end
+
+"""
+    adapt_particles!(pg, ad::ParticleAdaptivity, max_order, bs::BlockState) -> (; inserted, removed, mass_residual)
+
+The particle adaptivity of the block pipeline: every block of `bs` is remapped, compacted and extended like the
+state of the standard pipeline (`adapt_particles!` with the blocks as extra state arrays), and the block state is
+laid out again for the new particle count. Nothing is copied when no pair of particles violates the spacing rules.
+`mass_residual` refers to the grid's own (unused) state; compare `block_moments` before and after instead.
+"""
+function adapt_particles!(pg::ParticleGrid{D, W, T}, ad::ParticleAdaptivity{T}, max_order::Int, bs::BlockState{W, T}) where {D, W, T}
+    bs.N[] == pg.meta.N || throw(ArgumentError("adapt_particles!: the block state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
+    (pg.meta.N > 0 && _has_adapt_candidates(pg, ad)) || return (inserted = 0, removed = 0, mass_residual = zero(State{W, T}))
+    return _with_block_vectors(vecs -> adapt_particles!(pg, ad, max_order; states = vecs), bs, pg)
+end
+
+"""
+    reorder!(pg::ParticleGrid, bs::BlockState)
+
+The spatial reordering of the grid (`pg.reorder`) with the blocks of `bs` permuted along. The neighbour lists are
+stale afterwards: run `pg.neighbor(pg)` before the next step.
+"""
+function reorder!(pg::ParticleGrid{D, W, T}, bs::BlockState{W, T}) where {D, W, T}
+    bs.N[] == pg.meta.N || throw(ArgumentError("reorder!: the block state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
+    pg.reorder(pg; extra = [block_view(bs, b) for b in 1:bs.nb])
+    return nothing
+end
+
 """
     set_block_states!(f, bs::BlockState, pg::ParticleGrid)
 
@@ -349,10 +399,12 @@ On a moving grid (`pg.mover`) the frame velocity of every particle is reduced be
 ([`block_fluid_velocity`](@ref) for the Lagrangian movers, the mover's velocity otherwise) and the pass runs in the
 frozen-velocity ALE frame of the particle; the positions are stage variables as in the standard stepper, the
 volumes are re-estimated at the end of the step. (The conservative Lagrangian frame of the standard stepper needs
-the frame velocity of every interface state, which a block cannot give.) Moving boundary pieces are not available
-yet. The boundary conditions of the grid apply per block with the block's state of the step start as the
-reference; a `MirrorBC` whose operator reduces over the blocks ([`block_wall_reduce`](@ref)) runs in the
-pipeline's passes. For one block (`num_blocks(eq) == 1`) the
+the frame velocity of every interface state, which a block cannot give.) Moving boundary pieces are placed and
+swept as in the standard stepper, the sweep remapping every block (`sweep_boundaries!` with the blocks as state
+arrays); [`adapt_particles!`](@ref)`(pg, ad, order, bs)` is the particle adaptivity between steps and
+[`reorder!`](@ref)`(pg, bs)` the spatial reordering. The boundary conditions of the grid apply per block with the
+block's state of the step start as the reference; a `MirrorBC` whose operator reduces over the blocks
+([`block_wall_reduce`](@ref)) runs in the pipeline's passes. For one block (`num_blocks(eq) == 1`) the
 result is bit-identical to `GeneralRKTimeStepper` without sources, and agrees to round-off with the equivalent
 sources (a separately compiled flux pass).
 """
@@ -407,7 +459,8 @@ BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator,
     BlockTimeStepper(eq, div_interp, MOOD(NoMOOD()), (), tableau; kwargs...)
 
 @inline _blk(g::Growable, b::Int, N::Int) = view(parent(g), ((b - 1) * N + 1):(b * N))
-@inline _block_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover)
+# The moving-grid path also serves a static cloud whose boundary pieces move (as in the standard stepper)
+@inline _block_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover) || has_moving_pieces(pg.geometry)
 
 """
     mood_flags(ts::BlockTimeStepper), mood_inadmissible(ts::BlockTimeStepper)
@@ -419,15 +472,18 @@ mood_inadmissible(ts::BlockTimeStepper) = mood_inadmissible(ts.inner)
 
 function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}, bs::BlockState{W, T},
                                          time::Real, dt::T) where {D, W, T}
-    has_moving_pieces(pg.geometry) && throw(ArgumentError("BlockTimeStepper: moving boundary pieces are not available in the block pipeline yet"))
+    inner  = ts.inner
+    interp = inner.divergence_interpolator
+    max_order = _extract_order(interp)
+    # moving pieces: the ghosts and the region at the step's time first (the sweep may change the particle set)
+    has_moving_pieces(pg.geometry) &&
+        _with_block_vectors(v -> _sync_boundaries!(pg, T(time), max_order; states = v), bs, pg)
     N  = pg.meta.N
     nb = bs.nb
     nb == num_blocks(eq) || throw(ArgumentError("BlockTimeStepper: the state has $nb blocks, the equation $(num_blocks(eq))"))
     bs.N[] == N || throw(ArgumentError("BlockTimeStepper: the state was set for $(bs.N[]) particles, the grid has $N"))
-    inner  = ts.inner
     s      = inner.num_stages
     bt     = inner.tableau
-    interp = inner.divergence_interpolator
     orders = pg.core.particle_orders
     moving = _block_moving(pg)
 
@@ -439,7 +495,6 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
     moving && copyto!(parent(inner.x_n), 1, pg.core.positions, 1, N)
     moving && copyto!(parent(inner.v_n), 1, pg.core.volumes, 1, N)
 
-    max_order = _extract_order(interp)
     fill!(view(orders, 1:N), max_order)
     fill!(view(inner.work.triggered_step, 1:N), false)
     inner.work.inadmissible[] = 0
@@ -463,10 +518,15 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
               "`mood_inadmissible(ts)` gives the count of each step."
     end
     if moving
+        place_ghosts!(pg, parent(inner.x_cand), time, time + dt)
         copyto!(pg.core.positions, 1, parent(inner.x_cand), 1, N)
         pg.neighbor(pg)                                    # full search + periodic wrap for the next step
-        _check_cloud_quality(pg, time + dt)
-        inner.volume_estimator === nothing || update_volumes!(pg, inner.volume_estimator)
+        if !(pg.mover isa NoGridMover)                     # (a static cloud with moving pieces keeps the sweep's volumes)
+            _check_cloud_quality(pg, time + dt)
+            inner.volume_estimator === nothing || update_volumes!(pg, inner.volume_estimator)
+        end
+        has_moving_pieces(pg.geometry) &&
+            _with_block_vectors(v -> sweep_boundaries!(pg, time, time + dt, max_order; states = v), bs, pg)
     end
     return nothing
 end
@@ -500,7 +560,9 @@ function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg
         Growable{P}(typeof(parent(scratch)).name.wrapper)
     end
     ensure_capacity!(params, N)
-    gm = GhostMotion(Val(D), T)                        # static pieces only (moving pieces are refused)
+    # A moving piece: the stored ghost positions and normals belong to `boundary_time`; the wall point is taken at `t`
+    gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
+                                           GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}
     c  = pg.core
     backend = get_backend()
     foreach_particle(_block_wall_reduce_body!, backend, N,

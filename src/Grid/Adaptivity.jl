@@ -69,7 +69,7 @@ end
 # Driver
 # -------------------------------------------------------------------------
 """
-    adapt_particles!(pg, ad::ParticleAdaptivity, max_order::Int) -> (; inserted, removed, mass_residual)
+    adapt_particles!(pg, ad::ParticleAdaptivity, max_order::Int; states = ()) -> (; inserted, removed, mass_residual)
 
 Detects holes and clusters, applies the conservative remap for every event on the old topology,
 changes the particle set, and rebuilds the neighbour lists. `max_order` is the scheme's maximum
@@ -86,8 +86,13 @@ The event work (detection, remap, compaction) is serial and runs on the host. On
 is the grid copied to the host, adapted there, and copied back into the device grid in place (its
 arrays grow as needed), where the neighbour search runs. A well-spaced cloud costs one kernel and
 one reduction per call.
+
+`states` are further state arrays over the cloud (the blocks of a block state: host arrays of the grid's state type
+that can grow, `Vector`s or `Growable`s), remapped, compacted and extended exactly like `pg.rhos` (the geometric
+decisions are the same for all, the remap of every array is that of the single state); host grids only.
+`mass_residual` is that of `pg.rhos`.
 """
-function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int) where {D, M, T}
+function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int; states = ()) where {D, M, T}
     nothing_done = (inserted = 0, removed = 0, mass_residual = zero(State{M, T}))
     pg.meta.N == 0 && return nothing_done
     (ad.volume_estimator !== nothing && has_moving_pieces(pg.geometry)) &&
@@ -97,8 +102,10 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     mass0 = interior_mass(pg)
 
     on_host = parent(pg.rhos) isa Array
+    (on_host || isempty(states)) || throw(ArgumentError("adapt_particles!: extra state arrays are supported on host grids only"))
     hg = on_host ? pg : device_grid(Array, pg)            # the event work is serial: on a host copy of a device grid
     N  = hg.meta.N
+    all_states = _state_list(hg, states)
 
     events = _detect_events(hg, ad, max_order)
     isempty(events) && return nothing_done
@@ -115,24 +122,44 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
 
     remove_mask = hg.shared.bit_buffer
     fill!(view(remove_mask, 1:N), false)
-    new_pos, new_rho, new_vol = Space{D, T}[], State{M, T}[], T[]
+    new_pos, new_vol = Space{D, T}[], T[]
+    new_rho = [State{M, T}[] for _ in all_states]
     df = Vector{State{M, T}}(undef, length(hg.neighbor.indices))   # neighbour-slot scratch shared by all events
 
-    record = ad.volume_estimator === nothing ? nothing : Tuple{Int, State{M, T}, State{M, T}}[]
+    record = ad.volume_estimator === nothing ? nothing : [Tuple{Int, State{M, T}, State{M, T}}[] for _ in all_states]
     for ev in events
-        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; record = record)
+        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; record = record, states = all_states)
         for r in ev.removed; remove_mask[r] = true; end
     end
 
     n_removed = count(view(remove_mask, 1:N))
-    changed = record === nothing ? nothing : _compacted_record(record, remove_mask, N, N - n_removed)
-    _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order)
+    changed = record === nothing ? nothing : [_compacted_record(r, remove_mask, N, N - n_removed) for r in record]
+    _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
     on_host || _upload_particles!(pg, hg)
     pg.neighbor(pg)
-    changed === nothing || _reestimate_volumes!(pg, hg, ad.volume_estimator, changed)
+    changed === nothing || _reestimate_volumes!(pg, hg, ad.volume_estimator, changed; states = all_states)
 
     return (inserted = length(new_pos), removed = n_removed, mass_residual = interior_mass(pg) - mass0)
 end
+
+# The state arrays an event changes: the grid's own first, then the extra ones (the blocks of a block state)
+function _state_list(hg::ParticleGrid{D, M, T}, states) where {D, M, T}
+    all_states = AbstractVector{State{M, T}}[hg.rhos]
+    for st in states
+        st isa AbstractVector{State{M, T}} || throw(ArgumentError("adaptivity: an extra state array must hold the grid's state type State{$M, $T}"))
+        push!(all_states, st)
+    end
+    return all_states
+end
+# Growth of a state array to `n` entries: a `Growable` grows in place, a `Vector` is resized, a view cannot grow
+_grow_state!(g::Growable, n::Int) = ensure_capacity!(g, n)
+_grow_state!(v::Vector, n::Int) = (length(v) < n && resize!(v, n); nothing)
+_grow_state!(v::AbstractVector, n::Int) = length(v) >= n ? nothing :
+    throw(ArgumentError("a state array of type $(typeof(v)) cannot grow to $n entries (give a Vector or a Growable)"))
+
+_apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector{Bool}, new_pos::Vector{Space{D, T}},
+                 new_rho::Vector{State{M, T}}, new_vol::Vector{T}, max_order::Int) where {D, M, T} =
+    _apply_topology!(pg, remove_mask, new_pos, [new_rho], new_vol, max_order)
 
 """
     _slots_after_events(pg, events) -> (total, max_nb)
@@ -216,23 +243,24 @@ Ghost particles carry no volume, so the interior content is the whole content (u
 and their content change was moved onto the interior, i.e. across the wall).
 """
 function _reestimate_volumes!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, est::VolumeEstimator,
-                              changed::Dict{Int, Tuple{State{M, T}, State{M, T}}}) where {D, M, T}
+                              changed::Vector{Dict{Int, Tuple{State{M, T}, State{M, T}}}}; states = _state_list(hg, ())) where {D, M, T}
     N = pg.meta.N
-    m_remap = interior_mass(pg)
-    update_volumes!(pg, est)
-    ε = m_remap - interior_mass(pg)
-    (isempty(changed) || iszero(ε)) && return nothing
-
     on_host = hg === pg
-    on_host || copyto!(parent(hg.core.volumes), 1, parent(pg.core.volumes), 1, N)   # hg holds the same cloud
-    ids = collect(keys(changed))
-    V   = [hg.core.volumes[i] for i in ids]
-    Vs  = sum(V)
-    Vs > 0 || return nothing
-    U   = [hg.rhos[i] + ε / Vs for i in ids]                   # Σ V U over the set changes by exactly ε ...
-    _dmp_repair!(U, V, [changed[i][1] for i in ids], [changed[i][2] for i in ids])   # ... and stays bounded
-    for (k, i) in enumerate(ids)
-        hg.rhos[i] = U[k]
+    m_remap = [interior_mass(hg, st) for st in states]          # (hg holds the same cloud and volumes as pg)
+    update_volumes!(pg, est)
+    on_host || copyto!(parent(hg.core.volumes), 1, parent(pg.core.volumes), 1, N)
+    for (s, st) in enumerate(states)
+        ε = m_remap[s] - interior_mass(hg, st)
+        (isempty(changed[s]) || iszero(ε)) && continue
+        ids = collect(keys(changed[s]))
+        V   = [hg.core.volumes[i] for i in ids]
+        Vs  = sum(V)
+        Vs > 0 || continue
+        U   = [st[i] + ε / Vs for i in ids]                     # Σ V U over the set changes by exactly ε ...
+        _dmp_repair!(U, V, [changed[s][i][1] for i in ids], [changed[s][i][2] for i in ids])   # ... and stays bounded
+        for (k, i) in enumerate(ids)
+            st[i] = U[k]
+        end
     end
     on_host || copyto!(parent(pg.rhos), 1, parent(hg.rhos), 1, N)
     return nothing
@@ -416,14 +444,14 @@ end
 # O(h) per event). The new particles take the reconstruction averaged over their share, clipped to the bounds of the
 # old states within R; nothing is redistributed, so the remap is not conservative in this mode.
 function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev::_AdaptEvent{D, T},
-                       new_pos::Vector{Space{D, T}}, new_rho::Vector{State{M, T}}, new_vol::Vector{T},
+                       new_pos::Vector{Space{D, T}}, new_rho::Vector{Vector{State{M, T}}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
-                       record::Union{Nothing, Vector{Tuple{Int, State{M, T}, State{M, T}}}} = nothing,
-                       removed_mask = nothing, point_values::Bool = false) where {D, M, T}
+                       record::Union{Nothing, Vector{Vector{Tuple{Int, State{M, T}, State{M, T}}}}} = nothing,
+                       removed_mask = nothing, point_values::Bool = false, states = _state_list(pg, ())) where {D, M, T}
     nb     = pg.neighbor
     pos    = pg.core.positions
     V      = pg.core.volumes
-    U      = pg.rhos
+    nS     = length(states)                           # the state arrays (the grid's own first), remapped alike
     wf     = nb.weight_func
     R      = pg.meta.R
     R_sq   = R^2
@@ -457,30 +485,33 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     isb      = pg.core.is_boundary
     is_fixed = [isb[loc_idx[l]] for l in 1:n_loc]
 
-    # 2. Limited linear reconstruction data of the old solution on the local set
-    grads = Vector{SVector{D, State{M, T}}}(undef, n_loc)
-    lo    = Vector{State{M, T}}(undef, n_loc)
-    hi    = Vector{State{M, T}}(undef, n_loc)
+    # 2. Limited linear reconstruction data of the old solution on the local set, for every state array
+    grads = [Vector{SVector{D, State{M, T}}}(undef, n_loc) for _ in 1:nS]
+    lo    = [Vector{State{M, T}}(undef, n_loc) for _ in 1:nS]
+    hi    = [Vector{State{M, T}}(undef, n_loc) for _ in 1:nS]
     scale = dx
-    @inbounds for l in 1:n_loc
-        j  = loc_idx[l]
-        sl = nb.ranges[j]
-        mn, mx = U[j], U[j]
-        for k in sl
-            uk = U[nb.indices[k]]
-            df[k] = uk - U[j]
-            mn = math_min.(mn, uk); mx = math_max.(mx, uk)
+    for s in 1:nS
+        U = states[s]
+        @inbounds for l in 1:n_loc
+            j  = loc_idx[l]
+            sl = nb.ranges[j]
+            mn, mx = U[j], U[j]
+            for k in sl
+                uk = U[nb.indices[k]]
+                df[k] = uk - U[j]
+                mn = math_min.(mn, uk); mx = math_max.(mx, uk)
+            end
+            lo[s][l], hi[s][l] = mn, mx
+            g = isempty(sl) ? zero(SVector{D, State{M, T}}) :
+                Interpolator{D, 1, 1}()(sl, nb.distances, nb.weights, df; scale = scale)
+            grads[s][l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
         end
-        lo[l], hi[l] = mn, mx
-        g = isempty(sl) ? zero(SVector{D, State{M, T}}) :
-            Interpolator{D, 1, 1}()(sl, nb.distances, nb.weights, df; scale = scale)
-        grads[l] = SVector{D, State{M, T}}(ntuple(d -> g[d], Val(D)))
     end
 
     # 3. Quadrature over the box center ± half (the region at `boundary_time`: moving pieces have been swept)
     t_bnd = pg.meta.boundary_time
     δV  = zeros(T, n_loc + n_add)
-    δm  = zeros(State{M, T}, n_loc + n_add)
+    δm  = [zeros(State{M, T}, n_loc + n_add) for _ in 1:nS]
     hq  = dx / ad.samples_per_dx
     nq  = ceil(Int, 2half / hq)
     ω   = hq^D
@@ -525,104 +556,137 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         end
         (S_old > 0 && S_new > 0) || continue
         inv_old, inv_new = inv(S_old), inv(S_new)
-
-        # Ũ(y): limited linear reconstruction of the nearest old particle
         lstar = lmap[qidx[jstar]]
-        u_rec = U[loc_idx[lstar]]
-        @inbounds for d in 1:D
-            u_rec -= qd[jstar][d] * grads[lstar][d]  # qd = x_j − y  ⇒  y − x_j = −qd
-        end
-        u_rec = math_max.(lo[lstar], math_min.(hi[lstar], u_rec))
 
-        # Accumulate swept contributions
-        @inbounds for k in 1:n
-            l = lmap[qidx[k]]
-            (l == 0 || is_removed[l] || is_fixed[l]) && continue
-            wk = wf(sum(abs2, qd[k]))
-            dφ = wk * inv_new - wk * inv_old
-            δV[l] += ω * dφ
-            δm[l] += (ω * dφ) * u_rec
-        end
-        @inbounds for a in 1:n_add
-            dφ = w_add[a] * inv_new
-            δV[n_loc + a] += ω * dφ
-            δm[n_loc + a] += (ω * dφ) * u_rec
+        for s in 1:nS
+            U = states[s]
+            # Ũ(y): limited linear reconstruction of the nearest old particle
+            u_rec = U[loc_idx[lstar]]
+            @inbounds for d in 1:D
+                u_rec -= qd[jstar][d] * grads[s][lstar][d]  # qd = x_j − y  ⇒  y − x_j = −qd
+            end
+            u_rec = math_max.(lo[s][lstar], math_min.(hi[s][lstar], u_rec))
+
+            # Accumulate swept contributions (the volumes once, with the first state array)
+            @inbounds for k in 1:n
+                l = lmap[qidx[k]]
+                (l == 0 || is_removed[l] || is_fixed[l]) && continue
+                wk = wf(sum(abs2, qd[k]))
+                dφ = wk * inv_new - wk * inv_old
+                s == 1 && (δV[l] += ω * dφ)
+                δm[s][l] += (ω * dφ) * u_rec
+            end
+            @inbounds for a in 1:n_add
+                dφ = w_add[a] * inv_new
+                s == 1 && (δV[n_loc + a] += ω * dφ)
+                δm[s][n_loc + a] += (ω * dφ) * u_rec
+            end
         end
     end
 
-    # 4. New volumes and contents; exact residual correction
-    V_before = zero(T); m_before = zero(State{M, T})
+    # 4. New volumes and contents; exact residual correction (the volumes from the first pass, the contents per array)
+    V_before = zero(T)
     @inbounds for l in 1:n_loc
         (is_fixed[l] || is_other[l]) && continue           # (other events' removals: counting them once per
-        j = loc_idx[l]                                     # overlapping event handed their volume out repeatedly)
-        V_before += V[j]; m_before += V[j] * U[j]
+        V_before += V[loc_idx[l]]                          # overlapping event handed their volume out repeatedly)
     end
     Vn = zeros(T, n_loc + n_add)
-    mn = zeros(State{M, T}, n_loc + n_add)
-    V_after = zero(T); m_after = zero(State{M, T})
+    V_after = zero(T)
     @inbounds for l in 1:n_loc
         (is_removed[l] || is_fixed[l]) && continue
         j = loc_idx[l]
         Vn[l] = max(V[j] + δV[l], T(1e-12) * V[j])
-        mn[l] = V[j] * U[j] + δm[l]
-        V_after += Vn[l]; m_after += mn[l]
+        V_after += Vn[l]
     end
     @inbounds for a in 1:n_add
         Vn[n_loc + a] = max(δV[n_loc + a], zero(T))
-        mn[n_loc + a] = δm[n_loc + a]
-        V_after += Vn[n_loc + a]; m_after += mn[n_loc + a]
+        V_after += Vn[n_loc + a]
     end
     V_after > 0 || error("Remap produced no volume at $(ev.center); increase samples_per_dx.")
-    εV, εm = V_before - V_after, m_before - m_after
+    εV = V_before - V_after
+    mn = [zeros(State{M, T}, n_loc + n_add) for _ in 1:nS]
+    for s in 1:nS
+        U = states[s]
+        m_before = zero(State{M, T}); m_after = zero(State{M, T})
+        @inbounds for l in 1:n_loc
+            (is_fixed[l] || is_other[l]) && continue
+            j = loc_idx[l]
+            m_before += V[j] * U[j]
+        end
+        @inbounds for l in 1:n_loc
+            (is_removed[l] || is_fixed[l]) && continue
+            j = loc_idx[l]
+            mn[s][l] = V[j] * U[j] + δm[s][l]
+            m_after += mn[s][l]
+        end
+        @inbounds for a in 1:n_add
+            mn[s][n_loc + a] = δm[s][n_loc + a]
+            m_after += mn[s][n_loc + a]
+        end
+        εm = m_before - m_after
+        @inbounds for l in 1:(n_loc + n_add)
+            (l <= n_loc && (is_removed[l] || is_fixed[l])) && continue
+            mn[s][l] += (Vn[l] / V_after) * εm
+        end
+    end
     @inbounds for l in 1:(n_loc + n_add)
         (l <= n_loc && (is_removed[l] || is_fixed[l])) && continue
-        frac  = Vn[l] / V_after
-        mn[l] += frac * εm
-        Vn[l] += frac * εV
+        Vn[l] += (Vn[l] / V_after) * εV
     end
 
-    # 5. DMP repair on the affected set (conservative redistribution)
+    # 5. DMP repair on the affected set (conservative redistribution), per state array
     aff = Int[]                                         # local ids of interior survivors + added
     for l in 1:n_loc; (is_removed[l] || is_fixed[l]) || push!(aff, l); end
     for a in 1:n_add; push!(aff, n_loc + a); end
-    Un  = [mn[l] / Vn[l] for l in aff]
-    lo_a = Vector{State{M, T}}(undef, length(aff)); hi_a = similar(lo_a)
-    for (p, l) in enumerate(aff)
-        if l <= n_loc
-            lo_a[p], hi_a[p] = lo[l], hi[l]
-        else
-            # Bounds for a new particle: old states within R of it
-            n = _collect_near!(pg, ev.added[l - n_loc], R_sq, qidx, qd)
-            if n == 0
-                lo_a[p], hi_a[p] = Un[p], Un[p]
+    V_aff = [Vn[l] for l in aff]
+    for s in 1:nS
+        U  = states[s]
+        Un = [mn[s][l] / Vn[l] for l in aff]
+        lo_a = Vector{State{M, T}}(undef, length(aff)); hi_a = similar(lo_a)
+        for (p, l) in enumerate(aff)
+            if l <= n_loc
+                lo_a[p], hi_a[p] = lo[s][l], hi[s][l]
             else
-                a_lo = U[qidx[1]]; a_hi = a_lo
-                for k in 2:n; a_lo = math_min.(a_lo, U[qidx[k]]); a_hi = math_max.(a_hi, U[qidx[k]]); end
-                lo_a[p], hi_a[p] = a_lo, a_hi
+                # Bounds for a new particle: old states within R of it
+                n = _collect_near!(pg, ev.added[l - n_loc], R_sq, qidx, qd)
+                if n == 0
+                    lo_a[p], hi_a[p] = Un[p], Un[p]
+                else
+                    a_lo = U[qidx[1]]; a_hi = a_lo
+                    for k in 2:n; a_lo = math_min.(a_lo, U[qidx[k]]); a_hi = math_max.(a_hi, U[qidx[k]]); end
+                    lo_a[p], hi_a[p] = a_lo, a_hi
+                end
             end
         end
-    end
-    if point_values
-        for p in eachindex(aff); Un[p] = math_max.(lo_a[p], math_min.(hi_a[p], Un[p])); end
-    else
-        _dmp_repair!(Un, [Vn[l] for l in aff], lo_a, hi_a)
-    end
-
-    # 6. Write back
-    for (p, l) in enumerate(aff)
-        if l <= n_loc
-            j = loc_idx[l]
-            V[j] = Vn[l]
-            point_values || (U[j] = Un[p])
-            record === nothing || push!(record, (j, lo_a[p], hi_a[p]))
+        if point_values
+            for p in eachindex(aff); Un[p] = math_max.(lo_a[p], math_min.(hi_a[p], Un[p])); end
         else
-            push!(new_pos, ev.added[l - n_loc]); push!(new_rho, Un[p]); push!(new_vol, Vn[l])
-            record === nothing || push!(record, (-length(new_pos), lo_a[p], hi_a[p]))
+            _dmp_repair!(Un, V_aff, lo_a, hi_a)
+        end
+
+        # 6. Write back (the volumes with the first state array)
+        for (p, l) in enumerate(aff)
+            if l <= n_loc
+                j = loc_idx[l]
+                s == 1 && (V[j] = Vn[l])
+                point_values || (U[j] = Un[p])
+                record === nothing || push!(record[s], (j, lo_a[p], hi_a[p]))
+            else
+                s == 1 && (push!(new_pos, ev.added[l - n_loc]); push!(new_vol, Vn[l]))
+                push!(new_rho[s], Un[p])
+                record === nothing || push!(record[s], (-length(new_pos), lo_a[p], hi_a[p]))
+            end
         end
     end
     @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = 0; end
     return nothing
 end
+
+# The single-state forms (the grid's own state only), as before the state arrays were threaded through
+_remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev::_AdaptEvent{D, T}, new_pos::Vector{Space{D, T}},
+              new_rho::Vector{State{M, T}}, new_vol::Vector{T}, df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
+              kwargs...) where {D, M, T} =
+    _remap_event!(pg, ad, ev, new_pos, [new_rho], new_vol, df; kwargs...)
 
 """
     _dmp_repair!(U, V, lo, hi)
@@ -678,14 +742,17 @@ end
 # Topology change: compaction of removed particles, append of new ones
 # -------------------------------------------------------------------------
 function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector{Bool},
-                          new_pos::Vector{Space{D, T}}, new_rho::Vector{State{M, T}}, new_vol::Vector{T},
-                          max_order::Int) where {D, M, T}
+                          new_pos::Vector{Space{D, T}}, new_rho::Vector{Vector{State{M, T}}}, new_vol::Vector{T},
+                          max_order::Int; states = _state_list(pg, ())) where {D, M, T}
     N     = pg.meta.N
     n_add = length(new_pos)
     core  = pg.core
     N_new = N - count(view(remove_mask, 1:N)) + n_add
     ensure_capacity!(pg, N_new)
     ensure_particle_capacity!(pg.neighbor, N_new)
+    for st in states
+        _grow_state!(st, N_new)
+    end
 
     w = 1
     @inbounds for i in 1:N
@@ -699,7 +766,9 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
             core.normals[w]         = core.normals[i]
             core.wall_distances[w]  = core.wall_distances[i]
             core.wall_curvatures[w] = core.wall_curvatures[i]
-            pg.rhos[w]              = pg.rhos[i]
+            for st in states
+                st[w] = st[i]
+            end
             pg.curvatures[w]        = pg.curvatures[i]
         end
         w += 1
@@ -711,7 +780,9 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
         core.particle_orders[w] = max_order
         core.volumes[w]         = new_vol[a]
         core.normals[w], core.wall_distances[w], core.wall_curvatures[w] = _ghost_geometry_curv(pg.geometry, new_pos[a], pg.meta.boundary_time)
-        pg.rhos[w]              = new_rho[a]
+        for (s, st) in enumerate(states)
+            st[w] = new_rho[s][a]
+        end
         pg.curvatures[w]        = zero(State{M, T})
         w += 1
     end
