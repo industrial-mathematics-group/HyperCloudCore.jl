@@ -85,7 +85,9 @@ reflected into another block), the scratch array. `wall_reduction_type(op, eq)` 
 reflection. Kernel functions, as the operators themselves.
 """
 wall_reduction_type(op, eq) = nothing
+"The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref))."
 block_wall_reduce(op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
+"The ghost state of block `b` from its mirrored value and the wall parameters (see [`wall_reduction_type`](@ref))."
 block_wall_apply(op, eq, U, b, params, wall, Y, N, nb, g) = error("`block_wall_apply` not implemented for $(typeof(op)) on $(typeof(eq))")
 
 """
