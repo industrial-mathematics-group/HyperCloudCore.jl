@@ -52,3 +52,4 @@ end
 
 include("linear_advection.jl")
 include("burgers.jl")
+include("isothermal_euler.jl")

@@ -36,7 +36,7 @@ fixed_arrays(pg::ParticleGrid) = (pg.bins.cell_start, pg.bins.cell_count, pg.bin
 
 particle_buffers(ts::GeneralRKTimeStepper, moving::Bool) = (
     ts.rho_n, ts.rho_cand, (_checks_substeps(ts) ? (ts.rho_sub,) : ())..., ts.Y_stages..., ts.K_E_stages..., ts.K_I_stages...,
-    (moving ? (ts.x_n, ts.x_cand, ts.X_stages..., ts.K_X_stages...) : ())...,
+    (moving ? (ts.x_n, ts.x_cand, ts.X_stages..., ts.K_X_stages..., ts.v_n, ts.v_cand, ts.V_stages..., ts.K_V_stages...) : ())...,
     ts.work.triggered, ts.work.changed, ts.work.dirty, ts.work.scratch, ts.work.snapshot, ts.work.triggered_step)
 slot_buffers(ts::GeneralRKTimeStepper) =
     uses_slot_buffers(ts.divergence_interpolator) ? (ts.int_buffer.df_flux, ts.int_buffer.df_scratch, ts.int_buffer.mask) : ()
