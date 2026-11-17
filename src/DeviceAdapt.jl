@@ -54,6 +54,7 @@ Adapt.adapt_structure(to, m::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}) where 
 # The time stepper holds a static tableau (bits, concrete type): passed through unchanged. A host tableau is
 # converted with its runtime stage count, which inference cannot see; keep such tableaus out of hot launches.
 Adapt.adapt_structure(to, bt::IMEXButcherTableau{T, <:SMatrix, <:SVector}) where {T} = bt
+Adapt.adapt_structure(to, m::_BlockMover) = _BlockMover(m.mover, adapt(to, m.w))
 Adapt.adapt_structure(to, bt::IMEXButcherTableau) = static_tableau(bt, Val(num_stages(bt)))
 
 """

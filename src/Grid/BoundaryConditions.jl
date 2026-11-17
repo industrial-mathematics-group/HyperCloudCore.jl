@@ -287,7 +287,10 @@ end
 # unknowns) would take StaticArrays' allocating, host-only Cholesky inside the kernel
 _ghost_degree(::Val{Q}, ::Val{D}) where {Q, D} = Val(D == 3 ? min(Q, 3) : Q)
 
-function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val) where {D, M, T}
+# `out`: the array the ghost states are written to (the data of the fit are always read from `buf`; the block pipeline
+# fits into a scratch array first and applies its wall operators from there)
+function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val;
+                            out = buf) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     invL = one(T) / minimum(pg.meta.dx)
@@ -296,7 +299,7 @@ function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, val
     gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
                                            GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
     foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
-        (buf, pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
+        ((buf, out), pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
          pg.core.wall_curvatures, pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
          (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
     return nothing
@@ -339,10 +342,11 @@ end
 @inline _fit_support(D, q) = (3 * (basis_count(D, q) + 1) + 1) ÷ 2
 
 # Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
-@inline function _ghost_fit_body!(i, buf, pos, isb, tags, normals, wdist, curvs, orders, ranges, indices, wf,
+@inline function _ghost_fit_body!(i, bufs, pos, isb, tags, normals, wdist, curvs, orders, ranges, indices, wf,
                                   wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
     @inbounds begin
         (isb[i] && tags[i] == tag) || return nothing
+        buf, out = bufs
         L, Li, invL = wrap
         x_i = move(gm, pos[i])
         n_i = rotate(gm, normals[i])
@@ -407,15 +411,24 @@ end
             U = clamp.(U, lo, hi)
         end
         if MIRROR
-            x_w    = x_i - φ_i * n_i                     # the wall point: the body's velocity there, not at the ghost
-            H      = gm.R * _decode_curvature(curvs[i], normals[i]) * gm.R'   # (stored for `normals[i]`)
-            wall   = WallPoint(x_w, n_i, φ_i, velocity(gm, x_w), acceleration(gm, x_w), gm.Ω, H)
-            buf[i] = _apply_wall_op(op, eq, U, wall)
+            out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm))
         else
-            buf[i] = U
+            out[i] = U
         end
     end
     return nothing
+end
+
+# The wall as seen from ghost `i` (the wall point: the body's velocity there, not at the ghost), at the time of `gm`
+@inline function _ghost_wall_point(i, pos, normals, wdist, curvs, gm)
+    @inbounds begin
+        x_i = move(gm, pos[i])
+        n_i = rotate(gm, normals[i])
+        φ_i = wdist[i]
+        x_w = x_i - φ_i * n_i
+        H   = gm.R * _decode_curvature(curvs[i], normals[i]) * gm.R'   # (stored for `normals[i]`)
+        return WallPoint(x_w, n_i, φ_i, velocity(gm, x_w), acceleration(gm, x_w), gm.Ω, H)
+    end
 end
 
 # Static dispatch over the fit degrees Q, Q-1, ..., 0 (kernels cannot build a `Val` at run time): the first

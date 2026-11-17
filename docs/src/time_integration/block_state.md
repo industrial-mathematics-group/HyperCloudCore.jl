@@ -75,7 +75,29 @@ until nothing is flagged. The Euler substeps of SSP tableaus, the forcing halos 
 (`mood_flags`, `mood_inadmissible`) are the same. `MOODu2` is not available yet: its curvature test reads the
 scheme's gradient cache, which holds the last block's gradients.
 
-Scope of this version: static grids; the boundary conditions of the grid apply per block. Checked against the standard pipeline: a one-block Burgers run is
+## Moving grids on blocks
+
+On a moving grid the frame velocity of every particle is reduced before each flux pass: a prescribed mover gives
+it as usual, the Lagrangian movers through [`block_fluid_velocity`](@ref) (the mean velocity of the moments of a
+discrete-velocity model). The flux pass then runs in the frozen-velocity ALE frame of the particle, `F − w_i U`
+with the wave speed bound [`block_max_eigenvalue`](@ref)`(eq, U, d, b, w_i)` (the exact `|λ − w|` of a
+block's velocities makes the dissipation vanish where the block moves with the frame), the positions are stage
+variables as in the standard stepper and the volumes are re-estimated at the end of the step. The conservative
+Lagrangian frame of the standard stepper, which evaluates the frame velocity of every interface state, has no
+block form: a block cannot give the fluid velocity. Moving boundary pieces are not available yet.
+
+## Walls on blocks
+
+The boundary conditions of the grid apply block by block with the block's state of the step start as the
+reference. A `MirrorBC` whose operator needs the whole distribution of a ghost (a diffuse kinetic wall: the
+density that returns the incident flux, summed over all velocities; a specular wall: a velocity reflected into
+another block) implements the wall in two passes, [`block_wall_reduce`](@ref) and [`block_wall_apply`](@ref)
+with the parameter type [`wall_reduction_type`](@ref): the mirrored interior state of every block is fitted into
+a scratch array first (the even reflection), the reduction runs once per ghost over the mirrored blocks, and the
+application gives every block's ghost state from its mirrored value, the parameters and, where it needs them,
+the other mirrored blocks of the ghost. An operator without a reduction acts block by block.
+
+Scope of this version: static boundary pieces; MOOD without `MOODu2`. Checked against the standard pipeline: a one-block Burgers run is
 bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
 state vector as a whole) and converges to the exact solution at second order, in 1-D and 2-D, with inflow
@@ -88,9 +110,13 @@ third-order scheme, the Euler substeps of RK3, the forcing halo, ARS222 with a s
 cross-block admissibility of a guarded equation) the same particles drop their orders as in the standard run
 and the states agree to round-off.
 
-What comes next, in this order: moving frames (the frame velocity from the reduction), kinetic walls that read other blocks
-of the same ghost, adaptivity and reordering of all blocks together, and the velocity decomposition across
-devices (the only exchange per stage is the reduction).
+Checked: a prescribed mover gives the standard run bit for bit (positions and volumes included); a Lagrangian
+mover with one common velocity transports every state exactly; a reflecting wall operator that reads the mirror
+partner's block reproduces the permutation operator of the standard run to round-off.
+
+What comes next, in this order: adaptivity and reordering of all blocks together, moving boundary pieces, the
+velocity decomposition across devices (the only exchange per stage is the reduction), and `MOODu2` with a per-block
+gradient cache.
 
 ## API
 
@@ -99,6 +125,10 @@ num_blocks
 block_flux
 block_max_eigenvalue
 block_admissible
+block_fluid_velocity
+wall_reduction_type
+block_wall_reduce
+block_wall_apply
 BlockOf
 BlockState
 block_view

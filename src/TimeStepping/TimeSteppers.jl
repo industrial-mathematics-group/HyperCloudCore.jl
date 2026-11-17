@@ -377,7 +377,7 @@ update_size!(ts::GeneralRKTimeStepper, N::Int, M_neighbors::Int) = update_size!(
 # =========================================================================
 
 """
-    compute_explicit_rhs!(ts, eq, pg, K_E, K_X, K_V, V_k, Y, t, full; gather = full)
+    compute_explicit_rhs!(ts, eq, pg, K_E, K_X, K_V, V_k, Y, t, full; gather = full, mover = pg.mover, moving = _is_moving(pg))
 
 Scheme pre-pass (cached gradients) and flux pass at the CURRENT grid geometry:
 `K_E = -div(F − w ρ) + S_expl` (the PDE wrapped in the moving frame, `_moving_frame`), `K_X = w` when the grid
@@ -386,16 +386,16 @@ read neighbour states straight from `Y`.
 `full = true` covers all interior particles; otherwise gradients are recomputed on `work.changed`
 and fluxes on `work.dirty`. `gather = true` with `full = false` recomputes the gradients of all particles and the
 fluxes of the dirty ones (the block pipeline: the gradient cache is shared by the blocks, so a partial pass of one
-block starts from the last block's gradients).
+block starts from the last block's gradients). `mover` is the grid mover the flux pass asks for the frame velocity
+(the block pipeline passes a wrapper holding the velocities of its reduction), `moving` whether the frame is used.
 """
 # The signature up to 0.9.1 (the volume buffers of the first stage; untouched on a static grid)
 compute_explicit_rhs!(ts::GeneralRKTimeStepper, eq, pg, K_E, K_X, Y, t, full::Bool) =
     compute_explicit_rhs!(ts, eq, pg, K_E, K_X, ts.K_V_stages[1], ts.V_stages[1], Y, t, full)
 function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K_X, K_V, V_k, Y, t, full::Bool;
-                               gather::Bool = full) where {D, M, T}
+                               gather::Bool = full, mover = pg.mover, moving::Bool = _is_moving(pg)) where {D, M, T}
     N       = pg.meta.N
     interp  = ts.divergence_interpolator
-    moving  = _is_moving(pg)
     backend = get_backend()
 
     prepare_geometry!(interp, pg)   # refreshes geometry caches only if the grid changed
@@ -403,7 +403,7 @@ function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K
     foreach_particle(_rhs_gather!, backend, N,
         (Y, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, pg, ts.work.changed, gather))
     foreach_particle(_rhs_flux!, backend, N,
-        (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, pg.mover, pg,
+        (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, mover, pg,
          ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T})))   # (20 arguments)
     return nothing
 end
