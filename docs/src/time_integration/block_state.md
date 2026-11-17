@@ -63,7 +63,19 @@ evaluated explicitly, as in the standard stepper, and the right-hand side of a s
 ``(U_{out} - U_{in}) / (\Delta t\, a_{ii})``. Several implicit terms are applied one after another (their
 increments add up).
 
-Scope of this version: static grids and no MOOD; the boundary conditions of the grid apply per block. Checked against the standard pipeline: a one-block Burgers run is
+## MOOD on blocks
+
+MOOD works as in the standard stepper, with the particle's order shared by all its blocks: at every
+checkpoint the flag pass runs once per block (the criterion on the block's components against the block's
+previous stage, the per-block admissibility that every block is finite), [`block_admissible`](@ref) adds the
+cross-block check (for a discrete-velocity model the positivity of the moments), and one drop pass lowers the
+order of every flagged particle; the previous stage's right-hand side is then recomputed on the affected
+particles for all blocks (the explicit sources reuse their parameters there) and the candidates are re-formed,
+until nothing is flagged. The Euler substeps of SSP tableaus, the forcing halos and the diagnostics
+(`mood_flags`, `mood_inadmissible`) are the same. `MOODu2` is not available yet: its curvature test reads the
+scheme's gradient cache, which holds the last block's gradients.
+
+Scope of this version: static grids; the boundary conditions of the grid apply per block. Checked against the standard pipeline: a one-block Burgers run is
 bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
 state vector as a whole) and converges to the exact solution at second order, in 1-D and 2-D, with inflow
@@ -71,10 +83,12 @@ and outflow conditions, on the Polyester and the KernelAbstractions CPU backends
 the reduction (every component relaxing towards the particle's mean, the structure of the BGK collision)
 the block run agrees with the standard stepper and the equivalent `AbstractImplicitSourceTerm` to round-off
 (the stage states and implicit right-hand sides bit for bit, the flux pass to an ulp), with ARS222 (also in the
-stiff limit) and with an explicit tableau and source.
+stiff limit) and with an explicit tableau and source. With MOOD (`MOODu1` on a box per component with the unlimited
+third-order scheme, the Euler substeps of RK3, the forcing halo, ARS222 with a source, `OnlyMOOD`, and the
+cross-block admissibility of a guarded equation) the same particles drop their orders as in the standard run
+and the states agree to round-off.
 
-What comes next, in this order: the MOOD admissibility check
-as a reduction, moving frames (the frame velocity from the reduction), kinetic walls that read other blocks
+What comes next, in this order: moving frames (the frame velocity from the reduction), kinetic walls that read other blocks
 of the same ghost, adaptivity and reordering of all blocks together, and the velocity decomposition across
 devices (the only exchange per stage is the reduction).
 
@@ -84,6 +98,7 @@ devices (the only exchange per stage is the reduction).
 num_blocks
 block_flux
 block_max_eigenvalue
+block_admissible
 BlockOf
 BlockState
 block_view

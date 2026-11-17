@@ -120,6 +120,49 @@ function relaxation_runs(sources_block, sources_full, tableau; N = 50, tend = 0.
 end
 
 
+
+# A block equation with a cross-block admissibility: the mean over all components must stay above 1.5 (and the standard
+# form of it), for the PAD of MOOD on blocks
+struct GuardedTransport{D, W, T, EQ <: DiscreteTransport{D, W, T}} <: HyperbolicPDE{D, W, T}
+    eq::EQ
+end
+GuardedTransport(eq::DiscreteTransport{D, W, T}) where {D, W, T} = GuardedTransport{D, W, T, typeof(eq)}(eq)
+HyperCloudCore.num_blocks(g::GuardedTransport) = HyperCloudCore.num_blocks(g.eq)
+@inline HyperCloudCore.block_flux(g::GuardedTransport, U::State, b::Int) = HyperCloudCore.block_flux(g.eq, U, b)
+@inline HyperCloudCore.block_max_eigenvalue(g::GuardedTransport, U::State, d::Int, b::Int) = HyperCloudCore.block_max_eigenvalue(g.eq, U, d, b)
+@inline flux(g::GuardedTransport, U::State) = flux(g.eq, U)
+@inline max_eigenvalue(g::GuardedTransport, U::State, d::Int) = max_eigenvalue(g.eq, U, d)
+@inline function HyperCloudCore.block_admissible(g::GuardedTransport{D, W, T}, Y, N::Int, nb::Int, p::Int) where {D, W, T}
+    s = zero(T)
+    @inbounds for b in 1:nb
+        s += sum(Y[(b - 1) * N + p])
+    end
+    return s / (nb * W) > T(1.5)
+end
+@inline HyperCloudCore.is_admissible(g::GuardedTransport{D, W, T}, U::State{W, T}) where {D, W, T} = all(isfinite, U) && sum(U) / W > T(1.5)
+
+"Both pipelines on the 8-velocity transport with a box per component (a discontinuity), MUSCL3 without a limiter, with MOOD."
+function mood_runs(eq_f, eq_b, mood, tableau; sources_b = (), sources_f = (), N = 80, tend = 0.3, order = 3)
+    box(x, k) = 1 + (abs(x) < 0.3 ? 1.0 : 0.0) * (1 + 0.1k)
+    pg_f = block_pg_1d(N, 8)
+    for i in 1:N
+        x = pg_f.core.positions[i][1]
+        pg_f.rhos[i] = State{8, Float64}(ntuple(k -> box(x, k), 8))
+    end
+    pg_b = block_pg_1d(N, 2)
+    bs   = BlockState(eq_b, pg_b)
+    set_block_states!((x, b) -> State{2, Float64}(box(x[1], 2b - 1), box(x[1], 2b)), bs, pg_b)
+    interp_f = MUSCL(Float64, 1, 8, order, NoLimiter(), RusanovFlux())
+    interp_b = MUSCL(Float64, 1, 2, order, NoLimiter(), RusanovFlux())
+    ts_f = GeneralRKTimeStepper(eq_f, interp_f, mood, sources_f, tableau)
+    ts_b = BlockTimeStepper(eq_b, interp_b, mood, sources_b, tableau)
+    dt = 0.3 * (2 / N) / 2.0
+    advance!((t, d) -> (ts_f(eq_f, pg_f, t, d); ts_b(eq_b, pg_b, bs, t, d)), tend, dt)
+    return block_vs_full(bs, view(pg_f.rhos, 1:N)), ts_f, ts_b, bs, pg_f, pg_b
+end
+block_max(bs) = maximum(maximum(block_view(bs, b)[i]) for b in 1:bs.nb, i in 1:bs.N[])
+
+
 @testset "Block pipeline" begin
     @testset "State arrays are passed explicitly: a separate array advances like pg.rhos, the BC reference" begin
         eq = Burgers()
@@ -354,5 +397,42 @@ end
         HyperCloudCore.reduction_type(::VectorParams) = Vector{Float64}
         @test_throws ArgumentError BlockSourceTerm(VectorParams())
         @test_throws ErrorException HyperCloudCore.block_reduce(MeanRelaxation(1.0) isa MeanRelaxation ? VectorParams() : VectorParams(), 1, nothing, 1, 1, nothing, 0.0, 0.0)
+    end
+    @testset "MOOD on blocks: the criterion per block, one order per particle, the cross-block admissibility" begin
+        speeds = [(-1.5,), (-0.5,), (0.25,), (0.75,), (1.0,), (1.25,), (1.75,), (2.0,)]
+        eq_f = DiscreteTransport(Val(8), speeds)
+        eq_b = DiscreteTransport(Val(2), speeds)
+        # without MOOD the unlimited third-order scheme overshoots the box (top 2.8)
+        dev0, _, _, bs0, _, _ = mood_runs(eq_f, eq_b, MOOD(NoMOOD()), RK3_SSP_Tableau(Float64))
+        @test dev0 < 1e-13
+        @test block_max(bs0) > 2.8 + 0.02
+        # MOODu1 with an SSP tableau (the Euler substeps are checked): the DMP holds, the same particles drop as in the standard run
+        dev, ts_f, ts_b, bs, pg_f, pg_b = mood_runs(eq_f, eq_b, MOOD(EPD1(), MOODu1(1e-3)), RK3_SSP_Tableau(Float64))
+        @test dev < 1e-12
+        @test block_max(bs) < 2.8 + 0.015                            # (the standard run gives the same 2.8097; without MOOD > 2.82)
+        @test any(mood_flags(ts_b)) && mood_flags(ts_b) == mood_flags(ts_f)
+        @test pg_b.core.particle_orders[1:pg_b.meta.N] == pg_f.core.particle_orders[1:pg_f.meta.N]
+        @test mood_inadmissible(ts_b) == 0
+        # the forcing halo (StrictEPD0) and the stage candidates of a non-SSP tableau with an implicit source
+        dev, ts_f, ts_b, bs, pg_f, pg_b = mood_runs(eq_f, eq_b, MOOD(StrictEPD0(), MOODu1(1e-3)), RK3_SSP_Tableau(Float64))
+        @test dev < 1e-12 && mood_flags(ts_b) == mood_flags(ts_f)
+        dev, ts_f, ts_b, bs, pg_f, pg_b = mood_runs(eq_f, eq_b, MOOD(EPD1(), MOODu1(1e-3)), IMEX_ARS222_Tableau(Float64);
+                                                     sources_b = (BlockSourceTerm(MeanRelaxation(0.05)),), sources_f = (MeanRelaxationFull(0.05),))
+        @test dev < 1e-12 && mood_flags(ts_b) == mood_flags(ts_f)
+        # OnlyMOOD: every interior particle drops to order 1 at the first checkpoint, identical first-order results
+        dev, ts_f, ts_b, bs, pg_f, pg_b = mood_runs(eq_f, eq_b, MOOD(EPD1(), OnlyMOOD()), RK2_SSP_Tableau(Float64); tend = 0.05)
+        @test dev < 1e-12
+        @test all(i -> pg_b.core.is_boundary[i] || pg_b.core.particle_orders[i] == 1, 1:pg_b.meta.N)
+        # the cross-block admissibility: particles outside the box (mean 1 < 1.5) are inadmissible at every checkpoint
+        g_f, g_b = GuardedTransport(eq_f), GuardedTransport(eq_b)
+        dev, ts_f, ts_b, bs, pg_f, pg_b = mood_runs(g_f, g_b, MOOD(EPD1(), MOODPAD()), RK2_SSP_Tableau(Float64); tend = 0.05)
+        @test dev < 1e-12
+        @test mood_flags(ts_b) == mood_flags(ts_f) && any(mood_flags(ts_b))
+        @test mood_inadmissible(ts_b) == mood_inadmissible(ts_f) > 0
+        outside = [i for i in 1:pg_b.meta.N if abs(pg_b.core.positions[i][1]) > 0.35]
+        @test all(i -> pg_b.core.particle_orders[i] == 1, outside)
+        # scope
+        interp = MUSCL(Float64, 1, 2, 2, NoLimiter(), RusanovFlux())
+        @test_throws ArgumentError BlockTimeStepper(eq_b, interp, MOOD(EPD1(), MOODu2(1e-3)), (), RK2_SSP_Tableau(Float64))
     end
 end
