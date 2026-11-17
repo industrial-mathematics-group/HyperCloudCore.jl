@@ -47,8 +47,29 @@ particle_buffers(m::MUSCL, moving::Bool) = (m.gradients, particle_buffers(m.grad
     (m.div_weights === m.grad_weights ? () : particle_buffers(m.div_weights, moving))...)
 slot_buffers(m::MUSCL) = _moment_active(m) ? (m.dweights, m.mweights) : (m.dweights,)
 
+# The block pipeline: the state arrays are block-major, `nb` elements per particle (`_Blocked`); the positions, volumes,
+# MOOD masks and the source parameters are per particle. (The scratch of the kinetic walls, block-major and only
+# allocated with a reducing `MirrorBC`, is not reserved: it grows at the first wall pass.)
+struct _Blocked{G <: Growable}
+    g::G
+    nb::Int
+end
+function particle_buffers(ts::BlockTimeStepper, moving::Bool)
+    inner, nb = ts.inner, num_blocks(ts.pde)
+    blocked = map(g -> _Blocked(g, nb), (inner.rho_n, inner.rho_cand, (_checks_substeps(inner) ? (inner.rho_sub,) : ())...,
+                                         inner.Y_stages..., inner.K_E_stages..., inner.K_I_stages...))
+    return (blocked...,
+            (moving ? (inner.x_n, inner.x_cand, inner.X_stages..., inner.K_X_stages..., inner.v_n, inner.v_cand, inner.V_stages...,
+                       inner.K_V_stages..., ts.grid_w) : ())...,
+            inner.work.triggered, inner.work.changed, inner.work.dirty, inner.work.scratch, inner.work.snapshot, inner.work.triggered_step,
+            map(st -> st.params, (ts.explicit_sources..., ts.implicit_sources...))...)
+end
+slot_buffers(ts::BlockTimeStepper) = slot_buffers(ts.inner)
+particle_buffers(bs::BlockState, ::Bool) = (_Blocked(bs.data, bs.nb),)
+
 _array_bytes(a::AbstractArray) = length(a) * sizeof(eltype(a))
 _element_bytes(b::AbstractArray) = sizeof(eltype(b))
+_element_bytes(b::_Blocked) = b.nb * _element_bytes(b.g)
 
 """
     slots_per_particle(pg::ParticleGrid) -> Float64
@@ -135,6 +156,7 @@ function reserve!(pg::ParticleGrid, objs...; limit::Integer, tolerance::Real = 0
     return (; particles, slots, bytes = memory_estimate(pg, objs...; particles, slots).bytes, limit = Int(limit))
 end
 
+_reserve!(b::_Blocked, n::Int) = _reserve!(b.g, b.nb * n)
 # Exactly `n` elements (no headroom; a buffer that is larger, e.g. from the 25 % headroom of a growth or
 # of the host grid a device grid was copied from, is shrunk), then fixed.
 function _reserve!(g::Growable, n::Int)
