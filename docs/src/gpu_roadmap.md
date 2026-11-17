@@ -18,6 +18,7 @@ set_backend!(CUDABackend())                 # from CUDA.jl (likewise ROCBackend(
 | flux divergence + explicit sources | `_rhs_flux!` | `TimeStepping/TimeSteppers.jl` |
 | stage assembly, implicit solve, implicit RHS | `_stage_predictor!`, `_stage_implicit_solve!`, `_stage_implicit_rhs!` | `TimeStepping/TimeSteppers.jl` |
 | content remap onto the re-estimated volumes, cloud-quality check (moving grids) | `_content_remap!`, `_closest_neighbour!` | `TimeStepping/TimeSteppers.jl` |
+| block pipeline: the stage kernels launched per block on views of the block state (no new kernels; the block loop and the copies between the block state and the stage buffers are host-side) | `BlockTimeStepper` | `TimeStepping/BlockStepper.jl` |
 | MOOD candidate check, decrement, forcing, mask expansion | `_mood_flag!`, `_mood_drop!`, `_mood_force!`, `_expand_body!` | `TimeStepping/MOOD.jl` |
 | geometry refresh (moving grids) | `_refresh_slots!` | `TimeStepping/GridMovers.jl` |
 | inverse MLS moment matrices | `_moment_body!` | `Interpolation/Interpolators.jl` |

@@ -110,30 +110,30 @@ domain_volume(geom::GeometricDomain{GEO}) where {GEO} =
 domain_volume(pg::ParticleGrid) = domain_volume(pg.geometry)
 
 """
-    total_mass(pg) -> State{M, T}
+    total_mass(pg, U = pg.rhos) -> State{M, T}
 
-Discrete conserved content `Σ_i V_i U_i` over all particles of the current cloud. Ghost particles carry no
+Discrete conserved content `Σ_i V_i U_i` over all particles of the current cloud (`U` a state array over the cloud). Ghost particles carry no
 volume, so this is the content of the region (see also [`interior_mass`](@ref), which skips them explicitly).
 """
-function total_mass(pg::ParticleGrid{D, M, T}) where {D, M, T}
+function total_mass(pg::ParticleGrid{D, M, T}, U::AbstractVector{State{M, T}} = pg.rhos) where {D, M, T}
     N = pg.meta.N
     N == 0 && return zero(State{M, T})
-    return mapreduce((v, u) -> v * u, +, view(pg.core.volumes, 1:N), view(pg.rhos, 1:N); init = zero(State{M, T}))
+    return mapreduce((v, u) -> v * u, +, view(pg.core.volumes, 1:N), view(U, 1:N); init = zero(State{M, T}))
 end
 
 """
-    interior_mass(pg) -> State{M, T}
+    interior_mass(pg, U = pg.rhos) -> State{M, T}
 
 `Σ V_i U_i` over the interior particles (boundary/ghost particles excluded): the content of the domain, which the
 adaptivity keeps exact. Equal to [`total_mass`](@ref) as long as the ghost volumes are zero (every estimator sets
 them so). A reduction like `total_mass`, so it works on device grids as well.
 """
-function interior_mass(pg::ParticleGrid{D, M, T}) where {D, M, T}
+function interior_mass(pg::ParticleGrid{D, M, T}, U::AbstractVector{State{M, T}} = pg.rhos) where {D, M, T}
     N = pg.meta.N
     N == 0 && return zero(State{M, T})
     z = zero(State{M, T})
     return mapreduce((b, v, u) -> b ? z : v * u, +, view(pg.core.is_boundary, 1:N), view(pg.core.volumes, 1:N),
-                     view(pg.rhos, 1:N); init = z)
+                     view(U, 1:N); init = z)
 end
 
 # -------------------------------------------------------------------------

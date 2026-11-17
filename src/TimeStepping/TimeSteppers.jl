@@ -104,7 +104,7 @@ include("GridMovers.jl")
     GeneralRKTimeStepper{D, M, T, PDE, G, MO, EST, IST} <: TimeStepper
     GeneralRKTimeStepper(pde, div_interp, mood, sources::Tuple, tableau; kwargs...)
     GeneralRKTimeStepper(pde, div_interp, mood, tableau; kwargs...)
-    (ts::GeneralRKTimeStepper)(eq, pg, time, dt::T)
+    (ts::GeneralRKTimeStepper)(eq, pg, time, dt::T, U = pg.rhos)
 
 The one time integrator: explicit RK and IMEX share this struct, since an explicit tableau is an
 `IMEXButcherTableau` with a zero implicit part (see `RKButcherTableau`). `sources` may mix explicit
@@ -160,6 +160,10 @@ is checked (no theoretical backing). `mood_substeps = false` restores that every
   discretisation and the flux pair defect.
 - `int_buffer`, `work`: neighbour gather buffer and MOOD scratch.
 All of them are `Growable` buffers, sized by `update_size!` at the start of every step.
+
+The step advances the state array `U` (default: the grid's own `pg.rhos`) in place; the boundary conditions see the
+state of the step start through the stepper's copy, never through `pg.rhos`. A separate array needs a static grid
+(the moving-grid path remaps and sweeps the grid's own state).
 """
 struct GeneralRKTimeStepper{D, M, T, PDE <: HyperbolicPDE, G <: DivergenceInterpolator, MO <: MOOD,
                             EST <: Tuple{Vararg{AbstractExplicitSourceTerm}},
@@ -459,9 +463,11 @@ function form_candidate!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt::
     t_i      = is_final ? time + dt : time + bt.c_t[i] * dt
     n_prev   = is_final ? s : i - 1
 
+    # (boundary particles keep the state of the step start, `rho_n`: the stepper's copy, not `pg.rhos`, so that the
+    # stage can be formed for any state array)
     foreach_particle(_stage_predictor!, backend, N,
         (target, (x_target, v_target), ts.rho_n, (ts.x_n, ts.v_n), ts.K_E_stages, ts.K_I_stages, (ts.K_X_stages, ts.K_V_stages, ts.V_stages),
-         pg.rhos, pg.core.is_boundary, bt, i, n_prev, is_final, dt, moving, _content_form(ts, pg), zero(T), zero(Space{D, T})))
+         ts.rho_n, pg.core.is_boundary, bt, i, n_prev, is_final, dt, moving, _content_form(ts, pg), zero(T), zero(Space{D, T})))
 
     if !is_final
         pre_solve_updates!(ts.implicit_sources, parent(target), pg, t_i)
@@ -476,7 +482,7 @@ function form_candidate!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt::
         end
     end
 
-    apply_boundary_conditions!(pg, parent(target), ts, eq, t_i)
+    apply_boundary_conditions!(pg, parent(target), ts, eq, t_i, parent(ts.rho_n))
     return target, t_i
 end
 
@@ -644,18 +650,20 @@ end
 # TIME STEP
 # =========================================================================
 
-function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid, time::Real, dt::T) where {D, M, T}
+function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid, time::Real, dt::T,
+                                             U::AbstractVector{State{M, T}} = pg.rhos) where {D, M, T}
+    moving = _is_moving(pg)
+    (U === pg.rhos || !moving) || throw(ArgumentError("a time step of a separate state array needs a static grid"))
     has_moving_pieces(pg.geometry) && _sync_boundaries!(pg, T(time), _extract_order(ts.divergence_interpolator))
     N      = pg.meta.N
     s      = ts.num_stages
     interp = ts.divergence_interpolator
     orders = pg.core.particle_orders
-    moving = _is_moving(pg)
 
     update_size!(ts, N, length(pg.neighbor.indices), moving)
     update_size!(interp, N)                       # once per step; gradients persist across checkpoints
 
-    copyto!(parent(ts.rho_n), 1, pg.rhos, 1, N)
+    copyto!(parent(ts.rho_n), 1, U, 1, N)
     moving && copyto!(parent(ts.x_n), 1, pg.core.positions, 1, N)
     moving && copyto!(parent(ts.v_n), 1, pg.core.volumes, 1, N)
 
@@ -677,7 +685,7 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
     end
 
     mood_checkpoint!(ts, eq, pg, s + 1, dt, time)          # uses geometry of stage s
-    copyto!(pg.rhos, 1, parent(ts.rho_cand), 1, N)
+    copyto!(U, 1, parent(ts.rho_cand), 1, N)
     if ts.work.inadmissible[] > 0 && !ts.work.warned[]
         ts.work.warned[] = true
         @warn "MOOD accepted $(ts.work.inadmissible[]) inadmissible candidate(s) at first order in the step at t = $time " *
@@ -703,7 +711,7 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
                 remap && copyto!(pg.core.volumes, 1, parent(ts.v_cand), 1, N)
             else
                 update_volumes!(pg, ts.volume_estimator)
-                remap && foreach_particle(_content_remap!, get_backend(), N, (pg.rhos, ts.v_cand, pg.core.volumes, pg.core.is_boundary))
+                remap && foreach_particle(_content_remap!, get_backend(), N, (U, ts.v_cand, pg.core.volumes, pg.core.is_boundary))
             end
         end
         has_moving_pieces(pg.geometry) && sweep_boundaries!(pg, time, time + dt, max_order)

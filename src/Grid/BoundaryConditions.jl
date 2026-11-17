@@ -2,20 +2,20 @@ export FixedDirichlet, OutflowBC
 
 """
     FixedDirichlet <: AbstractBoundaryCondition
-    (::FixedDirichlet)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t)
+    (::FixedDirichlet)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t, reference = pg.rhos)
 
 A strict, unchanging boundary condition strategy.
 
 # Callable / Functor
 
-Enforces a static Dirichlet condition upon boundary particles. Iterates over the grid and resets the state of any boundary particle matching the specified `tag` to the state stored in `pg.rhos` at the start of the step. Nothing else writes the state of a boundary
+Enforces a static Dirichlet condition upon boundary particles. Iterates over the grid and resets the state of any boundary particle matching the specified `tag` to the state stored in `reference` (`pg.rhos`, or the state array the time stepper advances) at the start of the step. Nothing else writes the state of a boundary
 particle (the stage predictor keeps it), so that is its initial state unless the user changes `pg.rhos`.
 """
 struct FixedDirichlet <: AbstractBoundaryCondition end
 
 """
     OutflowBC <: AbstractBoundaryCondition
-    (::OutflowBC)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t)
+    (::OutflowBC)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t, reference = pg.rhos)
 
 A zero-gradient, transmissive boundary condition strategy.
 
@@ -24,7 +24,7 @@ A zero-gradient, transmissive boundary condition strategy.
 Enforces a zero-gradient outflow utilizing a multi-pass nearest-donor algorithm. 
 - Initiates all active interior particles as valid state donors.
 - Executes up to 5 symmetrical passes outward, dynamically locating the nearest resolved neighbor using squared distances and copying its state to the target particle.
-- Safely falls back to the state in `pg.rhos` at the start of the step for any completely orphaned boundary particles that fail to resolve a donor.
+- Safely falls back to the state in `reference` (`pg.rhos`, or the state array the time stepper advances) at the start of the step for any completely orphaned boundary particles that fail to resolve a donor.
 """
 struct OutflowBC <: AbstractBoundaryCondition end
 
@@ -33,19 +33,26 @@ struct OutflowBC <: AbstractBoundaryCondition end
 # =========================================================================
 
 """
-    apply_boundary_conditions!(pg::ParticleGrid, rhos_buffer, ts, eq, t)
+    apply_boundary_conditions!(pg::ParticleGrid, rhos_buffer, ts, eq, t, reference = pg.rhos)
 
 Iterates over the active boundary condition map stored in the grid's geometry configuration and dispatches the corresponding strategy for each registered domain tag.
 The map itself (a `Dict`) stays on the host; the conditions shipped with the package run as kernel
-launches, so they work on a grid built with `device_grid` too. A user-defined condition is any callable
-`(bc)(pg, rhos_buffer, tag, ts, eq, t)`.
+launches, so they work on a grid built with `device_grid` too. `reference` is the state array of the step start
+(the time stepper passes its copy), which the conditions that keep or fall back to the initial state of a boundary
+particle read ([`FixedDirichlet`](@ref), [`OutflowBC`](@ref)). A user-defined condition is any
+`AbstractBoundaryCondition` callable as `(bc)(pg, rhos_buffer, tag, ts, eq, t, reference)`; one with the older
+signature `(bc)(pg, rhos_buffer, tag, ts, eq, t)` is called with that.
 """
-function apply_boundary_conditions!(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{State{M, T}}, ts::TimeStepper, eq::HyperbolicPDE, t::Real) where {D, M, T}
+function apply_boundary_conditions!(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{State{M, T}}, ts::TimeStepper, eq::HyperbolicPDE, t::Real,
+                                    reference::AbstractVector{State{M, T}} = pg.rhos) where {D, M, T}
     for (tag, bc_functor) in pg.geometry.bc_map
-        bc_functor(pg, rhos_buffer, tag, ts, eq, t)
+        bc_functor(pg, rhos_buffer, tag, ts, eq, t, reference)
     end
     return nothing
 end
+
+# A condition that does not read the reference state keeps the six-argument form
+(bc::AbstractBoundaryCondition)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t, reference) = bc(pg, rhos_buffer, tag, ts, eq, t)
 
 # =========================================================================
 # CONCRETE BOUNDARY CONDITIONS
@@ -56,13 +63,15 @@ end
     (::FixedDirichlet)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t)
 
 Enforces a static Dirichlet condition upon boundary particles. 
-- Iterates over the grid and resets the state of any particle matching the specified boundary tag to the state stored in `pg.rhos` at the start of the step. Nothing else writes the state of a boundary
+- Iterates over the grid and resets the state of any particle matching the specified boundary tag to the state stored in `reference` (the state array at the start of the step; `pg.rhos` in the six-argument form). Nothing else writes the state of a boundary
 particle (the stage predictor keeps it), so that is its initial state unless the user changes `pg.rhos`.
 """
-function (::FixedDirichlet)(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{State{M, T}}, tag::Int, ts, eq::HyperbolicPDE, t::Real) where {D, M, T}
-    foreach_particle(_dirichlet_body!, get_backend(), pg.meta.N, (rhos_buffer, pg.rhos, pg.core.tags, pg.core.is_boundary, tag))
+function (::FixedDirichlet)(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{State{M, T}}, tag::Int, ts, eq::HyperbolicPDE, t::Real,
+                            reference::AbstractVector{State{M, T}}) where {D, M, T}
+    foreach_particle(_dirichlet_body!, get_backend(), pg.meta.N, (rhos_buffer, reference, pg.core.tags, pg.core.is_boundary, tag))
     return nothing
 end
+(bc::FixedDirichlet)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq::HyperbolicPDE, t::Real) = bc(pg, rhos_buffer, tag, ts, eq, t, pg.rhos)
 
 # Kernel body (see Backend.jl): a tagged boundary particle keeps its initial state.
 @inline function _dirichlet_body!(i, buf, rhos, tags, is_boundary, tag)
@@ -77,9 +86,10 @@ end
 Enforces a zero-gradient outflow boundary condition using a multi-pass nearest-donor algorithm.
 - Initiates all active interior particles as valid state donors, and marks boundary particles matching the specific tag as requiring resolution.
 - Executes up to 5 symmetrical passes outward, dynamically locating the nearest resolved neighbor using squared distances and copying its state to the target particle.
-- Safely falls back to the state in `pg.rhos` at the start of the step for any completely orphaned boundary particles that failed to resolve a donor.
+- Safely falls back to the state in `reference` (the state array at the start of the step; `pg.rhos` in the six-argument form) for any completely orphaned boundary particles that failed to resolve a donor.
 """
-function (::OutflowBC)(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{State{M, T}}, tag::Int, ts, eq::HyperbolicPDE, t::Real) where {D, M, T}
+function (::OutflowBC)(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{State{M, T}}, tag::Int, ts, eq::HyperbolicPDE, t::Real,
+                       reference::AbstractVector{State{M, T}}) where {D, M, T}
     N       = pg.meta.N
     nb      = pg.neighbor
     status  = pg.shared.int_buffer      # 1: donor (interior), 0: unresolved target, -1: other boundary;
@@ -93,9 +103,10 @@ function (::OutflowBC)(pg::ParticleGrid{D, M, T}, rhos_buffer::AbstractVector{St
         any(==(0), view(status, 1:N)) || break
     end
 
-    foreach_particle(_outflow_fallback!, backend, N, (rhos_buffer, pg.rhos, status))
+    foreach_particle(_outflow_fallback!, backend, N, (rhos_buffer, reference, status))
     return nothing
 end
+(bc::OutflowBC)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq::HyperbolicPDE, t::Real) = bc(pg, rhos_buffer, tag, ts, eq, t, pg.rhos)
 
 # Kernel bodies of the outflow donor search (see Backend.jl).
 @inline function _outflow_init!(i, status, tags, is_boundary, tag)

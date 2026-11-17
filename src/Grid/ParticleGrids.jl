@@ -401,8 +401,10 @@ first-derivative weights of the divergence fit at particle `i` (degree `_diverge
   or speeds do not. `Inf` (an empty grid, or no restricting particle) means that nothing limits the step: a driver
   that caps it to the end time jumps there in one step, which is right for a field at rest and wrong after a blow-up;
   check the states (HyperCloud's driver stops on non-finite states).
+- `U = pg.rhos`: the state array whose speeds enter (a time stepper advancing a separate array passes it).
 """
-@inline function get_time_step(pg::ParticleGrid{D, M, T}, eq::HyperbolicPDE, main_grad; cached_weights::Bool = true) where {D, M, T}
+@inline function get_time_step(pg::ParticleGrid{D, M, T}, eq::HyperbolicPDE, main_grad; cached_weights::Bool = true,
+                               U::AbstractVector{State{M, T}} = pg.rhos) where {D, M, T}
     # 1. Graceful exit for empty grids
     if pg.meta.N == 0
         return T(Inf)
@@ -422,11 +424,11 @@ first-derivative weights of the divergence fit at particle `i` (degree `_diverge
         degree = _divergence_degree(main_grad)
         invL   = one(T) / minimum(pg.meta.dx)
         foreach_particle(_cfl_body!, get_backend(), pg.meta.N,
-            (dt_buffer, pg.core.is_boundary, nb.ranges, nb.indices, pg.rhos, eq, degree, _cfl_degree_of(main_grad), Val(D),
+            (dt_buffer, pg.core.is_boundary, nb.ranges, nb.indices, U, eq, degree, _cfl_degree_of(main_grad), Val(D),
              get_distances(pg), get_weights(pg), invL, floatmin(T), one(T) / D))
     else
         foreach_particle(_cfl_weights_body!, get_backend(), pg.meta.N,
-            (dt_buffer, pg.core.is_boundary, nb.ranges, nb.indices, pg.rhos, eq, sw, Val(D), floatmin(T), one(T) / D))
+            (dt_buffer, pg.core.is_boundary, nb.ranges, nb.indices, U, eq, sw, Val(D), floatmin(T), one(T) / D))
     end
 
     # 2. Provide init=T(Inf) to prevent any future reduction errors
