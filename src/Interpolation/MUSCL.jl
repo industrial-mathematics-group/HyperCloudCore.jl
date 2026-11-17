@@ -484,7 +484,8 @@ end
     degree     = Val(max(1, MAX_ORDER - 1))   # reconstruction degree; matches B_LEN of the cached gradients
     acc        = zero(State{M, T})
     pairwise   = _pairwise_dissipation(eq) && !(how isa BufferedFlux)
-    vol        = pg.core.volumes
+    vol        = _frame_volumes(eq, pg)
+    acc_w      = zero(T)                      # Σ_j c_ij ⋅ (w_ij − w_i): the particle's volume rate (Lagrangian frame)
     isb        = pg.core.is_boundary
     ranges     = pg.neighbor.ranges
     dw         = muscl.dweights
@@ -516,7 +517,12 @@ end
         F_num   = muscl.flux(f_L, f_R, F_L, F_R, eq)
         nc_jump = evaluate_nc_jump(eq, f_L, f_R, dist_k)
 
-        acc += _consume(how, ib, global_idx, w_k, F_num - F_i + nc_jump + ale_volume_term(eq, f_i, fij, fji))
+        dwv = _frame_dw(eq, f_i, fij, fji)                                   # w_ij − w_i (zero outside the Lagrangian frame)
+        # the volume term (w_ij − w_i) ⊗ U_i of the point-value form; a frame that tracks the volume rate carries the
+        # volume change in the stage volumes instead (content form) and gets none
+        vterm = _tracks_volume(eq) ? zero(Flux{D, M, T}) : Flux{D, M, T}(ntuple(d -> dwv[d] * f_i, Val(D)))
+        acc += _consume(how, ib, global_idx, w_k, F_num - F_i + nc_jump + vterm)
+        acc_w += sum(w_k .* dwv)
         if pairwise && !(_aligned_dissipation(muscl.flux) && below) && !isb[j_idx] && vol[i] > zero(T)
             # The dissipation of the pair with the antisymmetrised face vector ½(V_i c_ij − V_j c_ji) (its volume-weighted
             # coefficient is opposite on the two sides: the dissipation conserves Σ V U), the central part with the
@@ -536,6 +542,7 @@ end
             acc -= (T(0.5) * sum(s_ij .* e_k)) * (fji - fij)
         end
     end
+    _store_volume_rate!(eq, i, acc_w)
     return acc
 end
 

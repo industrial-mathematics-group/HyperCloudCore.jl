@@ -110,10 +110,16 @@ independent of the resolution and the shock did not converge to its position (So
 EPD2: +0.1–0.5 % of the mass by t = 0.2, the shock 0.011–0.017 too far at every N; the less dissipative the flux,
 the larger the gain). See the moving-grid docs for the measurements.
 """
-struct LagrangianFrame{D, M, T, EQ <: HyperbolicPDE{D, M, T}} <: HyperbolicPDE{D, M, T}
+struct LagrangianFrame{D, M, T, EQ <: HyperbolicPDE{D, M, T}, KV, VV} <: HyperbolicPDE{D, M, T}
     eq::EQ
     alpha::T
+    K_V::KV      # where the scheme writes the particle's volume rate `V_i div w` (`nothing`: not tracked)
+    V::VV        # the stage volumes it multiplies with and antisymmetrises against (`nothing`: the grid's)
 end
+LagrangianFrame(eq::HyperbolicPDE{D, M, T}, alpha::Real) where {D, M, T} =
+    LagrangianFrame{D, M, T, typeof(eq), Nothing, Nothing}(eq, T(alpha), nothing, nothing)
+LagrangianFrame(eq::HyperbolicPDE{D, M, T}, alpha::Real, K_V, V) where {D, M, T} =
+    LagrangianFrame{D, M, T, typeof(eq), typeof(K_V), typeof(V)}(eq, T(alpha), K_V, V)
 
 "The frame's velocity at the state `U`: `α fluid_velocity(eq, U)`."
 @inline frame_velocity(fr::LagrangianFrame{D, M, T}, U::State{M, T}) where {D, M, T} = fr.alpha * fluid_velocity(fr.eq, U)
@@ -140,12 +146,36 @@ The term a scheme adds to the flux difference of the pair `(i, j)` on a moving g
 interface states and `w_i` the particle's own. Contracted with the divergence weights it gives `U_i div w`, the
 volume change of the particle's share, which turns the pointwise update into the conservative form.
 """
-@inline ale_volume_term(::HyperbolicPDE{D, M, T}, f_i::State{M, T}, f_ij::State{M, T}, f_ji::State{M, T}) where {D, M, T} =
-    zero(Flux{D, M, T})
-@inline function ale_volume_term(fr::LagrangianFrame{D, M, T}, f_i::State{M, T}, f_ij::State{M, T}, f_ji::State{M, T}) where {D, M, T}
-    dw = T(0.5) * (frame_velocity(fr, f_ij) + frame_velocity(fr, f_ji)) - frame_velocity(fr, f_i)
+@inline function ale_volume_term(eq::HyperbolicPDE{D, M, T}, f_i::State{M, T}, f_ij::State{M, T}, f_ji::State{M, T}) where {D, M, T}
+    dw = _frame_dw(eq, f_i, f_ij, f_ji)
     return Flux{D, M, T}(ntuple(d -> dw[d] * f_i, Val(D)))
 end
+# The interface velocity minus the particle's own, `w_ij − w_i` (zero for every frame but the Lagrangian one)
+@inline _frame_dw(::HyperbolicPDE{D, M, T}, f_i, f_ij, f_ji) where {D, M, T} = zero(Space{D, T})
+@inline _frame_dw(fr::LagrangianFrame{D, M, T}, f_i::State{M, T}, f_ij::State{M, T}, f_ji::State{M, T}) where {D, M, T} =
+    T(0.5) * (frame_velocity(fr, f_ij) + frame_velocity(fr, f_ji)) - frame_velocity(fr, f_i)
+
+# The scheme's own volume rate of particle `i`, `K_V[i] = V_i div w` with `div w = 2 Σ_j c_ij ⋅ (w_ij − w_i)` (the factor 2
+# of the midpoint convention, as for the divergence), written by MUSCL's pair loop into the frame's `K_V`; the stepper
+# integrates it alongside the positions and remaps the content onto the re-estimated volumes at the end of the step
+# (`_content_remap!`). The frames without arrays (the stand-alone constructor) track nothing.
+@inline _store_volume_rate!(::HyperbolicPDE, i, acc) = nothing
+@inline function _store_volume_rate!(fr::LagrangianFrame{D, M, T, EQ, KV, VV}, i, acc) where {D, M, T, EQ, KV <: AbstractArray, VV <: AbstractArray}
+    @inbounds fr.K_V[i] = 2 * acc * fr.V[i]
+    return nothing
+end
+# A frame that tracks the volume rate runs the stepper in content form: the stages carry `V U`, the volume change enters
+# through the stage volumes (`_stage_predictor!`), and the pair flux difference carries no volume term. The stand-alone
+# frame (no arrays) keeps the point-value form with the volume term in the right-hand side.
+@inline _tracks_volume(::HyperbolicPDE) = false
+@inline _tracks_volume(::LagrangianFrame{D, M, T, EQ, KV, VV}) where {D, M, T, EQ, KV <: AbstractArray, VV <: AbstractArray} = true
+# The volumes the pair-antisymmetric dissipation is weighted with: the stage volumes of a tracking frame, the grid's otherwise
+@inline _frame_volumes(::HyperbolicPDE, pg) = pg.core.volumes
+@inline _frame_volumes(fr::LagrangianFrame{D, M, T, EQ, KV, VV}, pg) where {D, M, T, EQ, KV, VV <: AbstractArray} = fr.V
+
+# Movers whose grid velocity is a function of the state (the Lagrangian frame applies)
+@inline _lagrangian_type(::GridMover) = false
+@inline _lagrangian_type(::Union{LagrangianMover, ScaledLagrangianMover}) = true
 
 # A frame whose pairs carry the numerical dissipation with the antisymmetrised face vector ½(V_i c_ij − V_j c_ji)
 # (MUSCL's `_flux_loop`): on a Lagrangian cloud the particles compress through a shock by the density ratio, the MLS
@@ -159,11 +189,11 @@ end
 # movers with a scheme that adds the volume term (`_conservative_ale`: MUSCL, set in MUSCL.jl), the frozen-velocity
 # ALE frame for every other mover and scheme (a prescribed smooth velocity has no product problem)
 @inline _conservative_ale(interp) = false
-@inline _moving_frame(interp, mover, eq, w) = ALEFrame(eq, w)
-@inline _moving_frame(interp, ::LagrangianMover, eq::HyperbolicPDE{D, M, T}, w) where {D, M, T} =
-    _conservative_ale(interp) ? LagrangianFrame(eq, one(T)) : ALEFrame(eq, w)
-@inline _moving_frame(interp, m::ScaledLagrangianMover, eq::HyperbolicPDE{D, M, T}, w) where {D, M, T} =
-    _conservative_ale(interp) ? LagrangianFrame(eq, T(m.alpha)) : ALEFrame(eq, w)
+@inline _moving_frame(interp, mover, eq, w, K_V, V) = ALEFrame(eq, w)
+@inline _moving_frame(interp, ::LagrangianMover, eq::HyperbolicPDE{D, M, T}, w, K_V, V) where {D, M, T} =
+    _conservative_ale(interp) ? LagrangianFrame(eq, one(T), K_V, V) : ALEFrame(eq, w)
+@inline _moving_frame(interp, m::ScaledLagrangianMover, eq::HyperbolicPDE{D, M, T}, w, K_V, V) where {D, M, T} =
+    _conservative_ale(interp) ? LagrangianFrame(eq, T(m.alpha), K_V, V) : ALEFrame(eq, w)
 
 # -------------------------------------------------------------------------
 # Geometry refresh with frozen topology

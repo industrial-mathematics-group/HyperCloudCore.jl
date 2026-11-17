@@ -154,6 +154,10 @@ is checked (no theoretical backing). `mood_substeps = false` restores that every
 - `rho_sub`, `substep_ratio`: the Euler substep MOOD checks and its step `Δt/C` per `Δt` (`0`: the
   stage candidates are checked; `rho_sub` is then never sized).
 - `x_n`, `x_cand`, `X_stages`, `K_X_stages`: positions and grid velocities (sized only when moving).
+- `v_n`, `v_cand`, `V_stages`, `K_V_stages`: the particle volumes the scheme's own volume rate implies (`V div w`,
+  written by the Lagrangian frame; sized only when moving). At the end of a step the content `V U` is remapped onto
+  the re-estimated volumes (`_content_remap!`), which makes the Lagrangian mass conservation exact up to the time
+  discretisation and the flux pair defect.
 - `int_buffer`, `work`: neighbour gather buffer and MOOD scratch.
 All of them are `Growable` buffers, sized by `update_size!` at the start of every step.
 """
@@ -161,7 +165,7 @@ struct GeneralRKTimeStepper{D, M, T, PDE <: HyperbolicPDE, G <: DivergenceInterp
                             EST <: Tuple{Vararg{AbstractExplicitSourceTerm}},
                             IST <: Tuple{Vararg{AbstractImplicitSourceTerm}},
                             VE <: Union{Nothing, VolumeEstimator}, S,
-                            GS <: Growable{State{M, T}}, GP <: Growable{Space{D, T}},
+                            GS <: Growable{State{M, T}}, GP <: Growable{Space{D, T}}, GT <: Growable{T},
                             IB <: InteractionBuffer{D, M, T}, WORK <: MOODWork,
                             BT <: IMEXButcherTableau{T}} <: TimeStepper
     pde::PDE
@@ -188,6 +192,11 @@ struct GeneralRKTimeStepper{D, M, T, PDE <: HyperbolicPDE, G <: DivergenceInterp
     X_stages::NTuple{S, GP}
     K_X_stages::NTuple{S, GP}
 
+    v_n::GT
+    v_cand::GT
+    V_stages::NTuple{S, GT}
+    K_V_stages::NTuple{S, GT}
+
     int_buffer::IB
     work::WORK
     num_stages::Int
@@ -213,16 +222,19 @@ struct GeneralRKTimeStepper{D, M, T, PDE <: HyperbolicPDE, G <: DivergenceInterp
         bt = static_tableau(tableau, Val(s))
         states    = () -> Growable{State{M, T}}(AT)
         positions = () -> Growable{Space{D, T}}(AT)
+        volumes   = () -> Growable{T}(AT)
         ib   = InteractionBuffer{D, M, T}(AT)
         work = MOODWork(AT)
         ratio = (mood_substeps && C > 0) ? T(1 / C) : zero(T)
-        new{D, M, T, typeof(pde), G, MO, EST, IST, VE, s, typeof(states()), typeof(positions()), typeof(ib), typeof(work), typeof(bt)}(
+        new{D, M, T, typeof(pde), G, MO, EST, IST, VE, s, typeof(states()), typeof(positions()), typeof(volumes()), typeof(ib), typeof(work), typeof(bt)}(
             pde, div_interp, mood, explicit_sources, implicit_sources, bt,
             reset_orders_per_stage, full_search_per_stage, volume_estimator, ratio,
             states(), states(), states(),
             ntuple(_ -> states(), s), ntuple(_ -> states(), s), ntuple(_ -> states(), s),
             positions(), positions(),
             ntuple(_ -> positions(), s), ntuple(_ -> positions(), s),
+            volumes(), volumes(),
+            ntuple(_ -> volumes(), s), ntuple(_ -> volumes(), s),
             ib, work, s
         )
     end
@@ -341,9 +353,13 @@ function update_size!(ts::GeneralRKTimeStepper, N::Int, M_neighbors::Int, moving
     if moving
         ensure_capacity!(ts.x_n, N)
         ensure_capacity!(ts.x_cand, N)
+        ensure_capacity!(ts.v_n, N)
+        ensure_capacity!(ts.v_cand, N)
         for i in 1:ts.num_stages
             ensure_capacity!(ts.X_stages[i], N)
             ensure_capacity!(ts.K_X_stages[i], N)
+            ensure_capacity!(ts.V_stages[i], N)
+            ensure_capacity!(ts.K_V_stages[i], N)
         end
     end
     uses_slot_buffers(ts.divergence_interpolator) && update_size!(ts.int_buffer, M_neighbors)
@@ -357,15 +373,19 @@ update_size!(ts::GeneralRKTimeStepper, N::Int, M_neighbors::Int) = update_size!(
 # =========================================================================
 
 """
-    compute_explicit_rhs!(ts, eq, pg, K_E, K_X, Y, t, full)
+    compute_explicit_rhs!(ts, eq, pg, K_E, K_X, K_V, V_k, Y, t, full)
 
 Scheme pre-pass (cached gradients) and flux pass at the CURRENT grid geometry:
-`K_E = -div(F − w_i ρ) + S_expl` (the PDE wrapped in an `ALEFrame` with the particle's own grid
-velocity), and `K_X = w` when the grid moves. Both passes read neighbour states straight from `Y`.
+`K_E = -div(F − w ρ) + S_expl` (the PDE wrapped in the moving frame, `_moving_frame`), `K_X = w` when the grid
+moves, and `K_V = V div w` (the volume rate the Lagrangian frame writes for the stage volumes `V_k`). The passes
+read neighbour states straight from `Y`.
 `full = true` covers all interior particles; otherwise gradients are recomputed on `work.changed`
 and fluxes on `work.dirty`.
 """
-function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K_X, Y, t, full::Bool) where {D, M, T}
+# The signature up to 0.9.1 (the volume buffers of the first stage; untouched on a static grid)
+compute_explicit_rhs!(ts::GeneralRKTimeStepper, eq, pg, K_E, K_X, Y, t, full::Bool) =
+    compute_explicit_rhs!(ts, eq, pg, K_E, K_X, ts.K_V_stages[1], ts.V_stages[1], Y, t, full)
+function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K_X, K_V, V_k, Y, t, full::Bool) where {D, M, T}
     N       = pg.meta.N
     interp  = ts.divergence_interpolator
     moving  = _is_moving(pg)
@@ -376,8 +396,8 @@ function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K
     foreach_particle(_rhs_gather!, backend, N,
         (Y, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, pg, ts.work.changed, full))
     foreach_particle(_rhs_flux!, backend, N,
-        (eq, Y, K_E, K_X, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, pg.mover, pg,
-         ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T})))
+        (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, pg.mover, pg,
+         ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T})))   # (20 arguments)
     return nothing
 end
 
@@ -395,12 +415,12 @@ end
     return nothing
 end
 
-@inline function _rhs_flux!(p, eq, Y, K_E, K_X, is_boundary, nb_slices, ib, interp, strategy, mover, pg, sources,
+@inline function _rhs_flux!(p, eq, Y, K_E, K_X, K_V, V_k, is_boundary, nb_slices, ib, interp, strategy, mover, pg, sources,
                             flux_mask, full, moving, t, zero_state, zero_space)
     if is_boundary[p]
         if full
             K_E[p] = zero_state
-            moving && (K_X[p] = zero_space)
+            moving && (K_X[p] = zero_space; K_V[p] = zero(eltype(K_V)))
         end
         return nothing
     end
@@ -409,7 +429,8 @@ end
     if moving
         w      = grid_velocity(mover, eq, p, fi, pg, t)
         K_X[p] = w
-        div_F  = interp(_moving_frame(interp, mover, eq, w), p, fi, nb, pg, Y, ib, strategy)   # F − w ρ in the moving frame
+        K_V[p] = zero(eltype(K_V))                  # (the Lagrangian frame overwrites it with V div w)
+        div_F  = interp(_moving_frame(interp, mover, eq, w, K_V, V_k), p, fi, nb, pg, Y, ib, strategy)   # F − w ρ in the moving frame
     else
         div_F  = interp(eq, p, fi, nb, pg, Y, ib, strategy)
     end
@@ -434,12 +455,13 @@ function form_candidate!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt::
     is_final = i > s
     target   = is_final ? ts.rho_cand : ts.Y_stages[i]
     x_target = is_final ? ts.x_cand   : ts.X_stages[i]
+    v_target = is_final ? ts.v_cand   : ts.V_stages[i]
     t_i      = is_final ? time + dt : time + bt.c_t[i] * dt
     n_prev   = is_final ? s : i - 1
 
     foreach_particle(_stage_predictor!, backend, N,
-        (target, x_target, ts.rho_n, ts.x_n, ts.K_E_stages, ts.K_I_stages, ts.K_X_stages, pg.rhos,
-         pg.core.is_boundary, bt, i, n_prev, is_final, dt, moving, zero(T), zero(Space{D, T})))
+        (target, (x_target, v_target), ts.rho_n, (ts.x_n, ts.v_n), ts.K_E_stages, ts.K_I_stages, (ts.K_X_stages, ts.K_V_stages, ts.V_stages),
+         pg.rhos, pg.core.is_boundary, bt, i, n_prev, is_final, dt, moving, _content_form(ts, pg), zero(T), zero(Space{D, T})))
 
     if !is_final
         pre_solve_updates!(ts.implicit_sources, parent(target), pg, t_i)
@@ -459,26 +481,50 @@ function form_candidate!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt::
 end
 
 # Kernel bodies of the stage assembly (see Backend.jl).
-@inline function _stage_predictor!(p, target, x_target, U_n, x_n, K_E, K_I, K_X, rhos, is_boundary, bt, i, n_prev,
-                                   is_final, dt, moving, zero_T, zero_space)
+# `content`: the stages carry the content V U of an interior particle (a Lagrangian frame tracking its volume rate): the
+# stage state is (V_n U_n + Δt Σ a_j V_j K_j) / V_i with the stage volumes V_j of the earlier stages and V_i of this one,
+# so that Σ V U is conserved exactly up to the pair defect of the fluxes (the point-value form, U with the volume term
+# −U div w and V evolved beside it, left a product-rule error of the two RK sequences at steep fronts).
+@inline function _stage_predictor!(p, target, xv_target, U_n, xv_n, K_E, K_I, K_XVV, rhos, is_boundary, bt, i, n_prev,
+                                   is_final, dt, moving, content, zero_T, zero_space)
+    x_target, v_target = xv_target          # positions and volumes move together (packed: 20 arguments at most)
+    x_n, v_n = xv_n
+    K_X, K_V, V_st = K_XVV
     if is_boundary[p]
         target[p] = rhos[p]
-        moving && (x_target[p] = x_n[p])
+        moving && (x_target[p] = x_n[p]; v_target[p] = v_n[p])
         return nothing
     end
-    Y = U_n[p]
     X = moving ? x_n[p] : zero_space
+    V = moving ? v_n[p] : zero_T
+    Y = content ? V * U_n[p] : U_n[p]       # the content, or the point value
     for j in 1:n_prev
         a_t = is_final ? bt.b_t[j] : bt.a_t[i, j]
         a   = is_final ? bt.b[j]   : bt.a[i, j]
+        Vj  = content ? (@inbounds V_st[j][p]) : one(zero_T)
         if a_t != zero_T
-            Y += (dt * a_t) * K_E[j][p]
-            moving && (X += (dt * a_t) * K_X[j][p])
+            Y += (dt * a_t * Vj) * K_E[j][p]
+            moving && (X += (dt * a_t) * K_X[j][p]; V += (dt * a_t) * K_V[j][p])
         end
-        a != zero_T && (Y += (dt * a) * K_I[j][p])
+        a != zero_T && (Y += (dt * a * Vj) * K_I[j][p])
     end
-    target[p] = Y
-    moving && (x_target[p] = X)
+    target[p] = content ? Y / V : Y
+    moving && (x_target[p] = X; v_target[p] = V)
+    return nothing
+end
+
+# The stepper runs in content form on a moving interior cloud whose frame tracks the volume rate (the Lagrangian movers
+# with the MUSCL scheme); the volumes are remapped at the end of the step as well (`_content_remap!`)
+@inline _content_form(ts::GeneralRKTimeStepper, pg::ParticleGrid) =
+    !(pg.mover isa NoGridMover) && _conservative_ale(ts.divergence_interpolator) && _lagrangian_type(pg.mover)
+
+# Kernel body (see Backend.jl): the content `V U` of an interior particle, carried with the volumes the scheme's own
+# volume rate implies (`v_ev`), is put onto the re-estimated volume `V`
+@inline function _content_remap!(p, rhos, v_ev, V, is_boundary)
+    @inbounds begin
+        (is_boundary[p] || !(V[p] > 0)) && return nothing
+        rhos[p] = rhos[p] * (v_ev[p] / V[p])
+    end
     return nothing
 end
 
@@ -533,7 +579,7 @@ function mood_checkpoint!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt:
 
         copyto!(parent(work.dirty), 1, parent(work.changed), 1, N)
         expand_mask!(parent(work.dirty), parent(work.scratch), pg, reach)
-        compute_explicit_rhs!(ts, eq, pg, ts.K_E_stages[i - 1], ts.K_X_stages[i - 1], Y_prev, t_prev, false)
+        compute_explicit_rhs!(ts, eq, pg, ts.K_E_stages[i - 1], ts.K_X_stages[i - 1], ts.K_V_stages[i - 1], ts.V_stages[i - 1], Y_prev, t_prev, false)
         full = false
     end
 end
@@ -564,17 +610,23 @@ function form_substep!(ts::GeneralRKTimeStepper{D, M, T}, pg, i::Int, dt::T) whe
     # Implicit sources reach an SSP (explicit) tableau only as explicitly applied sources: their K_I is part of the RHS.
     with_KI = !isempty(ts.implicit_sources)
     foreach_particle(_substep_body!, get_backend(), pg.meta.N,
-        (ts.rho_sub, ts.Y_stages[i - 1], ts.K_E_stages[i - 1], ts.K_I_stages[i - 1], pg.core.is_boundary,
-         ts.substep_ratio * dt, with_KI))
+        (ts.rho_sub, ts.Y_stages[i - 1], ts.K_E_stages[i - 1], ts.K_I_stages[i - 1], (ts.K_V_stages[i - 1], ts.V_stages[i - 1]),
+         pg.core.is_boundary, ts.substep_ratio * dt, with_KI, _content_form(ts, pg)))
     return ts.rho_sub
 end
 
-# Kernel body (see Backend.jl) of the Euler substep.
-@inline function _substep_body!(p, W, Y, K, KI, is_boundary, h, with_KI)
+# In content form the Euler substep is (V Y + h V K) / (V + h K_V): the compression of the substep included
+@inline function _substep_body!(p, W, Y, K, KI, KVV, is_boundary, h, with_KI, content)
     @inbounds if is_boundary[p]
         W[p] = Y[p]
     else
-        W[p] = with_KI ? Y[p] + h * (K[p] + KI[p]) : Y[p] + h * K[p]
+        dU = with_KI ? K[p] + KI[p] : K[p]
+        if content
+            K_V, V = KVV
+            W[p] = (V[p] * Y[p] + h * V[p] * dU) / (V[p] + h * K_V[p])
+        else
+            W[p] = Y[p] + h * dU
+        end
     end
     return nothing
 end
@@ -605,6 +657,7 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
 
     copyto!(parent(ts.rho_n), 1, pg.rhos, 1, N)
     moving && copyto!(parent(ts.x_n), 1, pg.core.positions, 1, N)
+    moving && copyto!(parent(ts.v_n), 1, pg.core.volumes, 1, N)
 
     max_order = _extract_order(interp)
     fill!(view(orders, 1:N), max_order)
@@ -619,7 +672,7 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
             moving && _apply_stage_geometry!(ts, pg, ts.X_stages[i], time, time + ts.tableau.c_t[i] * dt)
         end
         ts.reset_orders_per_stage && fill!(view(orders, 1:N), max_order)
-        compute_explicit_rhs!(ts, eq, pg, ts.K_E_stages[i], ts.K_X_stages[i], ts.Y_stages[i],
+        compute_explicit_rhs!(ts, eq, pg, ts.K_E_stages[i], ts.K_X_stages[i], ts.K_V_stages[i], ts.V_stages[i], ts.Y_stages[i],
                               time + ts.tableau.c_t[i] * dt, true)
     end
 
@@ -637,10 +690,68 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
         place_ghosts!(pg, parent(ts.x_cand), time, time + dt)
         copyto!(pg.core.positions, 1, parent(ts.x_cand), 1, N)
         pg.neighbor(pg)                                    # full search + periodic wrap for the next step
-        # Volumes are re-estimated when the interior moves; a static cloud with moving pieces keeps the volumes
-        # the remaps of `sweep_boundaries!` maintain (the region's volume changes with the pieces)
-        (ts.volume_estimator === nothing || pg.mover isa NoGridMover) || update_volumes!(pg, ts.volume_estimator)
+        if !(pg.mover isa NoGridMover)
+            _check_cloud_quality(pg, time + dt)
+            # Volumes are re-estimated when the interior moves (a static cloud with moving pieces keeps the volumes the
+            # remaps of `sweep_boundaries!` maintain). With the Lagrangian frame the content V U is then remapped onto
+            # the re-estimated volumes from the volumes the scheme's own volume rate implies (`v_cand`): the mass
+            # equation's right-hand side sums to exactly −Σ U K_V against those (its only pair term, the dissipation,
+            # is antisymmetric), so Σ V U is conserved up to the time discretisation of V U and the pair defect of the
+            # momentum and energy fluxes. Without an estimator the implied volumes are the volumes.
+            remap = _content_form(ts, pg)
+            if ts.volume_estimator === nothing
+                remap && copyto!(pg.core.volumes, 1, parent(ts.v_cand), 1, N)
+            else
+                update_volumes!(pg, ts.volume_estimator)
+                remap && foreach_particle(_content_remap!, get_backend(), N, (pg.rhos, ts.v_cand, pg.core.volumes, pg.core.is_boundary))
+            end
+        end
         has_moving_pieces(pg.geometry) && sweep_boundaries!(pg, time, time + dt, max_order)
+    end
+    return nothing
+end
+
+# A moving interior cloud that the fixed stencil radius can no longer describe: interior particles closer to each other
+# than a tenth of the spacing (the MLS derivative weight of a nearly coincident neighbour vanishes with the distance, so the
+# pair feels no dissipation, crosses, and its states diverge), or interior particles without any neighbour (a rarefaction
+# stretched the cloud beyond R). Both happened on the Woodward-Colella blast with LagrangianMover within 300 steps (pairs
+# 0.004 dx apart, gaps of 70 dx): the volumes lost their meaning and the run reported +78 % of mass without failing.
+# Checked after the neighbour search of every step; reported once per session.
+const _WARNED_CLOUD = Ref(false)
+function _check_cloud_quality(pg::ParticleGrid{D, M, T}, t) where {D, M, T}
+    _WARNED_CLOUD[] && return nothing
+    N = pg.meta.N
+    N == 0 && return nothing
+    buf = pg.shared.float_buffer
+    foreach_particle(_closest_neighbour!, get_backend(), N,
+                     (buf, pg.core.is_boundary, pg.neighbor.ranges, pg.neighbor.distances, T(Inf), T(-1)))
+    dmin   = minimum(view(buf, 1:N); init = T(Inf))
+    lonely = count(==(T(-1)), view(buf, 1:N))
+    h = minimum(pg.meta.dx)
+    (dmin < T(0.1) * h || lonely > 0) || return nothing
+    _WARNED_CLOUD[] = true
+    @warn "moving grid at t = $t: the cloud is collapsing or stretching beyond what the stencil radius resolves (closest " *
+          "interior pair $(round(dmin / h; sigdigits = 2)) spacings apart, $lonely interior particle(s) without a neighbour). " *
+          "Nearly coincident particles feel no mutual dissipation (their MLS weights vanish with the distance), cross, and " *
+          "their states diverge; particles without neighbours are not updated; the volumes and the discrete mass lose their " *
+          "meaning. Use particle management (ParticleAdaptivity: merging and insertion between steps) and/or a " *
+          "ScaledLagrangianMover. Reported once."
+    return nothing
+end
+
+# Kernel body (see Backend.jl): the distance to the closest neighbour of an interior particle, `none` if it has none,
+# `skip` for boundary particles
+@inline function _closest_neighbour!(i, out, isb, ranges, distances, skip, none)
+    @inbounds begin
+        if isb[i]
+            out[i] = skip
+            return nothing
+        end
+        d = skip
+        for k in ranges[i]
+            d = min(d, sqrt(sum(abs2, distances[k])))
+        end
+        out[i] = isempty(ranges[i]) ? none : d
     end
     return nothing
 end
