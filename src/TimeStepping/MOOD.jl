@@ -377,27 +377,38 @@ function detect_and_drop!(
     rho_prev::AbstractVector, rho_cand::AbstractVector, full::Bool; eq = nothing
 ) where {D, M, T}
     mood.criterion isa NoMOOD && return false
+    _mood_reset!(work, pg.meta.N)
+    _mood_flag_pass!(mood, work, interp, pg, rho_prev, rho_cand, full, eq)
+    return _mood_drop_pass!(mood, work, pg)
+end
 
-    N           = pg.meta.N
-    nb_slices   = pg.neighbor.ranges
-    is_boundary = pg.core.is_boundary
-    orders      = pg.core.particle_orders
-    triggered, changed, dirty, snapshot = parent(work.triggered), parent(work.changed), parent(work.dirty), parent(work.snapshot)
-    triggered_step = parent(work.triggered_step)
+# The passes of `detect_and_drop!` on their own (the block pipeline runs the flag pass once per block, then one drop pass)
+function _mood_reset!(work::MOODWork, N::Int)
+    fill!(view(parent(work.triggered), 1:N), false)
+    fill!(view(parent(work.changed), 1:N), false)
+    return nothing
+end
 
-    fill!(view(triggered, 1:N), false)
-    fill!(view(changed, 1:N), false)
-
-    # 1. Candidate check (per-particle writes only); the global range feeds the plateau test of MOODu2
+# 1. Candidate check (per-particle writes only, accumulating into `triggered`); the global range feeds the plateau
+#    test of MOODu2
+function _mood_flag_pass!(mood::MOOD, work::MOODWork, interp::DivergenceInterpolator, pg::ParticleGrid,
+                          rho_prev::AbstractVector, rho_cand::AbstractVector, full::Bool, eq)
+    N = pg.meta.N
     range = _global_range(mood.criterion, rho_prev, N)
     foreach_particle(_mood_flag!, get_backend(), N,
-        (mood, interp, pg, rho_prev, rho_cand, nb_slices, is_boundary, dirty, triggered, full, eq, range))
+        (mood, interp, pg, rho_prev, rho_cand, pg.neighbor.ranges, pg.core.is_boundary, parent(work.dirty), parent(work.triggered),
+         full, eq, range))
+    return nothing
+end
 
-    # 2. Decrement. Particles already at order 1 are un-flagged so they don't force.
-    foreach_particle(_mood_drop!, get_backend(), N, (orders, triggered, changed, triggered_step))
+# 2. Decrement (particles already at order 1 are un-flagged so they don't force) and 3. forcing from a snapshot (no
+#    cascade). Returns whether any order changed.
+function _mood_drop_pass!(mood::MOOD, work::MOODWork, pg::ParticleGrid)
+    N      = pg.meta.N
+    orders = pg.core.particle_orders
+    triggered, changed, snapshot = parent(work.triggered), parent(work.changed), parent(work.snapshot)
+    foreach_particle(_mood_drop!, get_backend(), N, (orders, triggered, changed, parent(work.triggered_step)))
     any(view(changed, 1:N)) || return false
-
-    # 3. Forcing from a snapshot (no cascade)
     forces_neighbours(mood.strategy) || return true
     copyto!(snapshot, 1, orders, 1, N)
     force_neighbours!(mood.strategy, pg, triggered, snapshot, orders, changed)
