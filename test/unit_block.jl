@@ -574,4 +574,83 @@ end
         @test block_vs_full(bs2, view(pg_f2.rhos, 1:pg_f2.meta.N)) < 1e-13                  # (the fit kernel compiled for W differs by an ulp)
         @test isempty(ts_b2.wall_params)
     end
+
+    @testset "Reordering, adaptivity and moving pieces on blocks: the particle set changes for all blocks alike" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq_f = DiscreteTransport(Val(8), sym)
+        eq_b = DiscreteTransport(Val(2), sym)
+        # reordering: a jittered 2-D cloud, states tied to the particles, the particles moved (new Morton keys), reordered
+        N2 = 12
+        pg2 = ParticleGrid(get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = true), (1 / N2, 1 / N2),
+                           ExponentialWeightFunction(1.0, 2.5 / N2), 2; randomness = (0.3, 0.3), rng = Random.MersenneTwister(7))
+        eq2 = DiscreteTransport(Val(2), [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)])
+        bs2 = BlockState(eq2, pg2)
+        tagf(x, b) = State{2, Float64}(x[1] + 2x[2] + 0.1 * (2b - 1), x[1] + 2x[2] + 0.1 * 2b)
+        set_block_states!(tagf, bs2, pg2)
+        Nn = pg2.meta.N
+        x_old = copy(pg2.core.positions[1:Nn])
+        shift = SVector(0.37, 0.61)
+        for i in 1:Nn
+            pg2.core.positions[i] = mod.(pg2.core.positions[i] + shift, 1.0)
+        end
+        reorder!(pg2, bs2)
+        @test pg2.core.positions[1:Nn] != [mod.(x + shift, 1.0) for x in x_old]              # a real permutation
+        @test maximum(maximum(abs.(block_view(bs2, b)[i] - tagf(mod.(pg2.core.positions[i] - shift, 1.0), b))) for b in 1:2, i in 1:Nn) < 1e-12
+        pg2.neighbor(pg2)
+        # adaptivity: a compressing prescribed velocity opens a gap at 0 and clusters the particles at ±1
+        ad = ParticleAdaptivity(Float64)
+        mover = PrescribedMover((x, t) -> SVector(1.0 * sinpi(x[1])))
+        N = 60
+        ic(x, k) = 1 + 0.3 * sin(π * x + 0.4k)
+        pg_f = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), 8; mover = mover)
+        for i in 1:N
+            x = pg_f.core.positions[i][1]
+            pg_f.rhos[i] = State{8, Float64}(ntuple(k -> ic(x, k), 8))
+        end
+        pg_b = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), 2; mover = mover)
+        bs = BlockState(eq_b, pg_b)
+        set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg_b)
+        ts_f = GeneralRKTimeStepper(eq_f, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK2_SSP_Tableau(Float64))
+        ts_b = BlockTimeStepper(eq_b, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK2_SSP_Tableau(Float64))
+        dt = 0.2 * (2 / N) / 3.0
+        events = 0
+        for _ in 1:230                                                        # t = 0.5: the gap at 0 opens by e^(πt), the clusters at ±1 close
+            ts_f(eq_f, pg_f, 0.0, dt)
+            r_f = adapt_particles!(pg_f, ad, 2)
+            ts_b(eq_b, pg_b, bs, 0.0, dt)
+            r_b = adapt_particles!(pg_b, ad, 2, bs)
+            @test (r_f.inserted, r_f.removed) == (r_b.inserted, r_b.removed)
+            events += r_b.inserted + r_b.removed
+        end
+        @test events > 0
+        @test pg_b.meta.N == pg_f.meta.N && bs.N[] == pg_b.meta.N
+        @test view(pg_b.core.positions, 1:pg_b.meta.N) == view(pg_f.core.positions, 1:pg_f.meta.N)
+        @test block_vs_full(bs, view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-13
+        # moving pieces: a piston face sweeping a tube, both ends reflecting, the standard run bit for bit
+        tube() = intersect(Tagged(Cuboid((0.0,), (1.5,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((-0.5,))))
+        bcm() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(ReflectOp()), 2 => MirrorBC(ReflectOp()))
+        h = 0.025
+        gf = GeometricDomain(tube(); mins = (0.0,), maxs = (1.5,), bc_map = bcm())
+        gb = GeometricDomain(tube(); mins = (0.0,), maxs = (1.5,), bc_map = bcm())
+        pg_f = ParticleGrid(gf, (h,), ExponentialWeightFunction(1.0, 2.5h), 8)
+        pg_b = ParticleGrid(gb, (h,), ExponentialWeightFunction(1.0, 2.5h), 2)
+        icp(x, k) = 1 + 0.2 * (1 + 0.1k) * exp(-20 * (x - 0.5)^2)
+        for i in 1:pg_f.meta.N
+            x = pg_f.core.positions[i][1]
+            pg_f.rhos[i] = State{8, Float64}(ntuple(k -> icp(x, k), 8))
+        end
+        bs = BlockState(eq_b, pg_b)
+        set_block_states!((x, b) -> State{2, Float64}(icp(x[1], 2b - 1), icp(x[1], 2b)), bs, pg_b)
+        ts_f = GeneralRKTimeStepper(eq_f, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK2_SSP_Tableau(Float64))
+        ts_b = BlockTimeStepper(eq_b, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK2_SSP_Tableau(Float64))
+        N0 = pg_b.meta.N
+        dt = 0.3 * h / 2.0                                                    # the face moves 0.15 h per step
+        t = advance!((t, d) -> (ts_f(eq_f, pg_f, t, d); ts_b(eq_b, pg_b, bs, t, d)), 0.4, dt)
+        @test pg_b.meta.N == pg_f.meta.N && bs.N[] == pg_b.meta.N
+        @test pg_b.meta.N < N0                                                # the piston covered particles
+        @test view(pg_b.core.positions, 1:pg_b.meta.N) == view(pg_f.core.positions, 1:pg_f.meta.N)
+        @test block_vs_full(bs, view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-13
+        @test all(i -> pg_b.core.is_boundary[i] || pg_b.core.positions[i][1] < 1.0 - 0.5t + h, 1:pg_b.meta.N)
+        @test all(i -> all(isfinite, block_view(bs, 1)[i]), 1:pg_b.meta.N)
+    end
 end

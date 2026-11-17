@@ -39,7 +39,7 @@ end
 # PROXIMITY-OPTIMIZED SPATIAL REORDERING
 # =========================================================================
 """
-    (rd::ReorderData)(pg::ParticleGrid)
+    (rd::ReorderData)(pg::ParticleGrid; extra = ())
 
 Executes a proximity-optimized spatial reordering of the entire particle grid to drastically improve CPU cache locality and memory access patterns.
 
@@ -49,10 +49,11 @@ Executes a proximity-optimized spatial reordering of the entire particle grid to
 - Permutes the active range `1:N` of the positions, boundary flags, tags, orders, state vectors, curvatures, volumes and wall geometry
   (the buffers may be longer than `N` after growth), and bumps `pg.meta.geometry_version`.
 - Host only. The neighbour lists are stale afterwards: run `pg.neighbor(pg)` before the next step. Per-particle data
-  outside the grid, such as a stepper's `mood_flags`, keep the old order until they are next written.
+  outside the grid, such as a stepper's `mood_flags`, keep the old order until they are next written; `extra` are
+  further per-particle arrays (of length at least `N`) permuted along, e.g. the blocks of a block state.
 - 3-D keys have 10 bits per axis: beyond 1024 particles per axis, particles in the same key cell keep their order.
 """
-function (rd::ReorderData{D})(pg::ParticleGrid{D}) where {D}
+function (rd::ReorderData{D})(pg::ParticleGrid{D}; extra = ()) where {D}
     N = pg.meta.N
     if N <= 1; return nothing; end
     
@@ -94,6 +95,11 @@ function (rd::ReorderData{D})(pg::ParticleGrid{D}) where {D}
               pg.core.volumes, pg.core.normals, pg.core.wall_distances, pg.core.wall_curvatures)
         @assert length(x) >= N "per-particle buffer shorter than the particle count"
         v = view(parent(x), 1:N)
+        v .= v[perm]
+    end
+    for x in extra
+        length(x) >= N || throw(ArgumentError("an extra per-particle array of length $(length(x)) is shorter than the particle count $N"))
+        v = view(x, 1:N)
         v .= v[perm]
     end
     pg.meta.geometry_version += 1   # the neighbour lists and every cache of the old order are stale

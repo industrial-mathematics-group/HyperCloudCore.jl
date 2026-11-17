@@ -296,7 +296,7 @@ mood_inadmissible(ts::GeneralRKTimeStepper) = ts.work.inadmissible[]
 # `t` (the ghosts used to move from `t` by one step only and stay behind their piece for the rest of the run).
 # Moving pieces need a static interior: the volume estimators integrate the region at t = 0, so a grid mover's
 # re-estimated volumes would lose what the pieces uncovered.
-function _sync_boundaries!(pg::ParticleGrid{D, M, T}, t::T, max_order::Int) where {D, M, T}
+function _sync_boundaries!(pg::ParticleGrid{D, M, T}, t::T, max_order::Int; states = ()) where {D, M, T}
     pg.mover isa NoGridMover ||
         throw(ArgumentError("moving pieces need a static interior cloud (NoGridMover), got $(nameof(typeof(pg.mover))): " *
                             "the volume estimators integrate the region at t = 0"))
@@ -310,7 +310,7 @@ function _sync_boundaries!(pg::ParticleGrid{D, M, T}, t::T, max_order::Int) wher
         tk = k == n ? t : t0 + (t - t0) * T(k) / T(n)
         place_ghosts!(pg, pg.core.positions, pg.meta.boundary_time, tk)
         pg.neighbor(pg)
-        sweep_boundaries!(pg, pg.meta.sweep_time, tk, max_order)
+        sweep_boundaries!(pg, pg.meta.sweep_time, tk, max_order; states = states)
     end
     return nothing
 end

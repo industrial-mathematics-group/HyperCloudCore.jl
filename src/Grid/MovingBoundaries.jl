@@ -185,7 +185,7 @@ Requires valid neighbour lists. Returns the counts and the content change of the
 without moving pieces.
 """
 function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::Int;
-                           clearance::Real = 0.25, min_gap::Real = 0.5, samples_per_dx::Int = 2) where {D, M, T}
+                           clearance::Real = 0.25, min_gap::Real = 0.5, samples_per_dx::Int = 2, states = ()) where {D, M, T}
     nothing_done = (inserted = 0, removed = 0, mass_residual = zero(State{M, T}))
     geom = pg.geometry
     (has_moving_pieces(geom) && pg.meta.N > 0) || return nothing_done
@@ -196,8 +196,10 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
     mass0 = interior_mass(pg)
 
     on_host = parent(pg.rhos) isa Array
+    (on_host || isempty(states)) || throw(ArgumentError("sweep_boundaries!: extra state arrays are supported on host grids only"))
     hg = on_host ? pg : device_grid(Array, pg)
     N  = hg.meta.N
+    all_states = _state_list(hg, states)
     shape_t = at_time(geom.shape, t)
     dx  = minimum(hg.meta.dx)
     R   = hg.meta.R
@@ -225,7 +227,7 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
     ad      = ParticleAdaptivity(T; samples_per_dx = samples_per_dx)
     spacing = _event_spacing(hg)
     df      = State{M, T}[]                              # neighbour-slot scratch of the remaps, shared by the rounds
-    n_removed = _drop_empty!(hg, max_order)
+    n_removed = _drop_empty!(hg, max_order, all_states)
     n_inside, first_round = n_removed, true
     while true
         cand = _covered_particles(hg, geom, shape_t, posed, t, inbox, clear)
@@ -233,7 +235,7 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
         isempty(cand) && break
         pos = hg.core.positions
         sel = _spaced(hg, [pos[i] for i in cand], spacing)
-        _sweep_round!(hg, ad, [_AdaptEvent{D, T}(pos[cand[a]], [cand[a]], Space{D, T}[]) for a in sel], max_order, df)
+        _sweep_round!(hg, ad, [_AdaptEvent{D, T}(pos[cand[a]], [cand[a]], Space{D, T}[]) for a in sel], max_order, df, all_states)
         n_removed += length(sel)
     end
     # A piece that moves more than the clearance in one step covers particles before they are removed: their last
@@ -253,13 +255,13 @@ function sweep_boundaries!(pg::ParticleGrid{D, M, T}, t_old, t_new, max_order::I
         cand = _uncovered_points(hg, geom, shape_t, posed, boxes, gap, R + 2dx, t)
         isempty(cand) && break
         sel = _spaced(hg, cand, spacing)
-        _sweep_round!(hg, ad, [_AdaptEvent{D, T}(cand[a], Int[], [cand[a]]) for a in sel], max_order, df)
+        _sweep_round!(hg, ad, [_AdaptEvent{D, T}(cand[a], Int[], [cand[a]]) for a in sel], max_order, df, all_states)
         n_inserted += length(sel)
     end
 
     # 4. The ghosts of the static walls next to what the pieces uncovered (the initial band only covers the
     #    region at t = 0)
-    n_ghosts = _add_static_ghosts!(hg, geom, shape_t, t, boxes, gap, max_order)
+    n_ghosts = _add_static_ghosts!(hg, geom, shape_t, t, boxes, gap, max_order, all_states)
     n_ghosts > 0 && _refresh_static_ghosts!(hg, geom, t, inbox)
 
     if n_removed + n_inserted + n_ghosts == 0
@@ -308,7 +310,7 @@ function _check_periodic_pieces(hg::ParticleGrid, geom::GeometricDomain{GEO, D, 
 end
 
 # Interior particles whose volume the region pass took entirely (covered by a piece): removed without a remap
-function _drop_empty!(hg::ParticleGrid{D, M, T}, max_order::Int) where {D, M, T}
+function _drop_empty!(hg::ParticleGrid{D, M, T}, max_order::Int, states = _state_list(hg, ())) where {D, M, T}
     N, isb, V = hg.meta.N, hg.core.is_boundary, hg.core.volumes
     vmin = T(1e-12) * prod(hg.meta.dx)
     mask = hg.shared.bit_buffer
@@ -318,7 +320,7 @@ function _drop_empty!(hg::ParticleGrid{D, M, T}, max_order::Int) where {D, M, T}
         n += mask[i]
     end
     n == 0 && return 0
-    _apply_topology!(hg, mask, Space{D, T}[], State{M, T}[], T[], max_order)
+    _apply_topology!(hg, mask, Space{D, T}[], [State{M, T}[] for _ in states], T[], max_order; states = states)
     hg.neighbor(hg)
     return n
 end
@@ -413,7 +415,7 @@ end
 # sweep at once, on the old topology, gave each remap the shares of every particle removed in its box: in 2-D a
 # row of removals changed states by 0.2 and volumes by a factor up to 2.8 as far as 12 spacings from the face.)
 function _sweep_round!(hg::ParticleGrid{D, M, T}, ad, events::Vector{_AdaptEvent{D, T}}, max_order::Int,
-                       df::Vector{State{M, T}}) where {D, M, T}
+                       df::Vector{State{M, T}}, states = _state_list(hg, ())) where {D, M, T}
     N     = hg.meta.N
     N_new = N + sum(ev -> length(ev.added) - length(ev.removed), events)
     N_new > N && ensure_capacity!(hg, N_new)
@@ -424,12 +426,13 @@ function _sweep_round!(hg::ParticleGrid{D, M, T}, ad, events::Vector{_AdaptEvent
     for ev in events, r in ev.removed
         mask[r] = true
     end
-    new_pos, new_rho, new_vol = Space{D, T}[], State{M, T}[], T[]
+    new_pos, new_vol = Space{D, T}[], T[]
+    new_rho = [State{M, T}[] for _ in states]
     length(df) < length(hg.neighbor.indices) && resize!(df, length(hg.neighbor.indices))
     for ev in events
-        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask, point_values = true)
+        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask, point_values = true, states = states)
     end
-    _apply_topology!(hg, mask, new_pos, new_rho, new_vol, max_order)
+    _apply_topology!(hg, mask, new_pos, new_rho, new_vol, max_order; states = states)
     hg.neighbor(hg)
     return nothing
 end
@@ -439,13 +442,14 @@ end
 # within `R + dx` of an interior particle (the band of `get_points`) and at least `gap` from every particle. Their
 # state is that of the nearest ghost of the same tag (a constant Dirichlet band stays constant), their volume zero.
 # Returns the number added; the neighbour lists are searched again if any.
-function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, boxes, gap::T, max_order::Int) where {D, M, T}
+function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, boxes, gap::T, max_order::Int,
+                             states = _state_list(hg, ())) where {D, M, T}
     isb, tags = hg.core.is_boundary, hg.core.tags
     cutoff_sq = (hg.meta.R + maximum(hg.meta.dx))^2
     h_snap = minimum(hg.meta.dx) / 2
     L, Li = hg.domain.L_wrap, hg.domain.invL_wrap
     idx, dvec = Int[], Space{D, T}[]
-    xs, tg, us = Space{D, T}[], Int[], State{M, T}[]
+    xs, tg, us = Space{D, T}[], Int[], Int[]                  # (`us`: the donor index of the ghost's state)
     for b in boxes
         _sweep_lattice(hg, geom, b) do x
             _is_interior(geom, x, t) && return
@@ -461,7 +465,7 @@ function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, box
                 d2 < dany && (jany = idx[k]; dany = d2)
                 (isb[idx[k]] && tags[idx[k]] == tag && d2 < dbest) && (jbest = idx[k]; dbest = d2)
             end
-            push!(xs, x); push!(tg, tag); push!(us, hg.rhos[jbest != 0 ? jbest : jany])
+            push!(xs, x); push!(tg, tag); push!(us, jbest != 0 ? jbest : jany)
         end
     end
     isempty(xs) && return 0
@@ -471,6 +475,10 @@ function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, box
     ensure_particle_capacity!(hg.neighbor, N + n)
     ensure_capacity!(hg.neighbor, _slot_capacity(eltype(hg.neighbor.ranges), total_nb, max_nb, N + n))
     core = hg.core
+    for st in states
+        _grow_state!(st, N + n)
+    end
+    donors = [[st[us[a]] for a in 1:n] for st in states]          # (read before any write: a donor is never a new ghost)
     for a in 1:n
         p = N + a
         core.positions[p]       = xs[a]
@@ -479,7 +487,9 @@ function _add_static_ghosts!(hg::ParticleGrid{D, M, T}, geom, shape_t, t::T, box
         core.particle_orders[p] = max_order
         core.volumes[p]         = zero(T)
         core.normals[p], core.wall_distances[p], core.wall_curvatures[p] = _ghost_geometry_curv(geom, xs[a], t)  # (as generated ghosts)
-        hg.rhos[p]              = us[a]
+        for (s, st) in enumerate(states)
+            st[p] = donors[s][a]
+        end
         hg.curvatures[p]        = zero(State{M, T})
     end
     hg.meta.N       = N + n
