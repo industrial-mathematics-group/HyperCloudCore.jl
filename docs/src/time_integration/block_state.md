@@ -49,15 +49,31 @@ ts(eq, pg, bs, t, dt)
 f_b = block_view(bs, b)                            # the states of block b
 ```
 
-Scope of this first version: explicit tableaus, static grids, no MOOD, no source terms; the boundary
-conditions of the grid apply per block. Checked against the standard pipeline: a one-block Burgers run is
+## Source terms in two passes
+
+A source of a block equation needs the whole distribution of a particle (the moments) but updates every
+block on its own. The contract of [`AbstractBlockSource`](@ref) splits it accordingly: `block_reduce` turns
+the blocks of a particle into a small bits value of parameters (for a BGK model the moments and the
+exponential parameters of the Maxwellian, for the mixture the species' velocities and temperatures after
+the stage), stored per particle in a [`BlockSourceTerm`](@ref); `block_source` and `block_implicit_solve`
+then update one block from those parameters. The stepper runs the reduction once per stage and source
+(with `dt_coeff = Δt a_ii` for an implicit solve, `0` for an explicit evaluation) and the per-block pass
+after it. Implicit terms need an IMEX tableau; at its stages without an implicit diagonal they are
+evaluated explicitly, as in the standard stepper, and the right-hand side of a solved stage is
+``(U_{out} - U_{in}) / (\Delta t\, a_{ii})``. Several implicit terms are applied one after another (their
+increments add up).
+
+Scope of this version: static grids and no MOOD; the boundary conditions of the grid apply per block. Checked against the standard pipeline: a one-block Burgers run is
 bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
 state vector as a whole) and converges to the exact solution at second order, in 1-D and 2-D, with inflow
-and outflow conditions, on the Polyester and the KernelAbstractions CPU backends.
+and outflow conditions, on the Polyester and the KernelAbstractions CPU backends. With a source that needs
+the reduction (every component relaxing towards the particle's mean, the structure of the BGK collision)
+the block run agrees with the standard stepper and the equivalent `AbstractImplicitSourceTerm` to round-off
+(the stage states and implicit right-hand sides bit for bit, the flux pass to an ulp), with ARS222 (also in the
+stiff limit) and with an explicit tableau and source.
 
-What comes next, in this order: source terms in two passes (a reduction over the blocks per particle, e.g.
-the moments and the parameters of the Maxwellians, then the update per block), the MOOD admissibility check
+What comes next, in this order: the MOOD admissibility check
 as a reduction, moving frames (the frame velocity from the reduction), kinetic walls that read other blocks
 of the same ghost, adaptivity and reordering of all blocks together, and the velocity decomposition across
 devices (the only exchange per stage is the reduction).
@@ -73,5 +89,13 @@ BlockState
 block_view
 set_block_states!
 BlockTimeStepper
+AbstractBlockSource
+AbstractExplicitBlockSource
+AbstractImplicitBlockSource
+BlockSourceTerm
+reduction_type
+block_reduce
+block_source
+block_implicit_solve
 HyperCloudCore.get_time_step(::ParticleGrid{D, W, T}, ::HyperbolicPDE{D, W, T}, ::Any, ::BlockState{W, T}) where {D, W, T}
 ```

@@ -52,6 +52,74 @@ function (bc::OldStyleBC)(pg::ParticleGrid, rhos_buffer, tag::Int, ts, eq, t)
     return nothing
 end
 
+# A source that needs the reduction over the blocks: relaxation of every component towards the particle's mean over
+# all nb · W components, S_k = (m − f_k) / τ, which conserves the mean (so the implicit stage has the closed form
+# f_k = (f̃_k + λ m̃) / (1 + λ), λ = Δt a_ii / τ, exactly like the BGK collision). The block form and the standard form
+# sum the components in the same order, so the two pipelines are compared bit for bit.
+struct MeanRelaxation{T} <: AbstractImplicitBlockSource; tau::T; end
+struct ExplicitMeanRelaxation{T} <: AbstractExplicitBlockSource; tau::T; end
+const _MeanRelax = Union{MeanRelaxation, ExplicitMeanRelaxation}
+HyperCloudCore.reduction_type(::_MeanRelax) = Float64
+@inline function HyperCloudCore.block_reduce(st::_MeanRelax, p, Y, N, nb, pg, t, dt_coeff)
+    s, n = 0.0, 0
+    @inbounds for b in 1:nb
+        U = Y[(b - 1) * N + p]
+        for k in eachindex(U)
+            s += U[k]
+        end
+        n += length(U)
+    end
+    return s / n
+end
+@inline HyperCloudCore.block_source(st::_MeanRelax, U, b, m, p, pg, t) = (m .- U) ./ st.tau
+@inline function HyperCloudCore.block_implicit_solve(st::MeanRelaxation, U, b, m, dt_coeff, p, pg, t)
+    λ = dt_coeff / st.tau
+    return (U .+ λ * m) ./ (1 + λ)
+end
+struct MeanRelaxationFull{T} <: AbstractImplicitSourceTerm; tau::T; end
+struct ExplicitMeanRelaxationFull{T} <: AbstractExplicitSourceTerm; tau::T; end
+@inline function mean_full(U)
+    s = 0.0
+    @inbounds for k in eachindex(U)
+        s += U[k]
+    end
+    return s / length(U)
+end
+@inline HyperCloudCore.evaluate_source(st::Union{MeanRelaxationFull, ExplicitMeanRelaxationFull}, U, p::Int, pg, t::Real) = (mean_full(U) .- U) ./ st.tau
+@inline function HyperCloudCore.implicit_solve(st::MeanRelaxationFull, U, dt_coeff::Real, p::Int, pg, t::Real)
+    λ = dt_coeff / st.tau
+    return (U .+ λ * mean_full(U)) ./ (1 + λ)
+end
+
+"Both pipelines on the 8-velocity transport with the mean relaxation; returns (deviation, block state, grid)."
+function relaxation_runs(sources_block, sources_full, tableau; N = 50, tend = 0.4, backend = PolyesterBackend())
+    set_backend!(backend)
+    try
+        speeds = [(-1.5,), (-0.5,), (0.25,), (0.75,), (1.0,), (1.25,), (1.75,), (2.0,)]
+        eq_f = DiscreteTransport(Val(8), speeds)
+        eq_b = DiscreteTransport(Val(2), speeds)
+        ic(x, k) = 1 + 0.3 * sin(π * x + 0.4k)
+        pg_f = block_pg_1d(N, 8)
+        for i in 1:N
+            x = pg_f.core.positions[i][1]
+            pg_f.rhos[i] = State{8, Float64}(ntuple(k -> ic(x, k), 8))
+        end
+        pg_b = block_pg_1d(N, 2)
+        bs   = BlockState(eq_b, pg_b)
+        set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg_b)
+        interp_f = MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux())
+        interp_b = MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux())
+        ts_f = GeneralRKTimeStepper(eq_f, interp_f, MOOD(NoMOOD()), sources_full, tableau)
+        ts_b = BlockTimeStepper(eq_b, interp_b, sources_block, tableau)
+        dt = 0.3 * (2 / N) / 2.0
+        advance!((t, d) -> (ts_f(eq_f, pg_f, t, d); ts_b(eq_b, pg_b, bs, t, d)), tend, dt)
+        return block_vs_full(bs, view(pg_f.rhos, 1:N)), bs, pg_b
+    finally
+        set_backend!(PolyesterBackend())
+    end
+end
+
+
 @testset "Block pipeline" begin
     @testset "State arrays are passed explicitly: a separate array advances like pg.rhos, the BC reference" begin
         eq = Burgers()
@@ -232,7 +300,7 @@ end
         speeds = [(0.5,), (1.0,), (1.5,), (2.0,)]
         eq_b = DiscreteTransport(Val(2), speeds)
         interp = MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux())
-        @test_throws ArgumentError BlockTimeStepper(eq_b, interp, IMEX_ARS222_Tableau(Float64))     # explicit only
+        @test BlockTimeStepper(eq_b, interp, IMEX_ARS222_Tableau(Float64)) isa BlockTimeStepper        # an IMEX tableau without implicit sources is fine
         ts = BlockTimeStepper(eq_b, interp, RK2_SSP_Tableau(Float64))
         pgm = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (0.05,),
                            ExponentialWeightFunction(1.0, 0.125), 2; mover = LagrangianMover())
@@ -243,5 +311,48 @@ end
         @test_throws ArgumentError ts(eq_b, pg, BlockState(other, pg), 0.0, 0.01)                   # block count mismatch
         bs = BlockState(eq_b, pg)
         @test length(parent(bs.data)) >= 2 * pg.meta.N && bs.nb == 2
+    end
+
+    @testset "Block sources: the reduction over the blocks, implicit (IMEX) and explicit, bit-identical to the standard stepper" begin
+        # (the stage states and K_I are bit-identical; the flux pass compiled with another argument tuple differs by an
+        # ulp in K_E: fused multiply-adds in the MLS sums, not a formula difference)
+        # implicit, ARS222 (its first stage has a_11 = 0: the explicit evaluation path of an implicit source)
+        dev, bs, pg_b = relaxation_runs((BlockSourceTerm(MeanRelaxation(0.05)),), (MeanRelaxationFull(0.05),), IMEX_ARS222_Tableau(Float64))
+        @test dev < 1e-13
+        # stiff: τ ≪ Δt, the components collapse onto the mean (the closed-form solve is exact for any stiffness)
+        dev, bs, pg_b = relaxation_runs((BlockSourceTerm(MeanRelaxation(1e-4)),), (MeanRelaxationFull(1e-4),), IMEX_ARS222_Tableau(Float64))
+        @test dev < 1e-13
+        N = pg_b.meta.N
+        spread = maximum(1:N) do i
+            vals = [block_view(bs, b)[i][k] for b in 1:4, k in 1:2]
+            maximum(vals) - minimum(vals)
+        end
+        @test spread < 1e-3
+        # explicit source with an explicit tableau
+        dev, _, _ = relaxation_runs((BlockSourceTerm(ExplicitMeanRelaxation(0.1)),), (ExplicitMeanRelaxationFull(0.1),), RK2_SSP_Tableau(Float64))
+        @test dev < 1e-13
+        # an explicit and an implicit source together (IMEX)
+        dev, _, _ = relaxation_runs((BlockSourceTerm(ExplicitMeanRelaxation(0.2)), BlockSourceTerm(MeanRelaxation(0.05))),
+                                    (ExplicitMeanRelaxationFull(0.2), MeanRelaxationFull(0.05)), IMEX_ARS222_Tableau(Float64))
+        @test dev < 1e-13
+        # two implicit sources, applied one after another: the rates add up to the single source's (to the splitting error)
+        _, bs2, pg2 = relaxation_runs((BlockSourceTerm(MeanRelaxation(0.1)), BlockSourceTerm(MeanRelaxation(0.1))), (MeanRelaxationFull(0.05),),
+                                      IMEX_ARS222_Tableau(Float64))
+        _, bs1, _   = relaxation_runs((BlockSourceTerm(MeanRelaxation(0.05)),), (MeanRelaxationFull(0.05),), IMEX_ARS222_Tableau(Float64))
+        @test maximum(maximum(abs.(block_view(bs2, b)[i] - block_view(bs1, b)[i])) for b in 1:4, i in 1:pg2.meta.N) < 2e-3
+        # the KernelAbstractions CPU backend (the parameter array is a kernel argument)
+        dev_ka, _, _ = relaxation_runs((BlockSourceTerm(MeanRelaxation(0.05)),), (MeanRelaxationFull(0.05),), IMEX_ARS222_Tableau(Float64);
+                                       backend = KABackend(HyperCloudCore.KA.CPU()))
+        @test dev_ka < 1e-13
+        # scope
+        speeds = [(0.5,), (1.0,), (1.5,), (2.0,)]
+        eq_b = DiscreteTransport(Val(2), speeds)
+        interp = MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux())
+        @test_throws ArgumentError BlockTimeStepper(eq_b, interp, (BlockSourceTerm(MeanRelaxation(0.1)),), RK2_SSP_Tableau(Float64))
+        @test BlockTimeStepper(eq_b, interp, (BlockSourceTerm(ExplicitMeanRelaxation(0.1)),), RK2_SSP_Tableau(Float64)) isa BlockTimeStepper
+        struct VectorParams <: AbstractImplicitBlockSource end
+        HyperCloudCore.reduction_type(::VectorParams) = Vector{Float64}
+        @test_throws ArgumentError BlockSourceTerm(VectorParams())
+        @test_throws ErrorException HyperCloudCore.block_reduce(MeanRelaxation(1.0) isa MeanRelaxation ? VectorParams() : VectorParams(), 1, nothing, 1, 1, nothing, 0.0, 0.0)
     end
 end
