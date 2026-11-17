@@ -644,7 +644,7 @@ end
 function _block_apply_bcs!(ts::BlockTimeStepper{D, W, T}, eq, pg, stage::Growable, t, N::Int, nb::Int) where {D, W, T}
     inner = ts.inner
     for (tag, bc) in pg.geometry.bc_map
-        if bc isa MirrorBC && bc.op !== nothing && wall_reduction_type(bc.op, eq) !== nothing
+        if _is_block_wall(bc, eq)
             _block_mirror!(ts, bc, pg, stage, tag, eq, t, N, nb)
         else
             _block_bc_each!(bc, pg, stage, tag, inner, eq, t, N, nb)
@@ -666,13 +666,15 @@ function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg
     for b in 1:nb
         _launch_ghost_fit!(pg, _blk(stage, b, N), tag, BlockOf(eq, b), t, Val(Q), _WallOp(nothing), Val(true), Val(B); out = _blk(scratch, b, N))
     end
-    P = wall_reduction_type(bc.op, eq)
-    params = get!(ts.wall_params, tag) do
-        Growable{P}(typeof(parent(scratch)).name.wrapper)
-    end
-    _block_mirror_passes!(params, ts, bc, pg, stage, tag, eq, t, N, nb)
+    _block_mirror_passes!(_wall_params!(ts, bc, tag, eq), ts, bc, pg, stage, tag, eq, t, N, nb)
     return nothing
 end
+# The wall parameter array of a tag (a `Growable` of `wall_reduction_type`, on the stepper's storage), made on first use
+_wall_params!(ts::BlockTimeStepper, bc::MirrorBC, tag::Int, eq) = get!(ts.wall_params, tag) do
+    Growable{wall_reduction_type(bc.op, eq)}(typeof(parent(ts.ghost_scratch)).name.wrapper)
+end
+# Whether a condition runs in the pipeline's wall passes (a `MirrorBC` whose operator reduces over the blocks)
+_is_block_wall(bc, eq) = bc isa MirrorBC && bc.op !== nothing && wall_reduction_type(bc.op, eq) !== nothing
 # (a function barrier: the parameter array comes untyped out of `wall_params`)
 function _block_mirror_passes!(params::Growable, ts::BlockTimeStepper{D, W, T}, bc::MirrorBC, pg, stage::Growable, tag::Int, eq, t,
                                N::Int, nb::Int) where {D, W, T}

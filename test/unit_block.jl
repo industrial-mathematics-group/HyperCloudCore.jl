@@ -761,5 +761,20 @@ end
         advance!((t, d) -> ts(eq_b, pg, bs, t, d), 0.1, dt)
         @test all(i -> all(isfinite, block_view(bs, 2)[i]), 1:pg.meta.N)
         @test length(parent(ts.inner.rho_n)) == 4 * r.particles      # nothing grew
+        # with kinetic walls the mirrored scratch (block-major) and the wall parameters are reserved as well
+        bcw() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(ReflectOp()), 2 => MirrorBC(ReflectOp()))
+        pg = block_pg_1d(60, 2; bc = bcw())
+        bs = BlockState(eq_b, pg)
+        set_block_states!((x, b) -> State{2, Float64}(1 + 0.5 * exp(-30 * x[1]^2), 1.0 + 0.1b), bs, pg)
+        sc = interp()
+        ts = BlockTimeStepper(eq_b, sc, RK2_SSP_Tableau(Float64))
+        ew = memory_estimate(pg, ts, bs, sc)
+        @test sort(collect(keys(ts.wall_params))) == [1, 2]
+        @test ew.per_particle >= memory_estimate(pg, ts.inner, sc).per_particle + 2 * 4 * sizeof(State{2, Float64})
+        r = reserve!(pg, ts, bs, sc; limit = 2 * ew.bytes)
+        @test ts.ghost_scratch.fixed && all(g -> g.fixed, values(ts.wall_params))
+        advance!((t, d) -> ts(eq_b, pg, bs, t, d), 0.3, dt)
+        @test length(parent(ts.ghost_scratch)) == 4 * r.particles
+        @test all(i -> all(isfinite, block_view(bs, 3)[i]), 1:pg.meta.N)
     end
 end

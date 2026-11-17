@@ -119,7 +119,8 @@ the storage of its stage buffers), the kernels are those of the standard stepper
 initial conditions, the snapshots, the adaptivity and the sweep of moving pieces) copy blocks between the device and
 the host, the last two only when an event changes the particle set. [`memory_estimate`](@ref) and
 [`reserve!`](@ref) take the block stepper and the block state (`reserve!(pg, ts, bs, scheme; limit)`): the state
-arrays count `nb` elements per particle. Checked on the KernelAbstractions CPU backend (PoCL) and with CUDA.
+arrays count `nb` elements per particle, and with the kinetic walls of the grid the block-major scratch of the
+mirrored states and the wall parameters count too. Checked on the KernelAbstractions CPU backend (PoCL) and with CUDA.
 
 A state whose blocks are split over several devices exchanges, per stage, only the per-particle reductions: for
 that the sources give their reduction in the **additive form** of [`reduction_partial_type`](@ref),
