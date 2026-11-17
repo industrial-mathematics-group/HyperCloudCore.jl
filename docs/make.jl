@@ -54,6 +54,7 @@ makedocs(
             "Butcher Tableaus" => "time_integration/tableaus.md",
             "MOOD"             => "time_integration/mood.md",
             "Moving Grids"     => "time_integration/moving_grids.md",
+            "Block States"     => "time_integration/block_state.md",
         ],
         "Extending" => [
             "API Contracts"  => "extending/api.md",

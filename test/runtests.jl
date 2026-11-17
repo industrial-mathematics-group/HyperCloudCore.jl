@@ -69,7 +69,7 @@ const TEST_GROUPS = [
     "core"       => ["unit_core.jl"],
     "backends-a" => ["unit_backends.jl"],
     "backends-b" => ["unit_backends.jl"],
-    "schemes"    => ["unit_schemes.jl"],
+    "schemes"    => ["unit_schemes.jl", "unit_block.jl"],
     "pipeline"   => ["pipeline_tests.jl"],
 ]
 const TEST_GROUP = get(ENV, "HYPERCLOUDCORE_TEST_GROUP", "")

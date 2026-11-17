@@ -52,6 +52,7 @@ include("./Grid/ParticleGrids.jl")
 include("./TimeStepping/TimeSteppers.jl")
 
 include("./Interpolation/Interpolators.jl")
+include("./TimeStepping/BlockStepper.jl")
 
 include("./Builders/Builders.jl")
 include("DeviceAdapt.jl")
