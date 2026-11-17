@@ -36,7 +36,7 @@ Where $w$ jumps, as at a shock on a Lagrangian cloud, $w_i\cdot\nabla U$ is a no
    ```math
    \frac{\mathrm d U_i}{\mathrm d t} = -\nabla\cdot\big(F(U) - w(U)\, U\big)\Big|_{x_i} - U_i\, \nabla\cdot w\big|_{x_i} ,
    ```
-   which is $\mathrm d(V U)/\mathrm dt = -V \nabla\cdot(F - wU)$ with $\mathrm dV/\mathrm dt = V\nabla\cdot w$ through one and the same discrete divergence. MUSCL adds the term $(w_{ij} - w_i)\otimes U_i$ to every pair's flux difference ([`ale_volume_term`](@ref)), with the interface velocity $w_{ij} = \tfrac12(w(U_{ij}) + w(U_{ji}))$ of the reconstructed states.
+   which is $\mathrm d(V U)/\mathrm dt = -V \nabla\cdot(F - wU)$ with $\mathrm dV/\mathrm dt = V\nabla\cdot w$ through one and the same discrete divergence. MUSCL adds the term $(w_{ij} - w_i)\otimes U_i$ to every pair's flux difference ([`ale_volume_term`](@ref HyperCloudCore.ale_volume_term)), with the interface velocity $w_{ij} = \tfrac12(w(U_{ij}) + w(U_{ji}))$ of the reconstructed states.
 2. **Pair-antisymmetric dissipation.** Through a shock the Lagrangian particles compress by the density ratio, and the MLS divergence weights of the pairs across it are systematically non-antisymmetric ($V_i c_{ij} + V_j c_{ji} \neq 0$; on a jittered static cloud the asymmetry is random and averages out). In the Lagrangian frame the mass flux $\rho(u - w)$ vanishes, so the Rusanov dissipation of the density is the only pair term of the mass equation, and its asymmetry was the mass source. MUSCL therefore contracts the dissipative part $F^*_{ij} - \tfrac12(F_L + F_R)$ of every pair with the antisymmetrised face vector $\tfrac12(V_i c_{ij} - V_j c_{ji})$ (the partner's weight is its cached full-order one, found through the reverse neighbour slot; the central part keeps the consistent weight, so the order is unchanged). Pairs the aligned flux orients (either particle below full order) keep their LED weights, wall pairs and one-sided pairs their plain ones.
 
 Measured on the Euler Sod of HyperCloud (`euler_1d_sod`, jitter 0.2, $R = 5.5$, ARS222 MUSCL2 with the VK limiter, MLS volumes of degree 2, $t = 0.2$; the shock is at 0.3504):
@@ -102,4 +102,11 @@ The default of the four-argument `max_eigenvalue` is the safe bound $\max|\lambd
 Modules = [HyperCloudCore]
 Pages   = ["GridMovers.jl"]
 Private = false
+```
+
+The hooks of the Lagrangian frame that a scheme uses (not exported):
+
+```@docs
+HyperCloudCore.ale_volume_term
+HyperCloudCore.frame_velocity
 ```
