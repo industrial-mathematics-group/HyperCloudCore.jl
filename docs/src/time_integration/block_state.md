@@ -72,8 +72,9 @@ cross-block check (for a discrete-velocity model the positivity of the moments),
 order of every flagged particle; the previous stage's right-hand side is then recomputed on the affected
 particles for all blocks (the explicit sources reuse their parameters there) and the candidates are re-formed,
 until nothing is flagged. The Euler substeps of SSP tableaus, the forcing halos and the diagnostics
-(`mood_flags`, `mood_inadmissible`) are the same. `MOODu2` is not available yet: its curvature test reads the
-scheme's gradient cache, which holds the last block's gradients.
+(`mood_flags`, `mood_inadmissible`) are the same. `MOODu2`'s curvature test reads the scheme's gradient cache,
+which holds the last block's gradients, so the block's gradients at the previous stage are gathered before its
+flag pass (one pre-pass per block and checkpoint).
 
 ## Moving grids on blocks
 
@@ -110,7 +111,23 @@ inside the step (the ghosts placed at every stage, the sweep at the end with eve
 [`reorder!`](@ref)`(pg, bs)`. Checked: with a compressing prescribed mover and the adaptivity, with a piston
 sweeping a tube, the block runs reproduce the standard runs bit for bit, particle set included.
 
-Scope of this version: MOOD without `MOODu2`; host backends. Checked against the standard pipeline: a one-block Burgers run is
+## Devices and the velocity decomposition
+
+The block pipeline runs on any storage: the block state, the stepper's buffers, the parameter arrays of the sources
+and of the walls are `Growable`s of the `storage` array type, the kernels are those of the standard stepper, and
+the host-side passes (the initial conditions, the snapshots, the adaptivity and the sweep of moving pieces) copy
+blocks between the device and the host. Checked on the KernelAbstractions CPU backend (PoCL); the device runs
+themselves need a GPU.
+
+A state whose blocks are split over several devices exchanges, per stage, only the per-particle reductions: for
+that the sources give their reduction in the **additive form** of [`reduction_partial_type`](@ref),
+[`block_partial`](@ref) (the contribution of a block range, which adds up over ranges: the moments of those
+velocities) and [`finalize_reduction`](@ref) (the parameters from the sum); a source that gives it gets
+`block_reduce` for free, so the single-device stepper runs the same arithmetic. The orchestration across devices
+(one set of stage buffers per device over its block range, the sum of the partials per particle, the same split
+for the frame velocity, the MOOD flags and the wall reductions) is not part of this version.
+
+Scope of this version: host and single-device storage. Checked against the standard pipeline: a one-block Burgers run is
 bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
 state vector as a whole) and converges to the exact solution at second order, in 1-D and 2-D, with inflow
@@ -127,8 +144,9 @@ Checked: a prescribed mover gives the standard run bit for bit (positions and vo
 mover with one common velocity transports every state exactly; a reflecting wall operator that reads the mirror
 partner's block reproduces the permutation operator of the standard run to round-off.
 
-What comes next, in this order: the velocity decomposition across devices (the only exchange per stage is the
-reduction), `MOODu2` with a per-block gradient cache, and the specular reflection at oblique and curved walls.
+What comes next: the orchestration of a block state split over several devices (above), and a conservative
+Lagrangian frame on blocks, which needs the frame velocity of a pair from the particles' velocities (a design
+question: `w_ij = ½ (w_i + w_j)` from the reduction instead of the interface states' velocities).
 
 ## API
 
@@ -156,5 +174,8 @@ reduction_type
 block_reduce
 block_source
 block_implicit_solve
+reduction_partial_type
+block_partial
+finalize_reduction
 HyperCloudCore.get_time_step(::ParticleGrid{D, W, T}, ::HyperbolicPDE{D, W, T}, ::Any, ::BlockState{W, T}) where {D, W, T}
 ```
