@@ -844,6 +844,39 @@ end
         end
     end
 
+    @testset "Lagrangian Burgers: the conservative frame keeps the mass through a shock" begin
+        # A cloud moving with w = 0.2 u crosses the shock of 0.5 + 0.5 sin(πx) (shock speed 0.5; particles compress by
+        # (0.5 − 0.2 u_R) / (0.5 − 0.2 u_L) ≈ 3). With the particle's frozen velocity (ALEFrame, −div F + w_i·∇u) a
+        # Lagrangian cloud gained mass at a shock at a rate independent of N (Sod: +0.1 % per 0.2 s, the shock 0.012 too
+        # far at every N); the conservative form (LagrangianFrame, −div(F − wu) − u div w) keeps Σ V u (MLS volumes)
+        # at its exact value 1 to the scheme's accuracy, and the drift shrinks with N.
+        eqb = Burgers()                                           # (own names: the enclosing `eq`, `ic` are the advection's)
+        ub0(x) = 0.5 + 0.5 * sin(π * x)
+        function burgers_run(N, tend)
+            pg = set_ic!(make_pg_1d(N; mover = ScaledLagrangianMover(0.2), range = 3.5), ub0)
+            interp = MUSCL(Float64, 1, 1, 2, MinmodLimiter(:hard), RusanovFlux())
+            ts = GeneralRKTimeStepper(eqb, interp, MOOD(), RK2_SSP_Tableau(Float64); volume_estimator = MLSVolumes(2))
+            dt = 0.2 * (2 / N); t = 0.0
+            while t < tend - 1e-12; d = min(dt, tend - t); ts(eqb, pg, t, d); t += d; end
+            N_p = pg.meta.N
+            return sum(pg.core.volumes[i] * pg.rhos[i][1] for i in 1:N_p) - 1.0, pg
+        end
+        dm100s, _ = burgers_run(100, 0.6)                         # smooth (breaking at t = 0.64)
+        dm200s, _ = burgers_run(200, 0.6)
+        @test abs(dm100s) < 1e-3 && abs(dm200s) < 1e-4                 # measured 3.7e-4 / 1.4e-6
+        dm100, pg100 = burgers_run(100, 1.2)                      # through the shock
+        dm200, pg200 = burgers_run(200, 1.2)
+        @test abs(dm100) < 5e-3 && abs(dm200) < 4e-3                   # measured 3.1e-3 / 2.8e-3 (frozen frame: 1.0e-2 / 8.8e-3)
+        @test all(i -> 0.0 <= pg200.rhos[i][1] <= 1.0 + 1e-9, 1:pg200.meta.N)                 # within the data range
+        # the exact LagrangianFrame flux and volume term
+        fr = LagrangianFrame(eqb, 0.2)
+        u = State{1, Float64}(0.8)
+        @test flux(fr, u)[1][1] ≈ 0.8^2 / 2 - 0.2 * 0.8 * 0.8 && max_eigenvalue(fr, u, 1) ≈ 0.8 - 0.16
+        @test abs(HyperCloudCore.ale_volume_term(fr, u, State{1, Float64}(1.0), State{1, Float64}(0.6))[1][1]) < 1e-15   # w_ij = w_i
+        @test HyperCloudCore.ale_volume_term(fr, u, State{1, Float64}(1.0), State{1, Float64}(1.0))[1][1] ≈ 0.2 * (1.0 - 0.8) * 0.8
+        @test HyperCloudCore.ale_volume_term(eqb, u, u, u) == zero(Flux{1, 1, Float64})
+    end
+
     @testset "Prescribed motion keeps a 2nd-order MUSCL scheme accurate and conservative" begin
         mover = PrescribedMover((x, t) -> Space{1, Float64}(0.3 * sin(π * x[1])))
         errs = Float64[]

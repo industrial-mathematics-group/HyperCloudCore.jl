@@ -403,10 +403,12 @@ function (muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER})(
     cached  = is_current(wd, pg) && wd.ok[i] && div_idx == _divergence_index(Val(DIV_ORDER), Val(D), MAX_ORDER, length(nb_slice))
 
     # Without the cached fit the aligned flux needs the weights of the dynamic fit in every slot, so it takes the
-    # per-slot path also when the scheme is buffered (same fit as `compute_dynamic_divergence`).
-    div = if _streamed(muscl) && cached
+    # per-slot path also when the scheme is buffered (same fit as `compute_dynamic_divergence`). A frame with the
+    # pair-antisymmetrised dissipation (`_pairwise_dissipation`, the Lagrangian frame) needs the per-slot weights too.
+    per_slot = _streamed(muscl) || _pairwise_dissipation(eq)
+    div = if per_slot && cached
         _flux_loop(muscl, eq, i, f_i, nb_slice, pg, U, ib, strategy, eff_order_i, CachedWeights())
-    elseif (_streamed(muscl) || _aligned_dissipation(muscl.flux)) && !cached
+    elseif (per_slot || _aligned_dissipation(muscl.flux)) && !cached
         _dispatch_streamed_dynamic(div_idx, Val(_full_div_idx(Val(MAX_ORDER), Val(DIV_ORDER), Val(D))),
                                    muscl, eq, i, f_i, nb_slice, pg, U, ib, strategy, eff_order_i)
     else
@@ -421,6 +423,18 @@ function (muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER})(
     end
 
     return T(2.0) * div
+end
+
+# MUSCL adds the volume term of a `LagrangianFrame` to its pair fluxes (`ale_volume_term` in `_flux_loop`), so the
+# stepper gives it the conservative frame on Lagrangian grids (`_moving_frame`)
+@inline _conservative_ale(::MUSCL) = true
+
+# The slot of particle `j` that lists `i` (0 if none: a one-sided pair)
+@inline function _reverse_slot(indices, ranges, j::Int, i::Int)
+    @inbounds for k in ranges[j]
+        indices[k] == i && return k
+    end
+    return 0
 end
 
 # What the flux loop does with the flux difference ΔF_ij = F*_ij - F_i + jump of a slot: write it to the
@@ -469,6 +483,11 @@ end
     orders     = pg.core.particle_orders
     degree     = Val(max(1, MAX_ORDER - 1))   # reconstruction degree; matches B_LEN of the cached gradients
     acc        = zero(State{M, T})
+    pairwise   = _pairwise_dissipation(eq) && !(how isa BufferedFlux)
+    vol        = pg.core.volumes
+    isb        = pg.core.is_boundary
+    ranges     = pg.neighbor.ranges
+    dw         = muscl.dweights
 
     @inbounds for global_idx in nb_slice
         dist_k = dist_all[global_idx]
@@ -497,7 +516,20 @@ end
         F_num   = muscl.flux(f_L, f_R, F_L, F_R, eq)
         nc_jump = evaluate_nc_jump(eq, f_L, f_R, dist_k)
 
-        acc += _consume(how, ib, global_idx, w_k, F_num - F_i + nc_jump)
+        acc += _consume(how, ib, global_idx, w_k, F_num - F_i + nc_jump + ale_volume_term(eq, f_i, fij, fji))
+        if pairwise && !(_aligned_dissipation(muscl.flux) && below) && !isb[j_idx] && vol[i] > zero(T)
+            # The dissipation of the pair with the antisymmetrised face vector ½(V_i c_ij − V_j c_ji) (its volume-weighted
+            # coefficient is opposite on the two sides: the dissipation conserves Σ V U), the central part with the
+            # consistent weight w_k: the correction (c̃_ij − w_k) ⋅ (F*_ij − ½(F_L + F_R)). The partner's weight is its
+            # cached full-order one (a reduced-order partner leaves the pair slightly asymmetric). Pairs the aligned flux
+            # orients (either particle below full order) keep their LED weights; one-sided pairs and wall pairs stay.
+            kji = _reverse_slot(nb_indices, ranges, j_idx, i)
+            if kji != 0
+                diss = F_num - Flux{D, M, T}(ntuple(d -> T(0.5) * (F_L[d] + F_R[d]), Val(D)))
+                c̃   = T(0.5) * (w_k - (vol[j_idx] / vol[i]) * (@inbounds dw[kji]))
+                acc += _contract(c̃ - w_k, diss)
+            end
+        end
         if _moment_active(muscl)          # first order: -½ Σ_d s_ij,d e^d_ij (U_j - U_i), doubled by the caller
             e_k  = muscl.mweights[global_idx]
             s_ij = max_eigenvalues(eq, f_L, f_R)
