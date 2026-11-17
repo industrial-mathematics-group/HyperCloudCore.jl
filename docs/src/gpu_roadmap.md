@@ -20,6 +20,7 @@ set_backend!(CUDABackend())                 # from CUDA.jl (likewise ROCBackend(
 | content remap onto the re-estimated volumes, cloud-quality check (moving grids) | `_content_remap!`, `_closest_neighbour!` | `TimeStepping/TimeSteppers.jl` |
 | block pipeline: the stage kernels launched per block on views of the block state (no new kernels; the block loop and the copies between the block state and the stage buffers are host-side) | `BlockTimeStepper` | `TimeStepping/BlockStepper.jl` |
 | block pipeline: the reduction of a block source over the blocks of a particle, the per-block source and implicit solve, the cross-block admissibility flag and count of MOOD | `_block_reduce_body!`, `_block_explicit_source!`, `_block_implicit_step!`, `_block_implicit_rhs!`, `_block_admissible_flag!`, `_block_inadmissible_body!` | `TimeStepping/BlockStepper.jl` |
+| block pipeline: the frame velocity of every particle on a moving grid, the wall reduction per ghost and the wall application per block | `_block_velocity_body!`, `_block_wall_reduce_body!`, `_block_wall_apply_body!` | `TimeStepping/BlockStepper.jl` |
 | MOOD candidate check, decrement, forcing, mask expansion | `_mood_flag!`, `_mood_drop!`, `_mood_force!`, `_expand_body!` | `TimeStepping/MOOD.jl` |
 | geometry refresh (moving grids) | `_refresh_slots!` | `TimeStepping/GridMovers.jl` |
 | inverse MLS moment matrices | `_moment_body!` | `Interpolation/Interpolators.jl` |

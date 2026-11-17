@@ -1,6 +1,7 @@
 export BlockState, BlockTimeStepper, BlockOf, num_blocks, block_flux, block_max_eigenvalue, block_admissible, block_view, set_block_states!
 export AbstractBlockSource, AbstractExplicitBlockSource, AbstractImplicitBlockSource, BlockSourceTerm
 export reduction_type, block_reduce, block_source, block_implicit_solve
+export block_fluid_velocity, wall_reduction_type, block_wall_reduce, block_wall_apply
 
 # =========================================================================
 # BLOCK EQUATIONS
@@ -40,6 +41,16 @@ Largest absolute wave speed of block `b` along axis `d` (see [`num_blocks`](@ref
 @inline block_max_eigenvalue(eq::HyperbolicPDE, U::State, d::Int, b::Int) = max_eigenvalue(eq, U, d)
 
 """
+    block_max_eigenvalue(eq::HyperbolicPDE{D, W, T}, U::State{W, T}, d::Int, b::Int, shift::Real) -> T
+
+The largest `|λ − shift|` of block `b` along axis `d`: the wave speed bound in the frame moving at `shift` (a moving
+grid, `ALEFrame`). The default `block_max_eigenvalue(eq, U, d, b) + |shift|` is a safe bound; a block equation whose
+spectrum is known (a discrete-velocity model: its velocities) gives the exact value, so that the numerical
+dissipation of a Lagrangian frame vanishes where it should.
+"""
+@inline block_max_eigenvalue(eq::HyperbolicPDE, U::State, d::Int, b::Int, shift::Real) = block_max_eigenvalue(eq, U, d, b) + abs(shift)
+
+"""
     block_admissible(eq::HyperbolicPDE, Y, N, nb, p) -> Bool
 
 Physical admissibility of particle `p` of a block equation across its blocks (the PAD of MOOD in the block
@@ -48,6 +59,34 @@ block finite, `is_admissible` of the `BlockOf` wrapper) as the only one; a discr
 positivity of the moments here. Runs inside kernels.
 """
 @inline block_admissible(eq::HyperbolicPDE, Y, N::Int, nb::Int, p::Int) = true
+
+"""
+    block_fluid_velocity(eq::HyperbolicPDE{D, W, T}, Y, N, nb, p) -> Space{D, T}
+
+The fluid velocity of particle `p` of a block equation across its blocks (block `b` at `Y[(b - 1) N + p]`): what a
+`LagrangianMover` or `ScaledLagrangianMover` moves the particle with in the block pipeline (a discrete-velocity
+model: the mean velocity of the moments). Runs inside kernels. No default.
+"""
+block_fluid_velocity(eq::HyperbolicPDE, Y, N::Int, nb::Int, p::Int) =
+    error("`block_fluid_velocity` not implemented for $(typeof(eq)) (needed by a Lagrangian mover in the block pipeline)")
+
+"""
+    wall_reduction_type(op, eq) -> Type or nothing
+    block_wall_reduce(op, eq, Y, N, nb, g, wall::WallPoint) -> params
+    block_wall_apply(op, eq, U::State{W}, b, params, wall::WallPoint, Y, N, nb, g) -> State{W}
+
+The operator of a `MirrorBC` in the block pipeline, in the two passes of the pipeline: the mirrored interior state
+of every block is fitted into a scratch array first (the even reflection); `block_wall_reduce` then turns the
+mirrored blocks of ghost `g` (block `b` at `Y[(b - 1) N + g]`) into a bits value of parameters (a kinetic wall: the
+density that returns the incident flux, summed over all velocities), and `block_wall_apply` gives the ghost state
+of block `b` from its mirrored value `U`, the parameters and, if it needs other blocks of the ghost (a velocity
+reflected into another block), the scratch array. `wall_reduction_type(op, eq)` is the parameter type; its default
+`nothing` means that the operator acts block by block, `op(BlockOf(eq, b), U, wall)`, like a per-component
+reflection. Kernel functions, as the operators themselves.
+"""
+wall_reduction_type(op, eq) = nothing
+block_wall_reduce(op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
+block_wall_apply(op, eq, U, b, params, wall, Y, N, nb, g) = error("`block_wall_apply` not implemented for $(typeof(op)) on $(typeof(eq))")
 
 """
     BlockOf(eq, b) <: HyperbolicPDE{D, W, T}
@@ -63,6 +102,7 @@ end
 
 @inline flux(w::BlockOf, U::State) = block_flux(w.eq, U, w.b)
 @inline max_eigenvalue(w::BlockOf, U::State, d::Int) = block_max_eigenvalue(w.eq, U, d, w.b)
+@inline max_eigenvalue(w::BlockOf, U::State, d::Int, shift::Real) = block_max_eigenvalue(w.eq, U, d, w.b, shift)
 
 # =========================================================================
 # BLOCK SOURCE TERMS: a reduction over the blocks, then the update per block
@@ -185,6 +225,42 @@ end
 end
 
 # =========================================================================
+# MOVING GRIDS: the frame velocity of every particle from a reduction, the flux pass in the ALE frame
+# =========================================================================
+# The mover the flux pass sees: the velocities reduced before the pass (one per particle), whatever the mover. The
+# kernels then use the frozen-velocity ALE frame of the particle (`ALEFrame(eq, w_i)`); the conservative Lagrangian frame
+# of the standard stepper evaluates the frame velocity of every interface state, which a block cannot provide.
+struct _BlockMover{GM <: GridMover, V} <: GridMover
+    mover::GM
+    w::V
+end
+@inline grid_velocity(bm::_BlockMover, eq, p_idx, U, pg, t) = @inbounds bm.w[p_idx]
+@inline _lagrangian_type(::_BlockMover) = false
+
+# The frame velocity of particle `p` from the full state array: state-independent movers as in the standard stepper,
+# the Lagrangian ones through `block_fluid_velocity`
+@inline _block_grid_velocity(mover::GridMover, eq, Y, N, nb, p, pg, t) = grid_velocity(mover, eq, p, Y[p], pg, t)
+@inline _block_grid_velocity(::LagrangianMover, eq, Y, N, nb, p, pg, t) = block_fluid_velocity(eq, Y, N, nb, p)
+@inline _block_grid_velocity(m::ScaledLagrangianMover, eq, Y, N, nb, p, pg, t) = m.alpha * block_fluid_velocity(eq, Y, N, nb, p)
+
+@inline function _block_velocity_body!(p, w, mover, eq, Y, N, nb, pg, is_boundary, t, zero_space)
+    w[p] = is_boundary[p] ? zero_space : _block_grid_velocity(mover, eq, Y, N, nb, p, pg, t)
+    return nothing
+end
+
+# Kernel bodies of the block wall (see Backend.jl): the reduction over the mirrored blocks of a ghost and the application
+@inline function _block_wall_reduce_body!(g, params, op, eq, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
+    (is_boundary[g] && tags[g] == tag) || return nothing
+    params[g] = block_wall_reduce(op, eq, S, N, nb, g, _ghost_wall_point(g, pos, normals, wdist, curvs, gm))
+    return nothing
+end
+@inline function _block_wall_apply_body!(g, Y_b, S_b, params, op, eq, b, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
+    (is_boundary[g] && tags[g] == tag) || return nothing
+    Y_b[g] = block_wall_apply(op, eq, S_b[g], b, params[g], _ghost_wall_point(g, pos, normals, wdist, curvs, gm), S, N, nb, g)
+    return nothing
+end
+
+# =========================================================================
 # THE BLOCK STATE
 # =========================================================================
 """
@@ -269,32 +345,60 @@ forcing halos), with the particle's order shared by all its blocks: the criterio
 order, and the previous stage's right-hand side is recomputed on the affected particles for all blocks.
 `MOODu2` is not available yet (its curvature test reads the gradient cache, which holds the last block's).
 
-Scope (for now): static grids (no mover, no moving pieces); the boundary conditions of the grid apply per
-block, with the block's state of the step start as the reference. For one block (`num_blocks(eq) == 1`) the
+On a moving grid (`pg.mover`) the frame velocity of every particle is reduced before each flux pass
+([`block_fluid_velocity`](@ref) for the Lagrangian movers, the mover's velocity otherwise) and the pass runs in the
+frozen-velocity ALE frame of the particle; the positions are stage variables as in the standard stepper, the
+volumes are re-estimated at the end of the step. (The conservative Lagrangian frame of the standard stepper needs
+the frame velocity of every interface state, which a block cannot give.) Moving boundary pieces are not available
+yet. The boundary conditions of the grid apply per block with the block's state of the step start as the
+reference; a `MirrorBC` whose operator reduces over the blocks ([`block_wall_reduce`](@ref)) runs in the
+pipeline's passes. For one block (`num_blocks(eq) == 1`) the
 result is bit-identical to `GeneralRKTimeStepper` without sources, and agrees to round-off with the equivalent
 sources (a separately compiled flux pass).
 """
 struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTimeStepper{D, W, T},
-                        EST <: Tuple{Vararg{BlockSourceTerm}}, IST <: Tuple{Vararg{BlockSourceTerm}}} <: TimeStepper
+                        EST <: Tuple{Vararg{BlockSourceTerm}}, IST <: Tuple{Vararg{BlockSourceTerm}},
+                        GW <: Growable{Space{D, T}}, GS <: Growable{State{W, T}}} <: TimeStepper
     pde::EQ
     inner::TS
     explicit_sources::EST
     implicit_sources::IST
+    grid_w::GW                      # the frame velocities of a moving grid (per particle)
+    ghost_scratch::GS               # the mirrored blocks of the wall ghosts (block-major)
+    wall_params::Dict{Int, Any}     # the wall parameters per boundary tag (a Growable of `wall_reduction_type`)
+end
+
+"""
+    BlockTimeStepper(eq, inner::GeneralRKTimeStepper, sources::Tuple)
+
+The block stepper around an existing standard stepper for `W` components (built for `BlockOf(eq, 1)`, e.g. by
+`build_timestepper`: all of its options, the memory reservation included); `inner` must carry no sources of its own.
+"""
+function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeStepper{D, W, T}, sources::Tuple{Vararg{BlockSourceTerm}}) where {D, W, T}
+    inner.pde isa BlockOf && inner.pde.eq === eq ||
+        throw(ArgumentError("BlockTimeStepper: the inner stepper must be built for BlockOf(eq, 1) of this equation"))
+    (isempty(inner.explicit_sources) && isempty(inner.implicit_sources)) ||
+        throw(ArgumentError("BlockTimeStepper: the inner stepper must carry no sources; give block sources to the block stepper"))
+    explicit_sts = filter(st -> !_is_implicit(st), sources)
+    implicit_sts = filter(_is_implicit, sources)
+    s = num_stages(inner.tableau)
+    if !isempty(implicit_sts) && all(i -> iszero(inner.tableau.a[i, i]), 1:s)
+        throw(ArgumentError("BlockTimeStepper: implicit block sources need an IMEX tableau with an implicit diagonal " *
+                            "(e.g. IMEX_ARS222_Tableau); explicit sources work with any tableau"))
+    end
+    inner.mood.criterion isa MOODu2 && throw(ArgumentError("BlockTimeStepper: MOODu2 is not available in the block pipeline yet " *
+                                                           "(its curvature test needs the gradient cache of the checked block); use MOODu1 or MOODPAD"))
+    AT = typeof(parent(inner.rho_n))
+    gw = Growable{Space{D, T}}(AT.name.wrapper)
+    gs = Growable{State{W, T}}(AT.name.wrapper)
+    return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs)}(
+        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}())
 end
 
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, mood::MOOD,
                           sources::Tuple{Vararg{BlockSourceTerm}}, tableau::IMEXButcherTableau{T}; kwargs...) where {D, W, T}
-    explicit_sts = filter(st -> !_is_implicit(st), sources)
-    implicit_sts = filter(_is_implicit, sources)
-    s = num_stages(tableau)
-    if !isempty(implicit_sts) && all(i -> iszero(tableau.a[i, i]), 1:s)
-        throw(ArgumentError("BlockTimeStepper: implicit block sources need an IMEX tableau with an implicit diagonal " *
-                            "(e.g. IMEX_ARS222_Tableau); explicit sources work with any tableau"))
-    end
-    mood.criterion isa MOODu2 && throw(ArgumentError("BlockTimeStepper: MOODu2 is not available in the block pipeline yet " *
-                                                     "(its curvature test needs the gradient cache of the checked block); use MOODu1 or MOODPAD"))
     inner = GeneralRKTimeStepper(BlockOf(eq, 1), div_interp, mood, tableau; kwargs...)
-    return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts)}(eq, inner, explicit_sts, implicit_sts)
+    return BlockTimeStepper(eq, inner, sources)
 end
 BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, sources::Tuple{Vararg{BlockSourceTerm}},
                  tableau::IMEXButcherTableau{T}; kwargs...) where {D, W, T} =
@@ -303,6 +407,7 @@ BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator,
     BlockTimeStepper(eq, div_interp, MOOD(NoMOOD()), (), tableau; kwargs...)
 
 @inline _blk(g::Growable, b::Int, N::Int) = view(parent(g), ((b - 1) * N + 1):(b * N))
+@inline _block_moving(pg::ParticleGrid) = !(pg.mover isa NoGridMover)
 
 """
     mood_flags(ts::BlockTimeStepper), mood_inadmissible(ts::BlockTimeStepper)
@@ -314,7 +419,7 @@ mood_inadmissible(ts::BlockTimeStepper) = mood_inadmissible(ts.inner)
 
 function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}, bs::BlockState{W, T},
                                          time::Real, dt::T) where {D, W, T}
-    _is_moving(pg) && throw(ArgumentError("BlockTimeStepper: static grids only (no grid mover, no moving pieces)"))
+    has_moving_pieces(pg.geometry) && throw(ArgumentError("BlockTimeStepper: moving boundary pieces are not available in the block pipeline yet"))
     N  = pg.meta.N
     nb = bs.nb
     nb == num_blocks(eq) || throw(ArgumentError("BlockTimeStepper: the state has $nb blocks, the equation $(num_blocks(eq))"))
@@ -324,11 +429,15 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
     bt     = inner.tableau
     interp = inner.divergence_interpolator
     orders = pg.core.particle_orders
+    moving = _block_moving(pg)
 
-    update_size!(inner, nb * N, length(pg.neighbor.indices), false)
+    update_size!(inner, nb * N, length(pg.neighbor.indices), moving)
     update_size!(inner.work, N)                   # the MOOD masks are per particle
     update_size!(interp, N)
+    moving && ensure_capacity!(ts.grid_w, N)
     copyto!(parent(inner.rho_n), 1, parent(bs.data), 1, nb * N)
+    moving && copyto!(parent(inner.x_n), 1, pg.core.positions, 1, N)
+    moving && copyto!(parent(inner.v_n), 1, pg.core.volumes, 1, N)
 
     max_order = _extract_order(interp)
     fill!(view(orders, 1:N), max_order)
@@ -339,7 +448,8 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
         if i == 1
             _block_form_candidate!(ts, eq, pg, 1, dt, time)
         else
-            _block_checkpoint!(ts, eq, pg, i, dt, time)
+            _block_checkpoint!(ts, eq, pg, i, dt, time)      # uses the geometry of stage i-1
+            moving && _apply_stage_geometry!(inner, pg, inner.X_stages[i], time, time + bt.c_t[i] * dt)
         end
         inner.reset_orders_per_stage && fill!(view(orders, 1:N), max_order)
         _block_rhs!(ts, eq, pg, i, time + bt.c_t[i] * dt, true)
@@ -351,6 +461,54 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
         @warn "MOOD accepted $(inner.work.inadmissible[]) inadmissible candidate(s) at first order in the step at t = $time " *
               "(dt = $dt): the first-order update itself is not admissible there. Reported once per stepper; " *
               "`mood_inadmissible(ts)` gives the count of each step."
+    end
+    if moving
+        copyto!(pg.core.positions, 1, parent(inner.x_cand), 1, N)
+        pg.neighbor(pg)                                    # full search + periodic wrap for the next step
+        _check_cloud_quality(pg, time + dt)
+        inner.volume_estimator === nothing || update_volumes!(pg, inner.volume_estimator)
+    end
+    return nothing
+end
+
+# The boundary conditions of a stage array for all blocks: a `MirrorBC` whose operator reduces over the blocks runs in
+# the pipeline's passes (the mirrored fit of every block into the scratch, the reduction per ghost, the application per
+# block); every other condition is applied block by block with the block's reference state
+function _block_apply_bcs!(ts::BlockTimeStepper{D, W, T}, eq, pg, stage::Growable, t, N::Int, nb::Int) where {D, W, T}
+    inner = ts.inner
+    for (tag, bc) in pg.geometry.bc_map
+        if bc isa MirrorBC && bc.op !== nothing && wall_reduction_type(bc.op, eq) !== nothing
+            _block_mirror!(ts, bc, pg, stage, tag, eq, t, N, nb)
+        else
+            for b in 1:nb
+                bc(pg, _blk(stage, b, N), tag, inner, BlockOf(eq, b), t, _blk(inner.rho_n, b, N))
+            end
+        end
+    end
+    return nothing
+end
+
+function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int) where {D, W, T, Q, F, B}
+    scratch = ts.ghost_scratch
+    ensure_capacity!(scratch, nb * N)
+    Y, S = parent(stage), parent(scratch)
+    for b in 1:nb
+        _launch_ghost_fit!(pg, _blk(stage, b, N), tag, BlockOf(eq, b), t, Val(Q), _WallOp(nothing), Val(true), Val(B); out = _blk(scratch, b, N))
+    end
+    P = wall_reduction_type(bc.op, eq)
+    params = get!(ts.wall_params, tag) do
+        Growable{P}(typeof(parent(scratch)).name.wrapper)
+    end
+    ensure_capacity!(params, N)
+    gm = GhostMotion(Val(D), T)                        # static pieces only (moving pieces are refused)
+    c  = pg.core
+    backend = get_backend()
+    foreach_particle(_block_wall_reduce_body!, backend, N,
+        (params, bc.op, eq, S, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
+    for b in 1:nb
+        foreach_particle(_block_wall_apply_body!, backend, N,
+            (_blk(stage, b, N), _blk(scratch, b, N), params, bc.op, eq, b, S, N, nb, c.positions, c.is_boundary, c.tags, c.normals,
+             c.wall_distances, c.wall_curvatures, gm, tag))
     end
     return nothing
 end
@@ -393,9 +551,7 @@ function _block_form_candidate!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, d
             end
         end
     end
-    for b in 1:nb
-        apply_boundary_conditions!(pg, _blk(stage, b, N), inner, BlockOf(eq, b), t_i, _blk(inner.rho_n, b, N))
-    end
+    _block_apply_bcs!(ts, eq, pg, stage, t_i, N, nb)
     return t_i
 end
 
@@ -407,10 +563,18 @@ function _block_rhs!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full::B
     nb      = num_blocks(eq)
     backend = get_backend()
     Y_i     = parent(inner.Y_stages[i])
+    moving  = _block_moving(pg)
+    if moving
+        # the frame velocity of every particle at this stage state (also on a partial pass: the stage may be an earlier one)
+        foreach_particle(_block_velocity_body!, backend, N,
+            (ts.grid_w, pg.mover, eq, Y_i, N, nb, pg, pg.core.is_boundary, t_i, zero(Space{D, T})))
+    end
+    mover = _BlockMover(pg.mover, ts.grid_w)
     for b in 1:nb
         # (a partial pass gathers the gradients of all particles: the cache is shared by the blocks)
         compute_explicit_rhs!(inner, BlockOf(eq, b), pg, _blk(inner.K_E_stages[i], b, N), inner.K_X_stages[i],
-                              inner.K_V_stages[i], inner.V_stages[i], _blk(inner.Y_stages[i], b, N), t_i, full; gather = true)
+                              inner.K_V_stages[i], inner.V_stages[i], _blk(inner.Y_stages[i], b, N), t_i, full;
+                              gather = true, mover = mover, moving = moving)
     end
     for src in ts.explicit_sources
         full && reduce_blocks!(src, Y_i, N, nb, pg, t_i, zero(T))
@@ -511,9 +675,12 @@ function _block_candidate!(ts::BlockTimeStepper{D, W, T}, pg, b::Int, N::Int, i:
     U_n      = _blk(inner.rho_n, b, N)
     K_E      = map(g -> _blk(g, b, N), inner.K_E_stages)
     K_I      = map(g -> _blk(g, b, N), inner.K_I_stages)
+    moving   = _block_moving(pg)
+    x_target = is_final ? inner.x_cand : inner.X_stages[i]
+    v_target = is_final ? inner.v_cand : inner.V_stages[i]
     foreach_particle(_stage_predictor!, get_backend(), N,
-        (target, (inner.x_cand, inner.v_cand), U_n, (inner.x_n, inner.v_n), K_E, K_I, (inner.K_X_stages, inner.K_V_stages, inner.V_stages),
-         U_n, pg.core.is_boundary, inner.tableau, i, is_final ? s : i - 1, is_final, dt, false, false, zero(T), zero(Space{D, T})))
+        (target, (x_target, v_target), U_n, (inner.x_n, inner.v_n), K_E, K_I, (inner.K_X_stages, inner.K_V_stages, inner.V_stages),
+         U_n, pg.core.is_boundary, inner.tableau, i, is_final ? s : i - 1, is_final, dt, moving, false, zero(T), zero(Space{D, T})))
     return nothing
 end
 

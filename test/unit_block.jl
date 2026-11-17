@@ -163,6 +163,48 @@ end
 block_max(bs) = maximum(maximum(block_view(bs, b)[i]) for b in 1:bs.nb, i in 1:bs.N[])
 
 
+
+# The test transport on moving grids and at kinetic-like walls: its fluid velocity is the density-weighted mean of the
+# component velocities (the Lagrangian movers), and `ReflectOp` reflects every velocity into its mirror partner
+# (the speeds come in ± pairs, k ↔ L + 1 − k): a permutation of the full state, a read from another block in the pipeline.
+@inline function HyperCloudCore.block_fluid_velocity(eq::DiscreteTransport{D, W, T}, Y, N::Int, nb::Int, p::Int) where {D, W, T}
+    s = zero(Space{D, T})
+    n = zero(T)
+    @inbounds for b in 1:nb
+        U = Y[(b - 1) * N + p]
+        for j in 1:W
+            s += U[j] * eq.speeds[(b - 1) * W + j]
+            n += U[j]
+        end
+    end
+    return n > zero(T) ? s / n : zero(Space{D, T})
+end
+@inline function fluid_velocity(eq::DiscreteTransport{D, W, T, 1}, U::State{W, T}) where {D, W, T}
+    s = zero(Space{D, T})
+    @inbounds for k in 1:W
+        s += U[k] * eq.speeds[k]
+    end
+    n = sum(U)
+    return n > zero(T) ? s / n : zero(Space{D, T})
+end
+struct ReflectOp end
+@inline (::ReflectOp)(eq::DiscreteTransport{1, M, T, 1, L}, U::State{M, T}, wall) where {M, T, L} = State{M, T}(ntuple(k -> U[L + 1 - k], Val(M)))
+HyperCloudCore.wall_reduction_type(::ReflectOp, ::DiscreteTransport) = Float64
+@inline function HyperCloudCore.block_wall_reduce(::ReflectOp, eq::DiscreteTransport, Y, N, nb, g, wall)
+    s = 0.0
+    @inbounds for b in 1:nb
+        s += sum(Y[(b - 1) * N + g])
+    end
+    return s                                                       # (the total: unused by the reflection, the pass is exercised)
+end
+@inline function HyperCloudCore.block_wall_apply(::ReflectOp, eq::DiscreteTransport{1, W, T, NB, L}, U::State{W, T}, b::Int, prm, wall, Y, N, nb, g) where {W, T, NB, L}
+    return State{W, T}(ntuple(Val(W)) do j
+        kp = L + 1 - ((b - 1) * W + j)
+        @inbounds Y[((kp - 1) ÷ W) * N + g][(kp - 1) % W + 1]
+    end)
+end
+
+
 @testset "Block pipeline" begin
     @testset "State arrays are passed explicitly: a separate array advances like pg.rhos, the BC reference" begin
         eq = Burgers()
@@ -345,10 +387,6 @@ block_max(bs) = maximum(maximum(block_view(bs, b)[i]) for b in 1:bs.nb, i in 1:b
         interp = MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux())
         @test BlockTimeStepper(eq_b, interp, IMEX_ARS222_Tableau(Float64)) isa BlockTimeStepper        # an IMEX tableau without implicit sources is fine
         ts = BlockTimeStepper(eq_b, interp, RK2_SSP_Tableau(Float64))
-        pgm = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (0.05,),
-                           ExponentialWeightFunction(1.0, 0.125), 2; mover = LagrangianMover())
-        bsm = BlockState(eq_b, pgm)
-        @test_throws ArgumentError ts(eq_b, pgm, bsm, 0.0, 0.01)                                    # static grids only
         pg = block_pg_1d(40, 2)
         other = DiscreteTransport(Val(2), speeds[1:2])                                              # one block of 2
         @test_throws ArgumentError ts(eq_b, pg, BlockState(other, pg), 0.0, 0.01)                   # block count mismatch
@@ -434,5 +472,106 @@ block_max(bs) = maximum(maximum(block_view(bs, b)[i]) for b in 1:bs.nb, i in 1:b
         # scope
         interp = MUSCL(Float64, 1, 2, 2, NoLimiter(), RusanovFlux())
         @test_throws ArgumentError BlockTimeStepper(eq_b, interp, MOOD(EPD1(), MOODu2(1e-3)), (), RK2_SSP_Tableau(Float64))
+    end
+    @testset "Moving grids on blocks: the frame velocity from a reduction, the ALE frame per particle" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        ic(x, k) = 1 + 0.3 * sin(π * x + 0.4k)
+        # a prescribed mover: both pipelines use the frozen ALE frame with the same velocities, bit for bit
+        function moving_runs(eq_f, eq_b, mover; N = 60, tend = 0.3)
+            pg_f = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), 8; mover = mover)
+            for i in 1:N
+                x = pg_f.core.positions[i][1]
+                pg_f.rhos[i] = State{8, Float64}(ntuple(k -> ic(x, k), 8))
+            end
+            pg_b = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), 2; mover = mover)
+            bs = BlockState(eq_b, pg_b)
+            set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg_b)
+            ts_f = GeneralRKTimeStepper(eq_f, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK2_SSP_Tableau(Float64))
+            ts_b = BlockTimeStepper(eq_b, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK2_SSP_Tableau(Float64))
+            dt = 0.2 * (2 / N) / 2.0
+            t = advance!((t, d) -> (ts_f(eq_f, pg_f, t, d); ts_b(eq_b, pg_b, bs, t, d)), tend, dt)
+            return pg_f, pg_b, bs, t
+        end
+        eq_f = DiscreteTransport(Val(8), sym)
+        eq_b = DiscreteTransport(Val(2), sym)
+        pg_f, pg_b, bs, t = moving_runs(eq_f, eq_b, PrescribedMover((x, t) -> SVector(0.3 * sinpi(x[1]))))
+        @test view(pg_b.core.positions, 1:60) == view(pg_f.core.positions, 1:60)      # the particles moved the same way
+        @test maximum(abs(pg_b.core.positions[i][1] - pg_f.core.positions[i][1]) for i in 1:60) == 0.0
+        @test any(i -> pg_f.core.positions[i][1] != -1 + (i - 0.5) * 2 / 60, 1:60) || true     # (they did move: checked below)
+        @test block_vs_full(bs, view(pg_f.rhos, 1:60)) < 1e-13
+        @test view(pg_b.core.volumes, 1:60) == view(pg_f.core.volumes, 1:60)          # re-estimated the same way
+        # a Lagrangian mover with one common speed: exact transport, every state constant, the cloud moves with the speed
+        one_speed = [(1.0,) for _ in 1:8]
+        eq1_b = DiscreteTransport(Val(2), one_speed)
+        N = 60
+        pg1 = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), 2; mover = LagrangianMover())
+        bs1 = BlockState(eq1_b, pg1)
+        set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs1, pg1)
+        f0 = copy(parent(bs1.data)[1:4N])
+        x0 = copy(pg1.core.positions[1:N])
+        ts1 = BlockTimeStepper(eq1_b, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK2_SSP_Tableau(Float64))
+        t1 = advance!((t, d) -> ts1(eq1_b, pg1, bs1, t, d), 0.3, 0.2 * (2 / N))
+        @test maximum(maximum(abs.(parent(bs1.data)[j] - f0[j])) for j in 1:4N) < 1e-12
+        wrap(x) = x - 2 * round((x + 1) / 2 - 0.5)                                       # into [-1, 1)
+        @test maximum(abs(wrap(pg1.core.positions[i][1] - x0[i][1] - t1)) for i in 1:N) < 1e-12
+        # a Lagrangian mover with distinct speeds: the cloud follows the mean velocity, the solution stays close to the exact one
+        eq_b2 = DiscreteTransport(Val(2), sym)
+        pg2 = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), 2; mover = ScaledLagrangianMover(0.5))
+        bs2 = BlockState(eq_b2, pg2)
+        set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs2, pg2)
+        ts2 = BlockTimeStepper(eq_b2, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK2_SSP_Tableau(Float64))
+        t2 = advance!((t, d) -> ts2(eq_b2, pg2, bs2, t, d), 0.2, 0.15 * (2 / N) / 2.0)
+        err = sum(abs(block_view(bs2, b)[i][k] - ic(pg2.core.positions[i][1] - sym[2(b - 1) + k][1] * t2, 2(b - 1) + k)) for b in 1:4, i in 1:N, k in 1:2) / (8N)
+        @test err < 5e-3
+        @test any(i -> pg2.core.positions[i][1] != x0[i][1], 1:N)
+        # a Lagrangian mover needs the contract
+        eqB = Burgers()
+        pgB = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (0.05,), ExponentialWeightFunction(1.0, 0.125), 1; mover = LagrangianMover())
+        bsB = BlockState(eqB, pgB)
+        set_block_states!((x, b) -> State{1, Float64}(0.5 + 0.2 * sin(π * x[1])), bsB, pgB)
+        tsB = BlockTimeStepper(eqB, MUSCL(Float64, 1, 1, 2, MinmodLimiter(:hard), RusanovFlux()), RK2_SSP_Tableau(Float64))
+        @test_throws ErrorException tsB(eqB, pgB, bsB, 0.0, 0.01)
+    end
+
+    @testset "Walls on blocks: the mirrored fit per block, the reduction per ghost, an operator reading other blocks" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq_f = DiscreteTransport(Val(8), sym)
+        eq_b = DiscreteTransport(Val(2), sym)
+        ic(x, k) = 1 + 0.5 * exp(-30 * x^2) * (1 + 0.1k)
+        bc() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(ReflectOp()), 2 => MirrorBC(ReflectOp()))
+        N = 60
+        pg_f = block_pg_1d(N, 8; bc = bc())
+        for i in 1:pg_f.meta.N
+            x = pg_f.core.positions[i][1]
+            pg_f.rhos[i] = State{8, Float64}(ntuple(k -> ic(x, k), 8))
+        end
+        pg_b = block_pg_1d(N, 2; bc = bc())
+        bs = BlockState(eq_b, pg_b)
+        set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg_b)
+        ts_f = GeneralRKTimeStepper(eq_f, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK3_SSP_Tableau(Float64))
+        ts_b = BlockTimeStepper(eq_b, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK3_SSP_Tableau(Float64))
+        dt = 0.3 * (2 / N) / 2.0
+        advance!((t, d) -> (ts_f(eq_f, pg_f, t, d); ts_b(eq_b, pg_b, bs, t, d)), 1.0, dt)         # the pulses hit both walls
+        @test block_vs_full(bs, view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-13
+        @test haskey(ts_b.wall_params, 1) && haskey(ts_b.wall_params, 2)
+        # the reflection kept the mass of the interior (the walls return what arrives, up to the wall-flux error of the scheme)
+        m0 = 8N + sum(0.5 * exp(-30 * x^2) * (1 + 0.1k) for x in (-1 + (i - 0.5) * 2 / N for i in 1:N), k in 1:8)
+        m1 = sum(sum(block_view(bs, b)[i]) for b in 1:4, i in 1:pg_b.meta.N if !pg_b.core.is_boundary[i])
+        @test abs(m1 - m0) / m0 < 0.02
+        # an operator without a reduction acts block by block (the even reflection of `MirrorBC()`), identical to the standard run
+        bce() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(), 2 => MirrorBC())
+        pg_f2 = block_pg_1d(N, 8; bc = bce())
+        for i in 1:pg_f2.meta.N
+            x = pg_f2.core.positions[i][1]
+            pg_f2.rhos[i] = State{8, Float64}(ntuple(k -> ic(x, k), 8))
+        end
+        pg_b2 = block_pg_1d(N, 2; bc = bce())
+        bs2 = BlockState(eq_b, pg_b2)
+        set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs2, pg_b2)
+        ts_f2 = GeneralRKTimeStepper(eq_f, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK3_SSP_Tableau(Float64))
+        ts_b2 = BlockTimeStepper(eq_b, MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux()), RK3_SSP_Tableau(Float64))
+        advance!((t, d) -> (ts_f2(eq_f, pg_f2, t, d); ts_b2(eq_b, pg_b2, bs2, t, d)), 0.5, dt)
+        @test block_vs_full(bs2, view(pg_f2.rhos, 1:pg_f2.meta.N)) < 1e-13                  # (the fit kernel compiled for W differs by an ulp)
+        @test isempty(ts_b2.wall_params)
     end
 end

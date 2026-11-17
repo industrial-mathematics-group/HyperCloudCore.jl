@@ -23,6 +23,17 @@ HyperCloudCore.num_blocks(::DiscreteTransport{D, W, T, NB}) where {D, W, T, NB} 
     return Flux{D, W, T}(ntuple(d -> State{W, T}(ntuple(k -> (@inbounds eq.speeds[off + k][d]) * U[k], Val(W))), Val(D)))
 end
 @inline HyperCloudCore.block_max_eigenvalue(eq::DiscreteTransport, U::State, d::Int, b::Int) = @inbounds eq.vmax[d]
+# In a moving frame the exact bound over all velocities (the same for the full state and every block, so that the two
+# pipelines use the same dissipation; it vanishes where every velocity equals the frame velocity)
+@inline function _shifted_bound(eq::DiscreteTransport{D, W, T, NB, L}, d::Int, shift::Real) where {D, W, T, NB, L}
+    m = zero(T)
+    @inbounds for k in 1:L
+        m = max(m, abs(eq.speeds[k][d] - T(shift)))
+    end
+    return m
+end
+@inline HyperCloudCore.block_max_eigenvalue(eq::DiscreteTransport, U::State, d::Int, b::Int, shift::Real) = _shifted_bound(eq, d, shift)
+@inline max_eigenvalue(eq::DiscreteTransport, U::State, d::Int, shift::Real) = _shifted_bound(eq, d, shift)
 
 # One block: the plain PDE of the standard pipeline
 @inline flux(eq::DiscreteTransport{D, W, T, 1}, U::State{W, T}) where {D, W, T} = HyperCloudCore.block_flux(eq, U, 1)
