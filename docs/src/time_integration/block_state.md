@@ -114,10 +114,12 @@ sweeping a tube, the block runs reproduce the standard runs bit for bit, particl
 ## Devices and the velocity decomposition
 
 The block pipeline runs on any storage: the block state, the stepper's buffers, the parameter arrays of the sources
-and of the walls are `Growable`s of the `storage` array type, the kernels are those of the standard stepper, and
-the host-side passes (the initial conditions, the snapshots, the adaptivity and the sweep of moving pieces) copy
-blocks between the device and the host. Checked on the KernelAbstractions CPU backend (PoCL); the device runs
-themselves need a GPU.
+and of the walls are `Growable`s of the `storage` array type (the stepper moves the parameter arrays of its sources to
+the storage of its stage buffers), the kernels are those of the standard stepper, and the host-side passes (the
+initial conditions, the snapshots, the adaptivity and the sweep of moving pieces) copy blocks between the device and
+the host, the last two only when an event changes the particle set. [`memory_estimate`](@ref) and
+[`reserve!`](@ref) take the block stepper and the block state (`reserve!(pg, ts, bs, scheme; limit)`): the state
+arrays count `nb` elements per particle. Checked on the KernelAbstractions CPU backend (PoCL) and with CUDA.
 
 A state whose blocks are split over several devices exchanges, per stage, only the per-particle reductions: for
 that the sources give their reduction in the **additive form** of [`reduction_partial_type`](@ref),
@@ -155,6 +157,9 @@ num_blocks
 block_flux
 block_max_eigenvalue
 block_admissible
+block_velocity
+block_is_admissible
+block_nc_jump
 block_fluid_velocity
 wall_reduction_type
 block_wall_reduce

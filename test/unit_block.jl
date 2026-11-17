@@ -140,6 +140,9 @@ HyperCloudCore.num_blocks(g::GuardedTransport) = HyperCloudCore.num_blocks(g.eq)
     return s / (nb * W) > T(1.5)
 end
 @inline HyperCloudCore.is_admissible(g::GuardedTransport{D, W, T}, U::State{W, T}) where {D, W, T} = all(isfinite, U) && sum(U) / W > T(1.5)
+# (the mean is over the whole state: on blocks a block alone is only checked for finiteness, the mean is the cross-block
+# check above; the default `block_is_admissible` would apply `is_admissible` to the block's two components)
+@inline HyperCloudCore.block_is_admissible(g::GuardedTransport, U::State, b::Int) = all(isfinite, U)
 
 "Both pipelines on the 8-velocity transport with a box per component (a discontinuity), MUSCL3 without a limiter, with MOOD."
 function mood_runs(eq_f, eq_b, mood, tableau; sources_b = (), sources_f = (), N = 80, tend = 0.3, order = 3)
@@ -694,5 +697,69 @@ end
         # the run with the additive source equals the run with the direct one, hence the standard run, to round-off
         dev3, _, _ = relaxation_runs((BlockSourceTerm(PartialMean(0.05)),), (MeanRelaxationFull(0.05),), IMEX_ARS222_Tableau(Float64))
         @test dev3 < 1e-13
+    end
+
+    @testset "Checks of the step, the storage of the sources, the memory budget" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq_b = DiscreteTransport(Val(2), sym)
+        interp() = MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux())
+        # a MirrorBC operator written for the equation itself is refused before any kernel runs (it failed inside the
+        # kernel: a MethodError, a crash under Polyester); one written for the block equation runs
+        struct EqScale end
+        @inline (::EqScale)(eq::DiscreteTransport, U::State, wall) = 0.9 * U
+        struct BlockScale end
+        @inline (::BlockScale)(w::BlockOf, U::State, wall) = 0.9 * U
+        for (op, ok) in ((EqScale(), false), (BlockScale(), true))
+            pg = block_pg_1d(40, 2; bc = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(op), 2 => MirrorBC(op)))
+            bs = BlockState(eq_b, pg)
+            set_block_states!((x, b) -> State{2, Float64}(1.0, 1.0 + 0.1b), bs, pg)
+            ts = BlockTimeStepper(eq_b, interp(), RK2_SSP_Tableau(Float64))
+            if ok
+                ts(eq_b, pg, bs, 0.0, 0.01)
+                @test all(i -> all(isfinite, block_view(bs, 4)[i]), 1:pg.meta.N)
+            else
+                @test_throws ArgumentError ts(eq_b, pg, bs, 0.0, 0.01)
+            end
+        end
+        # a state set for another particle count is refused by the step (before the sweep of moving pieces, which
+        # rewrote it) and by the time step; block indices are checked
+        pg = block_pg_1d(40, 2)
+        bs_other = BlockState(eq_b, block_pg_1d(30, 2))
+        ts = BlockTimeStepper(eq_b, interp(), RK2_SSP_Tableau(Float64))
+        @test_throws ArgumentError ts(eq_b, pg, bs_other, 0.0, 0.01)
+        @test bs_other.N[] == 30
+        @test_throws ArgumentError get_time_step(pg, eq_b, ts.inner.divergence_interpolator, bs_other)
+        @test_throws BoundsError block_view(bs_other, 5)
+        # the parameter arrays of the sources follow the stage buffers' storage (a source built with the default
+        # `storage = Array` for a device stepper failed at the first launch)
+        struct TagVector{T} <: AbstractVector{T}
+            v::Vector{T}
+        end
+        TagVector{T}(::UndefInitializer, n::Int) where {T} = TagVector{T}(Vector{T}(undef, n))
+        Base.size(a::TagVector) = size(a.v)
+        Base.getindex(a::TagVector, i::Int) = a.v[i]
+        bst = BlockSourceTerm(MeanRelaxation(0.1))
+        @test HyperCloudCore._on_storage(bst, Array) === bst
+        @test parent(HyperCloudCore._on_storage(bst, TagVector).params) isa TagVector
+        ts = BlockTimeStepper(eq_b, interp(), (bst,), IMEX_ARS222_Tableau(Float64))
+        @test parent(ts.implicit_sources[1].params) isa Vector
+        # the memory budget prices the block-major arrays nb times per particle, and a reservation of the block stepper
+        # and the state holds the run (the inner stepper's reservation alone failed at the first step)
+        pg = block_pg_1d(60, 2)
+        bs = BlockState(eq_b, pg)
+        set_block_states!((x, b) -> State{2, Float64}(1 + 0.2 * sinpi(x[1]), 1.0 + 0.1b), bs, pg)
+        sc = interp()
+        ts = BlockTimeStepper(eq_b, sc, (BlockSourceTerm(MeanRelaxation(0.1)),), IMEX_ARS222_Tableau(Float64))
+        e1 = memory_estimate(pg, ts.inner, sc)
+        e4 = memory_estimate(pg, ts, bs, sc)
+        nstate = 2 + 2 * 3                                            # rho_n, rho_cand, Y/K_E/K_I per stage
+        @test e4.per_particle - e1.per_particle >= (4 - 1) * nstate * sizeof(State{2, Float64}) + 4 * sizeof(State{2, Float64})
+        r = reserve!(pg, ts, bs, sc; limit = 2 * e4.bytes)
+        @test length(parent(ts.inner.rho_n)) == 4 * r.particles && length(parent(ts.inner.work.dirty)) == r.particles
+        @test length(parent(bs.data)) == 4 * r.particles
+        dt = 0.2 * (2 / 60) / 2.0
+        advance!((t, d) -> ts(eq_b, pg, bs, t, d), 0.1, dt)
+        @test all(i -> all(isfinite, block_view(bs, 2)[i]), 1:pg.meta.N)
+        @test length(parent(ts.inner.rho_n)) == 4 * r.particles      # nothing grew
     end
 end
