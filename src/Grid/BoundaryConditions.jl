@@ -528,7 +528,7 @@ _val_of(::Val{B}) where {B} = B
 # equation `BlockOf(eq, b)`. The same arithmetic as `_launch_ghost_fit!` per block (the moment matrix and its factor
 # do not depend on the block, the right-hand side does), computed once instead of once per block.
 function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val,
-                                   blocks::UnitRange{Int}, gs::GhostFitScratch) where {D, M, T}
+                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     N    = pg.meta.N
@@ -544,7 +544,7 @@ function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int
          wrap, gm, tag, valQ, mirror, Val(D)))
     foreach_block(_ghost_apply_body!, backend, N, blocks,
         ((PerBlock(buf), PerBlock(out)), gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures,
-         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded))   # (19 arguments)
+         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded); block_offset)   # (19 arguments)
     return nothing
 end
 

@@ -192,17 +192,21 @@ arguments are those of the per-particle launch, with the per-block ones marked:
 
 - `PerBlock``(a)`: a block-major array (`nb N` elements, block `b` at `(b − 1) N + 1 … b N`); the body
   gets the view of block `b`;
-- `PerBlockEq``(eq)`: the body gets `BlockOf(eq, b)`;
-- `PerBlockIndex``()`: the body gets `b`;
+- `PerBlockEq``(eq)`: the body gets `BlockOf(eq, b + block_offset)`;
+- `PerBlockIndex``()`: the body gets `b + block_offset`;
 - `PerSlot``(x, stride)`: scratch of one launch slot (an `InteractionBuffer`, an interpolator with
   per-particle caches): the body gets `x` with its arrays shifted by `(c − 1) stride` (`_slot_view`), so the
   blocks of one launch write disjoint scratch; the caller sizes `x` for `length(blocks)` slots;
 - `PerSlotEntry``(a)`: the body gets `a[c]`;
 - a tuple: its elements are translated one by one; anything else is passed through unchanged.
+
+`block_offset`: the arrays hold the blocks `blocks` of a block range starting at `block_offset + 1` (a part of a
+state split over devices): the views are those of the local block `b`, the equation and the index get the global
+block `b + block_offset`.
 """
-function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple) where {F}
+function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0) where {F}
     (N == 0 || isempty(blocks)) && return nothing
-    return foreach_particle(_block_pairs_body!, backend, N * length(blocks), (N, first(blocks), body, args))
+    return foreach_particle(_block_pairs_body!, backend, N * length(blocks), (N, first(blocks), block_offset, body, args))
 end
 
 "A block-major array argument of `foreach_block`: the body gets the view of the block."
@@ -231,19 +235,19 @@ Adapt.adapt_structure(to, x::PerSlotEntry) = PerSlotEntry(adapt(to, x.a))
 
 # The argument block `b` (launch slot `c`) sees; `_block_arg(::PerBlockEq)` and the `_slot_view`s of the scratch
 # objects are defined with them (`BlockStepper.jl`)
-@inline _block_arg(x, b, c, N) = x
-@inline _block_arg(x::PerBlock, b, c, N) = @inbounds view(x.a, ((b - 1) * N + 1):(b * N))
-@inline _block_arg(x::Tuple, b, c, N) = map(y -> _block_arg(y, b, c, N), x)
-@inline _block_arg(::PerBlockIndex, b, c, N) = b
-@inline _block_arg(x::PerSlot, b, c, N) = _slot_view(x.x, (c - 1) * x.stride, x.stride)
-@inline _block_arg(x::PerSlotEntry, b, c, N) = @inbounds x.a[c]
+@inline _block_arg(x, b, c, N, off) = x
+@inline _block_arg(x::PerBlock, b, c, N, off) = @inbounds view(x.a, ((b - 1) * N + 1):(b * N))
+@inline _block_arg(x::Tuple, b, c, N, off) = map(y -> _block_arg(y, b, c, N, off), x)
+@inline _block_arg(::PerBlockIndex, b, c, N, off) = b + off
+@inline _block_arg(x::PerSlot, b, c, N, off) = _slot_view(x.x, (c - 1) * x.stride, x.stride)
+@inline _block_arg(x::PerSlotEntry, b, c, N, off) = @inbounds x.a[c]
 @inline _slot_view(x, off::Int, len::Int) = x
 
-# Kernel body (see above): work-item `q` of a launch over the pairs
-@inline function _block_pairs_body!(q, N, b0, body, args)
+# Kernel body (see above): work-item `q` of a launch over the pairs (`b` the local block, `b + off` the global one)
+@inline function _block_pairs_body!(q, N, b0, off, body, args)
     i = (q - 1) % N + 1
     c = (q - 1) ÷ N + 1
     b = b0 + c - 1
-    body(i, map(x -> _block_arg(x, b, c, N), args)...)
+    body(i, map(x -> _block_arg(x, b, c, N, off), args)...)
     return nothing
 end

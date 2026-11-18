@@ -143,15 +143,38 @@ the host, the last two only when an event changes the particle set. [`memory_est
 arrays count `nb` elements per particle, and with the kinetic walls of the grid the block-major scratch of the
 mirrored states and the wall parameters count too. Checked on the KernelAbstractions CPU backend (PoCL) and with CUDA.
 
-A state whose blocks are split over several devices exchanges, per stage, only the per-particle reductions: for
-that the sources give their reduction in the **additive form** of [`reduction_partial_type`](@ref),
-[`block_partial`](@ref) (the contribution of a block range, which adds up over ranges: the moments of those
-velocities) and [`finalize_reduction`](@ref) (the parameters from the sum); a source that gives it gets
-`block_reduce` for free, so the single-device stepper runs the same arithmetic. The orchestration across devices
-(one set of stage buffers per device over its block range, the sum of the partials per particle, the same split
-for the frame velocity, the MOOD flags and the wall reductions) is not part of this version.
+## A state split over devices
 
-Scope of this version: host and single-device storage. Checked against the standard pipeline: the number of launches
+[`BlockDevices`](@ref) runs a block state whose blocks are split over several devices (the velocity decomposition:
+one node with several GPUs, each holding the whole cloud and a range of blocks, driven from one process). Every
+part ([`BlockPart`](@ref)) is a grid on its device, a [`BlockTimeStepper`](@ref) and a [`BlockState`](@ref) built for
+its block range (the `blocks` keyword of both), and a callable that makes the device current. The flux of a block
+depends on that block alone, so the right-hand side needs no exchange; what couples the blocks are per-particle
+reductions, and the step runs the phases of the single stepper in lockstep over the parts, exchanging their
+**partial sums** through host buffers (summed in block order, `(D + 2) N` numbers at a time):
+
+- the sources, in the additive form of [`reduction_partial_type`](@ref), [`block_partial`](@ref) (the contribution
+  of a block range, which adds up over ranges: the moments of those velocities) and [`finalize_reduction`](@ref)
+  (the parameters from the sum); a source that gives it gets `block_reduce` for free, so the single stepper runs
+  the same arithmetic;
+- the frame velocity of a Lagrangian mover ([`fluid_velocity_partial_type`](@ref), [`block_fluid_velocity_partial`](@ref),
+  [`finalize_fluid_velocity`](@ref): density and momentum), the cross-block admissibility of MOOD
+  ([`admissible_partial_type`](@ref), [`block_admissible_partial`](@ref), [`finalize_admissible`](@ref)) and the
+  reduction of a kinetic wall ([`wall_partial_type`](@ref), [`block_wall_partial`](@ref),
+  [`finalize_wall_reduction`](@ref)), each with the same fallback to the direct form;
+- the MOOD flags, OR-ed over the parts before the drop pass that every part runs (the same orders everywhere);
+- for a kinetic wall whose operator reads other blocks of a ghost (a reflected velocity), the mirrored ghost rows
+  of all blocks, gathered per tag (`nb × ghosts` states) and read through the same indices as the whole scratch.
+
+An equation that implements `block_admissible` or a wall operator its reduction without the additive form is
+refused, as are moving boundary pieces, the particle adaptivity and the reordering (host events of the single
+stepper). The result agrees with the single stepper to round-off (the partials are added in a different order).
+Checked with host parts: two and three parts of a four-block transport with the implicit mean relaxation, with
+inflow and outflow, with MOOD u1 and the cross-block admissibility (the same flags and orders on every part), with
+a Lagrangian mover and with reflecting walls whose operator reads the mirror partner's block from another part,
+all within 1e-12 of the single stepper. A device run needs several GPUs; the exchange goes through the host.
+
+Scope of this version: host and single-device storage, and a split state over devices of one process. Checked against the standard pipeline: the number of launches
 of a step does not depend on the number of blocks, every chunking of the passes with scratch gives the standard run
 bit for bit, a one-block Burgers run is bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
@@ -169,9 +192,9 @@ Checked: a prescribed mover gives the standard run bit for bit (positions and vo
 mover with one common velocity transports every state exactly; a reflecting wall operator that reads the mirror
 partner's block reproduces the permutation operator of the standard run to round-off.
 
-What comes next: the orchestration of a block state split over several devices (above), and a conservative
-Lagrangian frame on blocks, which needs the frame velocity of a pair from the particles' velocities (a design
-question: `w_ij = ½ (w_i + w_j)` from the reduction instead of the interface states' velocities).
+What comes next: the exchange of a split state through device-to-device copies instead of the host, and a
+conservative Lagrangian frame on blocks, which needs the frame velocity of a pair from the particles' velocities (a
+design question: `w_ij = ½ (w_i + w_j)` from the reduction instead of the interface states' velocities).
 
 ## API
 
@@ -205,5 +228,18 @@ block_implicit_solve
 reduction_partial_type
 block_partial
 finalize_reduction
+BlockDevices
+BlockPart
+host_state
+wall_partial_type
+block_wall_partial
+finalize_wall_reduction
+fluid_velocity_partial_type
+block_fluid_velocity_partial
+finalize_fluid_velocity
+admissible_partial_type
+block_admissible_partial
+finalize_admissible
 HyperCloudCore.get_time_step(::ParticleGrid{D, W, T}, ::HyperbolicPDE{D, W, T}, ::Any, ::BlockState{W, T}) where {D, W, T}
+HyperCloudCore.get_time_step(::BlockDevices{D, W, T}) where {D, W, T}
 ```
