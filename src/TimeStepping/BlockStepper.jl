@@ -730,6 +730,8 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
     bt        = inner.tableau
     s         = inner.num_stages
     max_order = _extract_order(inner.divergence_interpolator)
+    # (before the sync of moving pieces, which remaps the state: a state of another particle count is refused untouched)
+    bs.N[] == pg.meta.N || throw(ArgumentError("BlockTimeStepper: the state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
     # moving pieces: the ghosts and the region at the step's time first (the sweep may change the particle set)
     has_moving_pieces(pg.geometry) &&
         _with_block_vectors(v -> _sync_boundaries!(pg, T(time), max_order; states = v), bs, pg)
