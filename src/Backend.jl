@@ -176,3 +176,74 @@ function check_resident(backend, x::AbstractArray)
     throw(ArgumentError("a kernel argument of type $(typeof(x)) is not resident on $(backend); build the grid " *
                         "with `device_grid` and the interpolator and time stepper with the matching `storage` type"))
 end
+
+# =========================================================================
+# LAUNCHES OVER (PARTICLE, BLOCK) PAIRS
+# =========================================================================
+"""
+    foreach_block(body, backend, N, blocks::UnitRange, args::Tuple)
+
+Runs the kernel body `body(i, args_b...)` for every particle `i in 1:N` and every block `b in blocks` in **one
+launch** of `N · length(blocks)` work-items: the passes of the block pipeline over a block-major state, instead
+of one launch of `N` work-items per block (which never fills a GPU and pays the launch latency once per block).
+Work-item `q` is particle `i = (q − 1) % N + 1` of the `c`-th block of the launch, `b = first(blocks) + c − 1`:
+consecutive work-items are consecutive particles of one block, the order of the block-major layout. The
+arguments are those of the per-particle launch, with the per-block ones marked:
+
+- `PerBlock``(a)`: a block-major array (`nb N` elements, block `b` at `(b − 1) N + 1 … b N`); the body
+  gets the view of block `b`;
+- `PerBlockEq``(eq)`: the body gets `BlockOf(eq, b)`;
+- `PerBlockIndex``()`: the body gets `b`;
+- `PerSlot``(x, stride)`: scratch of one launch slot (an `InteractionBuffer`, an interpolator with
+  per-particle caches): the body gets `x` with its arrays shifted by `(c − 1) stride` (`_slot_view`), so the
+  blocks of one launch write disjoint scratch; the caller sizes `x` for `length(blocks)` slots;
+- `PerSlotEntry``(a)`: the body gets `a[c]`;
+- a tuple: its elements are translated one by one; anything else is passed through unchanged.
+"""
+function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple) where {F}
+    (N == 0 || isempty(blocks)) && return nothing
+    return foreach_particle(_block_pairs_body!, backend, N * length(blocks), (N, first(blocks), body, args))
+end
+
+"A block-major array argument of `foreach_block`: the body gets the view of the block."
+struct PerBlock{A}
+    a::A
+end
+"An equation argument of `foreach_block`: the body gets `BlockOf(eq, b)`."
+struct PerBlockEq{EQ}
+    eq::EQ
+end
+"The block index as an argument of `foreach_block`."
+struct PerBlockIndex end
+"Scratch of one launch slot of `foreach_block`: the body gets `x` shifted by `(c − 1) stride`."
+struct PerSlot{X}
+    x::X
+    stride::Int
+end
+"An array indexed by the launch slot in `foreach_block`: the body gets `a[c]`."
+struct PerSlotEntry{A}
+    a::A
+end
+Adapt.adapt_structure(to, x::PerBlock) = PerBlock(adapt(to, x.a))
+Adapt.adapt_structure(to, x::PerBlockEq) = PerBlockEq(adapt(to, x.eq))
+Adapt.adapt_structure(to, x::PerSlot) = PerSlot(adapt(to, x.x), x.stride)
+Adapt.adapt_structure(to, x::PerSlotEntry) = PerSlotEntry(adapt(to, x.a))
+
+# The argument block `b` (launch slot `c`) sees; `_block_arg(::PerBlockEq)` and the `_slot_view`s of the scratch
+# objects are defined with them (`BlockStepper.jl`)
+@inline _block_arg(x, b, c, N) = x
+@inline _block_arg(x::PerBlock, b, c, N) = @inbounds view(x.a, ((b - 1) * N + 1):(b * N))
+@inline _block_arg(x::Tuple, b, c, N) = map(y -> _block_arg(y, b, c, N), x)
+@inline _block_arg(::PerBlockIndex, b, c, N) = b
+@inline _block_arg(x::PerSlot, b, c, N) = _slot_view(x.x, (c - 1) * x.stride, x.stride)
+@inline _block_arg(x::PerSlotEntry, b, c, N) = @inbounds x.a[c]
+@inline _slot_view(x, off::Int, len::Int) = x
+
+# Kernel body (see above): work-item `q` of a launch over the pairs
+@inline function _block_pairs_body!(q, N, b0, body, args)
+    i = (q - 1) % N + 1
+    c = (q - 1) ÷ N + 1
+    b = b0 + c - 1
+    body(i, map(x -> _block_arg(x, b, c, N), args)...)
+    return nothing
+end
