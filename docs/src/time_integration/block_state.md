@@ -123,9 +123,11 @@ of the moment matrix, computed once per ghost into a scratch of the stepper and 
 the CFL step of the state (`get_time_step` of a block state, into its `cfl` buffer), and the plateau ranges of `MOODu2`
 in one reduction per launch. The passes that use per-particle
 scratch of the scheme, the pre-pass and the flux pass (the interaction buffer, the gradient cache) and the `MOODu2`
-pre-pass, run over `blocks_per_launch` blocks at a time (the keyword of the stepper; `0`: all blocks) with the
-scratch replicated once per block of the launch, which `memory_estimate` prices (the default 32 costs 32 times the
-scheme's slot buffers and gradient cache of one block). A launch of `N` work-items per block, as the first version
+pre-pass, run over `blocks_per_launch` blocks at a time (the keyword of the stepper; `:auto`, the default, is
+`256 ÷ W` blocks, at least one, so that a launch covers about 256 components whatever the width; `0`: all blocks) with
+the scratch replicated once per block of the launch, which `memory_estimate` prices (at `W = 8` the default 32 costs 32
+times the scheme's slot buffers and gradient cache of one block; a width of 60 with 32 blocks per launch ran out of
+memory on a 16 GB GPU). A launch of `N` work-items per block, as the first version
 ran, never filled a GPU and paid the launch latency once per block and pass: the 2-D orifice of the mixture study
 (5.9k particles, 450 blocks of 8) launched 27 600 kernels per step. Any other boundary condition still runs block
 by block through its functor.

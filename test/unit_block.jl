@@ -855,6 +855,9 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         advance!((t, d) -> ts2(eq2, pg, bs, t, d), 0.1, 0.3 * (2 / 60) / 2.0)
         @test all(i -> all(isfinite, block_view(bs, 4)[i]), 1:pg.meta.N)
         @test_throws ArgumentError BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64); blocks_per_launch = -1)
+        @test_throws ArgumentError BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64); blocks_per_launch = :all)
+        @test BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64)).blocks_per_launch == 128                # :auto = 256 ÷ W
+        @test HyperCloudCore._blocks_per_launch(:auto, 60) == 4 && HyperCloudCore._blocks_per_launch(:auto, 300) == 1
         # the ghost fits' per-ghost geometry: one scratch per basis size, priced by the budget (2-D degree 2: 6 rows), and
         # the CFL buffer of the state (nb per particle)
         pg_g = block_pg_1d(60, 2; bc = bce())

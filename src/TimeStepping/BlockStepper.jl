@@ -483,9 +483,11 @@ state length `nb · W` is a run-time number. The stepper owns a `GeneralRKTimeSt
 Every pass runs in **one launch over all blocks** (`foreach_block`: `nb · N` work-items, the stage kernels of
 the standard stepper on the views of the blocks), except the passes that use per-particle scratch of the scheme (the
 pre-pass and the flux pass with the interaction buffer and the gradient cache, the `MOODu2` pre-pass), which run over
-`blocks_per_launch` blocks at a time with the scratch replicated that many times (`0`: all blocks at once; the default
-32 costs 32 times the scheme's slot and gradient buffers of one block, see `memory_estimate`). A launch of `N` work-items
-per block never filled a GPU and paid the launch latency `nb` times per pass.
+`blocks_per_launch` blocks at a time with the scratch replicated that many times (`:auto`, the default: `256 ÷ W` blocks,
+at least one, so that a launch covers about 256 components whatever the width and the scratch stays about 256/W times
+the scheme's slot and gradient buffers of one block, see `memory_estimate`; `0`: all blocks at once; a width of 60 with
+32 blocks per launch ran out of memory on a 16 GB GPU where 8 with 32 did not). A launch of `N` work-items per block
+never filled a GPU and paid the launch latency `nb` times per pass.
 
 `sources` are [`BlockSourceTerm`](@ref)s. Explicit ones enter the right-hand side of every stage after a
 reduction over the blocks at the stage state; implicit ones are solved at the stages with an implicit diagonal
@@ -536,15 +538,16 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
 end
 
 """
-    BlockTimeStepper(eq, inner::GeneralRKTimeStepper, sources::Tuple; blocks_per_launch = 32)
+    BlockTimeStepper(eq, inner::GeneralRKTimeStepper, sources::Tuple; blocks_per_launch = :auto)
 
 The block stepper around an existing standard stepper for `W` components (built for `BlockOf(eq, 1)`, e.g. by
 `build_timestepper`: all of its options, the memory reservation included); `inner` must carry no sources of its own.
-`blocks_per_launch`: how many blocks a launch of the passes with per-particle scratch covers (see the type).
+`blocks_per_launch`: how many blocks a launch of the passes with per-particle scratch covers (see the type): `:auto`
+(`256 ÷ W`, at least 1), `0` (all) or a positive number.
 """
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeStepper{D, W, T}, sources::Tuple{Vararg{BlockSourceTerm}};
-                          blocks_per_launch::Int = 32) where {D, W, T}
-    blocks_per_launch >= 0 || throw(ArgumentError("BlockTimeStepper: blocks_per_launch must be ≥ 0 (0: all blocks in one launch), got $blocks_per_launch"))
+                          blocks_per_launch::Union{Int, Symbol} = :auto) where {D, W, T}
+    blocks_per_launch = _blocks_per_launch(blocks_per_launch, W)
     inner.pde isa BlockOf && inner.pde.eq === eq ||
         throw(ArgumentError("BlockTimeStepper: the inner stepper must be built for BlockOf(eq, 1) of this equation"))
     (isempty(inner.explicit_sources) && isempty(inner.implicit_sources)) ||
@@ -570,8 +573,18 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
         eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}())
 end
 
+# The blocks per launch from the keyword: `:auto` covers about 256 components per launch
+function _blocks_per_launch(n::Symbol, W::Int)
+    n === :auto || throw(ArgumentError("BlockTimeStepper: blocks_per_launch must be :auto, 0 (all blocks in one launch) or a positive number, got $(repr(n))"))
+    return max(1, 256 ÷ W)
+end
+function _blocks_per_launch(n::Int, W::Int)
+    n >= 0 || throw(ArgumentError("BlockTimeStepper: blocks_per_launch must be :auto, 0 (all blocks in one launch) or a positive number, got $n"))
+    return n
+end
+
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, mood::MOOD,
-                          sources::Tuple{Vararg{BlockSourceTerm}}, tableau::IMEXButcherTableau{T}; blocks_per_launch::Int = 32,
+                          sources::Tuple{Vararg{BlockSourceTerm}}, tableau::IMEXButcherTableau{T}; blocks_per_launch::Union{Int, Symbol} = :auto,
                           kwargs...) where {D, W, T}
     inner = GeneralRKTimeStepper(BlockOf(eq, 1), div_interp, mood, tableau; kwargs...)
     return BlockTimeStepper(eq, inner, sources; blocks_per_launch = blocks_per_launch)
