@@ -208,6 +208,11 @@ end
 end
 
 
+# A backend that counts the kernel launches (runs them on the Polyester backend)
+struct CountingBackend <: HyperCloudCore.ExecutionBackend end
+const LAUNCHES = Ref(0)
+HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = (LAUNCHES[] += 1; foreach_particle(body, PolyesterBackend(), N, args))
+
 @testset "Block pipeline" begin
     @testset "State arrays are passed explicitly: a separate array advances like pg.rhos, the BC reference" begin
         eq = Burgers()
@@ -776,5 +781,79 @@ end
         advance!((t, d) -> ts(eq_b, pg, bs, t, d), 0.3, dt)
         @test length(parent(ts.ghost_scratch)) == 4 * r.particles
         @test all(i -> all(isfinite, block_view(bs, 3)[i]), 1:pg.meta.N)
+    end
+
+    @testset "One launch per pass over the (particle, block) pairs: launch counts, chunks, the package's conditions" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq8 = DiscreteTransport(Val(8), sym)
+        eq4 = DiscreteTransport(Val(4), sym)                                     # 2 blocks
+        eq2 = DiscreteTransport(Val(2), sym)                                     # 4 blocks
+        box(x, k) = 1 + (abs(x) < 0.3 ? 1.0 : 0.0) * (1 + 0.1k)
+        bc() = Dict{Int, AbstractBoundaryCondition}(1 => FixedDirichlet(), 2 => OutflowBC())
+        function block_run(eq_b, W; blocks_per_launch, mood = MOOD(EPD1(), MOODu1(1e-3)), N = 60, tend = 0.2, bc = bc(), count = false,
+                           limiter = MinmodLimiter(:hard))
+            pg = block_pg_1d(N, W; bc = bc)
+            bs = BlockState(eq_b, pg)
+            set_block_states!((x, b) -> State{W, Float64}(ntuple(k -> box(x[1], (b - 1) * W + k), W)), bs, pg)
+            ts = BlockTimeStepper(eq_b, MUSCL(Float64, 1, W, 3, limiter, RusanovFlux()), mood, (), RK3_SSP_Tableau(Float64);
+                                  blocks_per_launch = blocks_per_launch)
+            dt = 0.3 * (2 / N) / 2.0
+            count && set_backend!(CountingBackend())
+            try
+                advance!((t, d) -> ts(eq_b, pg, bs, t, d), tend, dt)
+            finally
+                set_backend!(PolyesterBackend())
+            end
+            return bs, pg, ts
+        end
+        function standard_run(; N = 60, tend = 0.2, bc = bc(), mood = MOOD(EPD1(), MOODu1(1e-3)), limiter = MinmodLimiter(:hard))
+            pg = block_pg_1d(N, 8; bc = bc)
+            for i in 1:pg.meta.N
+                x = pg.core.positions[i][1]
+                pg.rhos[i] = State{8, Float64}(ntuple(k -> box(x, k), 8))
+            end
+            ts = GeneralRKTimeStepper(eq8, MUSCL(Float64, 1, 8, 3, limiter, RusanovFlux()), mood, RK3_SSP_Tableau(Float64))
+            dt = 0.3 * (2 / 60) / 2.0
+            advance!((t, d) -> ts(eq8, pg, t, d), tend, dt)
+            return pg
+        end
+        # the number of launches of a step does not depend on the number of blocks (every pass is one launch over the
+        # pairs; with `blocks_per_launch = 1` the passes with scratch run block by block and the count grows)
+        launches(eq_b, W, bpl) = (LAUNCHES[] = 0; block_run(eq_b, W; blocks_per_launch = bpl, count = true, tend = 0.05); LAUNCHES[])
+        n2 = launches(eq4, 4, 0)
+        n4 = launches(eq2, 2, 0)
+        @test n2 == n4
+        @test launches(eq2, 2, 1) > n4
+        # every chunking gives the same run bit for bit, and the standard run to round-off (the separately compiled flux
+        # pass of the standard stepper differs by ulps at third order): with MOOD u1 and the inflow/outflow conditions,
+        # with MOODu2 (its pre-pass and plateau ranges per chunk: 4 blocks in chunks of 3, flagged particles), and with
+        # the extrapolation condition fitted over the (ghost, block) pairs
+        states(bs) = copy(view(parent(bs.data), 1:(bs.nb * bs.N[])))
+        bce() = Dict{Int, AbstractBoundaryCondition}(1 => ExtrapolationBC(2), 2 => ExtrapolationBC(2))
+        for (mood, bcs, limiter) in ((MOOD(EPD1(), MOODu1(1e-3)), bc, MinmodLimiter(:hard)),
+                                     (MOOD(EPD1(), MOODu2(1e-3)), bc, NoLimiter()),
+                                     (MOOD(NoMOOD()), bce, MinmodLimiter(:hard)))
+            pg_f = standard_run(; mood = mood, bc = bcs(), limiter = limiter)
+            runs = [block_run(eq2, 2; blocks_per_launch = bpl, mood = mood, bc = bcs(), limiter = limiter) for bpl in (0, 1, 3)]
+            @test all(r -> states(r[1]) == states(runs[1][1]), runs)
+            @test all(r -> block_vs_full(r[1], view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-12, runs)
+            mood.criterion isa MOODu2 && @test any(mood_flags(runs[3][3])) && all(i -> all(isfinite, block_view(runs[3][1], 1)[i]), 1:runs[3][1].N[])
+        end
+        # the memory budget prices the scheme's scratch once per block of a launch, and the reservation holds a step
+        pg = block_pg_1d(60, 2; bc = bc())
+        bs = BlockState(eq2, pg)
+        set_block_states!((x, b) -> State{2, Float64}(box(x[1], 2b - 1), box(x[1], 2b)), bs, pg)
+        sc = MUSCL(Float64, 1, 2, 3, MinmodLimiter(:hard), RusanovFlux())
+        ts2 = BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64); blocks_per_launch = 2)
+        ts1 = BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64); blocks_per_launch = 1)
+        e2 = memory_estimate(pg, ts2, bs, sc)
+        e1 = memory_estimate(pg, ts1, bs, sc)
+        @test e2.per_slot == 2 * e1.per_slot - memory_estimate(pg, sc).per_slot
+        @test e2.per_particle - e1.per_particle == sizeof(eltype(sc.gradients))
+        r = reserve!(pg, ts2, bs, sc; limit = 2 * e2.bytes)
+        @test ts2.grad_scratch.fixed && length(parent(ts2.grad_scratch)) == 2 * r.particles
+        advance!((t, d) -> ts2(eq2, pg, bs, t, d), 0.1, 0.3 * (2 / 60) / 2.0)
+        @test all(i -> all(isfinite, block_view(bs, 4)[i]), 1:pg.meta.N)
+        @test_throws ArgumentError BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64); blocks_per_launch = -1)
     end
 end

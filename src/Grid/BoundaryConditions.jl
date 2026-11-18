@@ -140,6 +140,61 @@ end
     status[i] == 0 && (buf[i] = rhos[i])
     return nothing
 end
+
+# The outflow condition of the blocks of a block-major state `Y` (`reference` likewise): the donor search once, on
+# the particles (the passes record the donor of every resolved target in `donors` instead of copying a state), then
+# every block copies in one launch from the root of the donor chain, the interior particle whose state the passes
+# would have copied along it (bit-identical to the passes on every block)
+function _outflow_blocks!(pg::ParticleGrid{D, M, T}, Y, reference, tag::Int, N::Int, blocks::UnitRange{Int}, donors) where {D, M, T}
+    nb      = pg.neighbor
+    status  = pg.shared.int_buffer
+    backend = get_backend()
+    foreach_particle(_outflow_init!, backend, N, (status, pg.core.tags, pg.core.is_boundary, tag))
+    for pass in 1:5
+        foreach_particle(_outflow_donor_pass!, backend, N, (donors, status, nb.ranges, nb.indices, nb.distances, pass, T(Inf)))
+        any(==(0), view(status, 1:N)) || break
+    end
+    foreach_block(_outflow_copy!, backend, N, blocks, (PerBlock(Y), PerBlock(reference), status, donors))
+    return nothing
+end
+
+# Kernel bodies (see Backend.jl): `_outflow_pass!` recording the donor, and the copy of a block from the chain's root
+@inline function _outflow_donor_pass!(i, donors, status, nb_slices, nb_indices, dists, pass, inf)
+    status[i] == 0 || return nothing
+    closest = -1
+    min_d2  = inf
+    @inbounds for k in nb_slices[i]
+        j = nb_indices[k]
+        s = status[j]
+        if 0 < s <= pass
+            d2 = sum(abs2, dists[k])
+            if d2 < min_d2
+                min_d2  = d2
+                closest = j
+            end
+        end
+    end
+    if closest != -1
+        donors[i] = closest
+        status[i] = pass + 1
+    end
+    return nothing
+end
+@inline function _outflow_copy!(i, buf, rhos, status, donors)
+    @inbounds begin
+        s = status[i]
+        if s == 0
+            buf[i] = rhos[i]
+        elseif s > 1
+            j = donors[i]
+            while status[j] > 1              # a pass-`p` target's donor was resolved at an earlier pass: ≤ 5 hops
+                j = donors[j]
+            end
+            buf[i] = buf[j]
+        end
+    end
+    return nothing
+end
 # =========================================================================
 # Ghost states from the interior: one-sided fits at the nearest interior particle
 # =========================================================================
@@ -288,9 +343,10 @@ end
 _ghost_degree(::Val{Q}, ::Val{D}) where {Q, D} = Val(D == 3 ? min(Q, 3) : Q)
 
 # `out`: the array the ghost states are written to (the data of the fit are always read from `buf`; the block pipeline
-# fits into a scratch array first and applies its wall operators from there)
+# fits into a scratch array first and applies its wall operators from there). `blocks`: `buf` and `out` are block-major
+# arrays of these blocks, fitted in one launch over the (ghost, block) pairs with the block equation `BlockOf(eq, b)`
 function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val;
-                            out = buf) where {D, M, T}
+                            out = buf, blocks::Union{Nothing, UnitRange{Int}} = nothing) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     invL = one(T) / minimum(pg.meta.dx)
@@ -298,10 +354,18 @@ function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, val
     # the time of the state being built (the interior cloud does not move), and the wall point gets the velocity
     gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
                                            GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
-    foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
-        ((buf, out), pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
-         pg.core.wall_curvatures, pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
-         (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
+    c = pg.core
+    if blocks === nothing
+        foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
+            ((buf, out), c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, c.particle_orders,
+             nb.ranges, nb.indices, nb.weight_func, (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq,
+             mirror, bounded, Val(D)))   # (≤ 20 arguments)
+    else
+        foreach_block(_ghost_fit_body!, get_backend(), pg.meta.N, blocks,
+            ((PerBlock(buf), PerBlock(out)), c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures,
+             c.particle_orders, nb.ranges, nb.indices, nb.weight_func, (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag,
+             valQ, op, PerBlockEq(eq), mirror, bounded, Val(D)))
+    end
     return nothing
 end
 

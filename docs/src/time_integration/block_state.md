@@ -111,6 +111,22 @@ inside the step (the ghosts placed at every stage, the sweep at the end with eve
 [`reorder!`](@ref)`(pg, bs)`. Checked: with a compressing prescribed mover and the adaptivity, with a piston
 sweeping a tube, the block runs reproduce the standard runs bit for bit, particle set included.
 
+## One launch per pass
+
+Every pass of the stepper runs in **one launch over the (particle, block) pairs** (`foreach_block`: `nb · N`
+work-items, the stage kernels of the standard stepper on the views of the blocks, consecutive work-items being
+consecutive particles of one block as the block-major layout stores them): the predictor, the implicit and explicit
+sources, the Euler substep, the MOOD flag pass, the wall application and the package's boundary conditions
+(`FixedDirichlet`; `OutflowBC` with its donor search once per tag, every block copying from the root of the donor
+chain; `ExtrapolationBC` and `MirrorBC` fitted over the (ghost, block) pairs). The passes that use per-particle
+scratch of the scheme, the pre-pass and the flux pass (the interaction buffer, the gradient cache) and the `MOODu2`
+pre-pass, run over `blocks_per_launch` blocks at a time (the keyword of the stepper; `0`: all blocks) with the
+scratch replicated once per block of the launch, which `memory_estimate` prices (the default 32 costs 32 times the
+scheme's slot buffers and gradient cache of one block). A launch of `N` work-items per block, as the first version
+ran, never filled a GPU and paid the launch latency once per block and pass: the 2-D orifice of the mixture study
+(5.9k particles, 450 blocks of 8) launched 27 600 kernels per step. Any other boundary condition still runs block
+by block through its functor.
+
 ## Devices and the velocity decomposition
 
 The block pipeline runs on any storage: the block state, the stepper's buffers, the parameter arrays of the sources
@@ -130,8 +146,9 @@ velocities) and [`finalize_reduction`](@ref) (the parameters from the sum); a so
 (one set of stage buffers per device over its block range, the sum of the partials per particle, the same split
 for the frame velocity, the MOOD flags and the wall reductions) is not part of this version.
 
-Scope of this version: host and single-device storage. Checked against the standard pipeline: a one-block Burgers run is
-bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
+Scope of this version: host and single-device storage. Checked against the standard pipeline: the number of launches
+of a step does not depend on the number of blocks, every chunking of the passes with scratch gives the standard run
+bit for bit, a one-block Burgers run is bit-identical, a discrete transport with four blocks of two velocities reproduces the eight-component run
 to round-off (bit for bit with `MinmodLimiter`; the Venkatakrishnan limiter's tolerance depends on the
 state vector as a whole) and converges to the exact solution at second order, in 1-D and 2-D, with inflow
 and outflow conditions, on the Polyester and the KernelAbstractions CPU backends. With a source that needs

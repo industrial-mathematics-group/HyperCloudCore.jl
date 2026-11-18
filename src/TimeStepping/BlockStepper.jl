@@ -325,6 +325,35 @@ end
 end
 
 # =========================================================================
+# LAUNCHES OVER THE PAIRS (see `foreach_block`, Backend.jl): the block equation and the scratch of a launch slot
+# =========================================================================
+@inline _block_arg(x::PerBlockEq, b, c, N) = BlockOf(x.eq, b)
+# The interaction buffer of a launch slot: the slots `off + 1 … off + len` (the neighbour slots of the grid, once per block
+# of the launch; `len == 0` when the scheme does not use them)
+@inline _slot_view(ib::InteractionBuffer{D, M, T}, off::Int, len::Int) where {D, M, T} =
+    InteractionBuffer{D, M, T}((@inbounds view(ib.df_flux, (off + 1):(off + len))), (@inbounds view(ib.df_scratch, (off + 1):(off + len))),
+                               (@inbounds view(ib.mask, (off + 1):(off + len))))
+# The scheme of a launch slot, given as `(interp, scratch)`: a MUSCL scheme with the stepper's replicated gradient cache
+# (per particle, the one state-dependent cache of the scheme) shifted by the slot; the geometry caches (the MLS weights,
+# the slot weights) are shared by the blocks. Any other scheme has no per-particle scratch and is passed as it is.
+@inline _slot_view(x::Tuple{<:DivergenceInterpolator, Nothing}, off::Int, len::Int) = x[1]
+@inline function _slot_view(x::Tuple{<:MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}, <:AbstractVector}, off::Int, len::Int) where {D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}
+    m, scratch = x
+    return MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}(m.interpolators, m.limiter, m.flux, (@inbounds view(scratch, (off + 1):(off + len))),
+                                                      m.grad_weights, m.div_weights, m.dweights, m.mweights, m.streamed, m.moment)
+end
+# The replicated per-particle scratch of a scheme for the blocks of one launch (`blocks_per_launch` copies, on the
+# stepper's storage): the gradient cache of a MUSCL scheme; `nothing` for a scheme without one
+_launch_scratch(::DivergenceInterpolator, AT) = nothing
+_launch_scratch(m::MUSCL, AT) = Growable{eltype(m.gradients)}(AT)
+_launch_scratch_size!(::Nothing, n::Int) = nothing
+function _launch_scratch_size!(g::Growable, n::Int)
+    ensure_capacity!(g, n)
+    fill!(view(parent(g), 1:n), zero(eltype(g)))      # (as `update_size!` of the scheme does for its own cache)
+    return nothing
+end
+
+# =========================================================================
 # THE BLOCK STATE
 # =========================================================================
 """
@@ -449,6 +478,13 @@ state length `nb · W` is a run-time number. The stepper owns a `GeneralRKTimeSt
 (`inner`: the interpolator, MOOD scratch, buffers and options; its stage buffers are sized to `nb · N`), and the
 `kwargs` are its options (`mood_substeps`, `reset_orders_per_stage`, `storage`, …).
 
+Every pass runs in **one launch over all blocks** (`foreach_block`: `nb · N` work-items, the stage kernels of
+the standard stepper on the views of the blocks), except the passes that use per-particle scratch of the scheme (the
+pre-pass and the flux pass with the interaction buffer and the gradient cache, the `MOODu2` pre-pass), which run over
+`blocks_per_launch` blocks at a time with the scratch replicated that many times (`0`: all blocks at once; the default
+32 costs 32 times the scheme's slot and gradient buffers of one block, see `memory_estimate`). A launch of `N` work-items
+per block never filled a GPU and paid the launch latency `nb` times per pass.
+
 `sources` are [`BlockSourceTerm`](@ref)s. Explicit ones enter the right-hand side of every stage after a
 reduction over the blocks at the stage state; implicit ones are solved at the stages with an implicit diagonal
 (`a_ii ≠ 0`: the reduction with `dt_coeff = Δt a_ii`, then the solve per block, the right-hand side
@@ -472,14 +508,16 @@ the frame velocity of every interface state, which a block cannot give.) Moving 
 swept as in the standard stepper, the sweep remapping every block (`sweep_boundaries!` with the blocks as state
 arrays); [`adapt_particles!`](@ref)`(pg, ad, order, bs)` is the particle adaptivity between steps and
 [`reorder!`](@ref)`(pg, bs)` the spatial reordering. The boundary conditions of the grid apply per block with the
-block's state of the step start as the reference; a `MirrorBC` whose operator reduces over the blocks
+block's state of the step start as the reference: the package's conditions (`FixedDirichlet`, `OutflowBC`,
+`ExtrapolationBC`, `MirrorBC`) in one launch over the blocks (the outflow's donor search once per tag), any other
+condition block by block through its functor; a `MirrorBC` whose operator reduces over the blocks
 ([`block_wall_reduce`](@ref)) runs in the pipeline's passes. For one block (`num_blocks(eq) == 1`) the
 result is bit-identical to `GeneralRKTimeStepper` without sources, and agrees to round-off with the equivalent
 sources (a separately compiled flux pass).
 """
 struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTimeStepper{D, W, T},
                         EST <: Tuple{Vararg{BlockSourceTerm}}, IST <: Tuple{Vararg{BlockSourceTerm}},
-                        GW <: Growable{Space{D, T}}, GS <: Growable{State{W, T}}} <: TimeStepper
+                        GW <: Growable{Space{D, T}}, GS <: Growable{State{W, T}}, GI <: Growable{Int}, GG} <: TimeStepper
     pde::EQ
     inner::TS
     explicit_sources::EST
@@ -487,15 +525,22 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
     grid_w::GW                      # the frame velocities of a moving grid (per particle)
     ghost_scratch::GS               # the mirrored blocks of the wall ghosts (block-major)
     wall_params::Dict{Int, Any}     # the wall parameters per boundary tag (a Growable of `wall_reduction_type`)
+    blocks_per_launch::Int          # blocks per launch of the passes with per-particle scratch (0: all)
+    donors::GI                      # the donor of every outflow target (per particle)
+    u2_ranges::GS                   # the global range per block of a launch (the plateau test of MOODu2)
+    grad_scratch::GG                # the scheme's gradient cache for the blocks of a launch (`nothing`: none)
 end
 
 """
-    BlockTimeStepper(eq, inner::GeneralRKTimeStepper, sources::Tuple)
+    BlockTimeStepper(eq, inner::GeneralRKTimeStepper, sources::Tuple; blocks_per_launch = 32)
 
 The block stepper around an existing standard stepper for `W` components (built for `BlockOf(eq, 1)`, e.g. by
 `build_timestepper`: all of its options, the memory reservation included); `inner` must carry no sources of its own.
+`blocks_per_launch`: how many blocks a launch of the passes with per-particle scratch covers (see the type).
 """
-function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeStepper{D, W, T}, sources::Tuple{Vararg{BlockSourceTerm}}) where {D, W, T}
+function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeStepper{D, W, T}, sources::Tuple{Vararg{BlockSourceTerm}};
+                          blocks_per_launch::Int = 32) where {D, W, T}
+    blocks_per_launch >= 0 || throw(ArgumentError("BlockTimeStepper: blocks_per_launch must be ≥ 0 (0: all blocks in one launch), got $blocks_per_launch"))
     inner.pde isa BlockOf && inner.pde.eq === eq ||
         throw(ArgumentError("BlockTimeStepper: the inner stepper must be built for BlockOf(eq, 1) of this equation"))
     (isempty(inner.explicit_sources) && isempty(inner.implicit_sources)) ||
@@ -510,19 +555,30 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     AT = typeof(parent(inner.rho_n))
     gw = Growable{Space{D, T}}(AT.name.wrapper)
     gs = Growable{State{W, T}}(AT.name.wrapper)
+    gi = Growable{Int}(AT.name.wrapper)
+    gr = Growable{State{W, T}}(AT.name.wrapper)
+    gg = _launch_scratch(inner.divergence_interpolator, AT.name.wrapper)
     # the parameter arrays of the sources live where the stage arrays live (a `BlockSourceTerm` built with the default
     # `storage = Array` for a device stepper failed at the first launch: a host array as a kernel argument)
     explicit_sts = map(st -> _on_storage(st, AT.name.wrapper), explicit_sts)
     implicit_sts = map(st -> _on_storage(st, AT.name.wrapper), implicit_sts)
-    return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs)}(
-        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}())
+    return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg)}(
+        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg)
 end
 
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, mood::MOOD,
-                          sources::Tuple{Vararg{BlockSourceTerm}}, tableau::IMEXButcherTableau{T}; kwargs...) where {D, W, T}
+                          sources::Tuple{Vararg{BlockSourceTerm}}, tableau::IMEXButcherTableau{T}; blocks_per_launch::Int = 32,
+                          kwargs...) where {D, W, T}
     inner = GeneralRKTimeStepper(BlockOf(eq, 1), div_interp, mood, tableau; kwargs...)
-    return BlockTimeStepper(eq, inner, sources)
+    return BlockTimeStepper(eq, inner, sources; blocks_per_launch = blocks_per_launch)
 end
+
+# The blocks of one launch of the passes with per-particle scratch
+_launch_width(ts::BlockTimeStepper, nb::Int) = ts.blocks_per_launch == 0 ? nb : min(ts.blocks_per_launch, nb)
+# The chunks of blocks those passes run over
+_launch_chunks(ts::BlockTimeStepper, nb::Int) = (nc = _launch_width(ts, nb); (b0:min(b0 + nc - 1, nb) for b0 in 1:nc:nb))
+# The slot stride of the interaction buffer in a launch (0: the scheme does not use it)
+_slot_stride(inner::GeneralRKTimeStepper, pg) = uses_slot_buffers(inner.divergence_interpolator) ? length(pg.neighbor.indices) : 0
 BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, sources::Tuple{Vararg{BlockSourceTerm}},
                  tableau::IMEXButcherTableau{T}; kwargs...) where {D, W, T} =
     BlockTimeStepper(eq, div_interp, MOOD(NoMOOD()), sources, tableau; kwargs...)
@@ -536,7 +592,7 @@ _on_storage(bst::BlockSourceTerm, AT) = typeof(parent(bst.params)).name.wrapper 
 # The inner stepper's buffers for `nb` blocks of `N` particles: the state arrays block-major (`nb N`), the positions,
 # volumes and MOOD masks per particle (`update_size!(inner, nb N, …)` sized those `nb` times too, and a reservation of
 # the block stepper failed on them)
-function _block_update_size!(inner::GeneralRKTimeStepper, N::Int, nb::Int, M_neighbors::Int, moving::Bool)
+function _block_update_size!(inner::GeneralRKTimeStepper, N::Int, nb::Int, M_neighbors::Int, moving::Bool, nc::Int)
     for g in (inner.rho_n, inner.rho_cand, inner.Y_stages..., inner.K_E_stages..., inner.K_I_stages...)
         ensure_capacity!(g, nb * N)
     end
@@ -546,7 +602,7 @@ function _block_update_size!(inner::GeneralRKTimeStepper, N::Int, nb::Int, M_nei
             ensure_capacity!(g, N)
         end
     end
-    uses_slot_buffers(inner.divergence_interpolator) && update_size!(inner.int_buffer, M_neighbors)
+    uses_slot_buffers(inner.divergence_interpolator) && update_size!(inner.int_buffer, nc * M_neighbors)   # (once per block of a launch)
     update_size!(inner.work, N)
     return nothing
 end
@@ -595,9 +651,13 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
     orders = pg.core.particle_orders
     moving = _block_moving(pg)
 
-    _block_update_size!(inner, N, nb, length(pg.neighbor.indices), moving)
+    nc = _launch_width(ts, nb)
+    _block_update_size!(inner, N, nb, length(pg.neighbor.indices), moving, nc)
     update_size!(interp, N)
+    _launch_scratch_size!(ts.grad_scratch, nc * N)         # (the gradient cache once per block of a launch)
     moving && ensure_capacity!(ts.grid_w, N)
+    ensure_capacity!(ts.donors, N)
+    ensure_capacity!(ts.u2_ranges, nc)
     copyto!(parent(inner.rho_n), 1, parent(bs.data), 1, nb * N)
     moving && copyto!(parent(inner.x_n), 1, pg.core.positions, 1, N)
     moving && copyto!(parent(inner.v_n), 1, pg.core.volumes, 1, N)
@@ -640,20 +700,38 @@ end
 
 # The boundary conditions of a stage array for all blocks: a `MirrorBC` whose operator reduces over the blocks runs in
 # the pipeline's passes (the mirrored fit of every block into the scratch, the reduction per ghost, the application per
-# block); every other condition is applied block by block with the block's reference state
+# block); the package's other conditions run in one launch over the blocks with the block's reference state, any other
+# condition block by block through its functor
 function _block_apply_bcs!(ts::BlockTimeStepper{D, W, T}, eq, pg, stage::Growable, t, N::Int, nb::Int) where {D, W, T}
-    inner = ts.inner
     for (tag, bc) in pg.geometry.bc_map
         if _is_block_wall(bc, eq)
             _block_mirror!(ts, bc, pg, stage, tag, eq, t, N, nb)
         else
-            _block_bc_each!(bc, pg, stage, tag, inner, eq, t, N, nb)
+            _block_bc!(bc, ts, pg, stage, tag, eq, t, N, nb)
         end
     end
     return nothing
 end
-# (a function barrier: `bc` comes untyped out of the map, the loop over the blocks dispatched on it in every iteration)
-function _block_bc_each!(bc, pg, stage, tag, inner, eq, t, N::Int, nb::Int)
+# (function barriers: `bc` comes untyped out of the map)
+function _block_bc!(::FixedDirichlet, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
+    foreach_block(_dirichlet_body!, get_backend(), N, 1:nb, (PerBlock(stage), PerBlock(ts.inner.rho_n), pg.core.tags, pg.core.is_boundary, tag))
+    return nothing
+end
+function _block_bc!(::OutflowBC, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
+    _outflow_blocks!(pg, stage, ts.inner.rho_n, tag, N, 1:nb, ts.donors)
+    return nothing
+end
+function _block_bc!(::ExtrapolationBC{Q}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q}
+    _launch_ghost_fit!(pg, stage, tag, eq, t, Val(Q), nothing, Val(false), Val(false); blocks = 1:nb)
+    return nothing
+end
+function _block_bc!(bc::MirrorBC{Q, F, B}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q, F, B}
+    # (an operator without a reduction, applied to every block's mirrored state with `BlockOf(eq, b)`)
+    _launch_ghost_fit!(pg, stage, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B); blocks = 1:nb)
+    return nothing
+end
+function _block_bc!(bc, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
+    inner = ts.inner
     for b in 1:nb
         bc(pg, _blk(stage, b, N), tag, inner, BlockOf(eq, b), t, _blk(inner.rho_n, b, N))
     end
@@ -663,9 +741,7 @@ end
 function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int) where {D, W, T, Q, F, B}
     scratch = ts.ghost_scratch
     ensure_capacity!(scratch, nb * N)
-    for b in 1:nb
-        _launch_ghost_fit!(pg, _blk(stage, b, N), tag, BlockOf(eq, b), t, Val(Q), _WallOp(nothing), Val(true), Val(B); out = _blk(scratch, b, N))
-    end
+    _launch_ghost_fit!(pg, stage, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B); out = scratch, blocks = 1:nb)
     _block_mirror_passes!(_wall_params!(ts, bc, tag, eq), ts, bc, pg, stage, tag, eq, t, N, nb)
     return nothing
 end
@@ -688,11 +764,9 @@ function _block_mirror_passes!(params::Growable, ts::BlockTimeStepper{D, W, T}, 
     backend = get_backend()
     foreach_particle(_block_wall_reduce_body!, backend, N,
         (params, bc.op, eq, S, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
-    for b in 1:nb
-        foreach_particle(_block_wall_apply_body!, backend, N,
-            (_blk(stage, b, N), _blk(scratch, b, N), params, bc.op, eq, b, S, N, nb, c.positions, c.is_boundary, c.tags, c.normals,
-             c.wall_distances, c.wall_curvatures, gm, tag))
-    end
+    foreach_block(_block_wall_apply_body!, backend, N, 1:nb,
+        (PerBlock(stage), PerBlock(scratch), params, bc.op, eq, PerBlockIndex(), S, N, nb, c.positions, c.is_boundary, c.tags, c.normals,
+         c.wall_distances, c.wall_curvatures, gm, tag))
     return nothing
 end
 
@@ -709,28 +783,22 @@ function _block_form_candidate!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, d
     is_final = i > s
     t_i   = is_final ? time + dt : time + bt.c_t[i] * dt
     stage = is_final ? inner.rho_cand : inner.Y_stages[i]
-    for b in 1:nb
-        _block_candidate!(ts, pg, b, N, i, dt)
-    end
+    _block_candidate!(ts, pg, N, nb, i, dt)
     if !is_final && !isempty(ts.implicit_sources)
         a_ii = bt.a[i, i]
         Y_i  = parent(stage)
         if abs(a_ii) > T(1e-14)
             for (n, src) in enumerate(ts.implicit_sources)
                 reduce_blocks!(src, Y_i, N, nb, pg, t_i, dt * a_ii)
-                for b in 1:nb
-                    foreach_particle(_block_implicit_step!, backend, N,
-                        (_blk(stage, b, N), _blk(inner.K_I_stages[i], b, N), src.params, src.term, b, isb,
-                         dt * a_ii, inv(dt * a_ii), pg, t_i, n == 1))
-                end
+                foreach_block(_block_implicit_step!, backend, N, 1:nb,
+                    (PerBlock(stage), PerBlock(inner.K_I_stages[i]), src.params, src.term, PerBlockIndex(), isb,
+                     dt * a_ii, inv(dt * a_ii), pg, t_i, n == 1))
             end
         else
             for (n, src) in enumerate(ts.implicit_sources)
                 reduce_blocks!(src, Y_i, N, nb, pg, t_i, zero(T))
-                for b in 1:nb
-                    foreach_particle(_block_implicit_rhs!, backend, N,
-                        (_blk(inner.K_I_stages[i], b, N), _blk(stage, b, N), src.params, src.term, b, isb, pg, t_i, n == 1))
-                end
+                foreach_block(_block_implicit_rhs!, backend, N, 1:nb,
+                    (PerBlock(inner.K_I_stages[i]), PerBlock(stage), src.params, src.term, PerBlockIndex(), isb, pg, t_i, n == 1))
             end
         end
     end
@@ -738,8 +806,10 @@ function _block_form_candidate!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, d
     return t_i
 end
 
-# The right-hand side of stage `i` for all blocks: the flux pass (all interior particles, or the dirty ones of a MOOD
-# re-form) and the explicit sources (reduced at the stage state on a full pass; a partial pass reuses the parameters)
+# The right-hand side of stage `i` for all blocks: the scheme's pre-pass and the flux pass of `compute_explicit_rhs!`
+# over the blocks of a launch (all interior particles, or the dirty ones of a MOOD re-form; a partial pass gathers the
+# gradients of all particles, as the cache holds another block's) and the explicit sources (reduced at the stage state
+# on a full pass; a partial pass reuses the parameters)
 function _block_rhs!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full::Bool) where {D, W, T}
     inner   = ts.inner
     N       = pg.meta.N
@@ -747,25 +817,30 @@ function _block_rhs!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full::B
     backend = get_backend()
     Y_i     = parent(inner.Y_stages[i])
     moving  = _block_moving(pg)
+    interp  = inner.divergence_interpolator
+    isb     = pg.core.is_boundary
     if moving
         # the frame velocity of every particle at this stage state (also on a partial pass: the stage may be an earlier one)
         foreach_particle(_block_velocity_body!, backend, N,
-            (ts.grid_w, pg.mover, eq, Y_i, N, nb, pg, pg.core.is_boundary, t_i, zero(Space{D, T})))
+            (ts.grid_w, pg.mover, eq, Y_i, N, nb, pg, isb, t_i, zero(Space{D, T})))
     end
-    mover = _BlockMover(pg.mover, ts.grid_w)
-    for b in 1:nb
-        # (a partial pass gathers the gradients of all particles: the cache is shared by the blocks)
-        compute_explicit_rhs!(inner, BlockOf(eq, b), pg, _blk(inner.K_E_stages[i], b, N), inner.K_X_stages[i],
-                              inner.K_V_stages[i], inner.V_stages[i], _blk(inner.Y_stages[i], b, N), t_i, full;
-                              gather = true, mover = mover, moving = moving)
+    mover  = _BlockMover(pg.mover, ts.grid_w)
+    stride = _slot_stride(inner, pg)
+    prepare_geometry!(interp, pg)                           # (refreshes the geometry caches only if the grid changed)
+    for blocks in _launch_chunks(ts, nb)
+        foreach_block(_rhs_gather!, backend, N, blocks,
+            (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
+             inner.work.changed, true))
+        foreach_block(_rhs_flux!, backend, N, blocks,
+            (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
+             inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
+             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})))
     end
     for src in ts.explicit_sources
         full && reduce_blocks!(src, Y_i, N, nb, pg, t_i, zero(T))
-        for b in 1:nb
-            foreach_particle(_block_explicit_source!, backend, N,
-                (_blk(inner.K_E_stages[i], b, N), _blk(inner.Y_stages[i], b, N), src.params, src.term, b, pg.core.is_boundary, pg, t_i,
-                 full, parent(inner.work.dirty)))
-        end
+        foreach_block(_block_explicit_source!, backend, N, 1:nb,
+            (PerBlock(inner.K_E_stages[i]), PerBlock(inner.Y_stages[i]), src.params, src.term, PerBlockIndex(), isb, pg, t_i,
+             full, parent(inner.work.dirty)))
     end
     return nothing
 end
@@ -776,48 +851,63 @@ function _block_form_substep!(ts::BlockTimeStepper{D, W, T}, pg, i::Int, dt::T) 
     N     = pg.meta.N
     nb    = num_blocks(ts.pde)                 # (checked against the state's and the step's equation at the step start)
     with_KI = !isempty(ts.implicit_sources)
-    for b in 1:nb
-        foreach_particle(_substep_body!, get_backend(), N,
-            (_blk(inner.rho_sub, b, N), _blk(inner.Y_stages[i - 1], b, N), _blk(inner.K_E_stages[i - 1], b, N), _blk(inner.K_I_stages[i - 1], b, N),
-             (inner.K_V_stages[i - 1], inner.V_stages[i - 1]), pg.core.is_boundary, inner.substep_ratio * dt, with_KI, false))
-    end
+    foreach_block(_substep_body!, get_backend(), N, 1:nb,
+        (PerBlock(inner.rho_sub), PerBlock(inner.Y_stages[i - 1]), PerBlock(inner.K_E_stages[i - 1]), PerBlock(inner.K_I_stages[i - 1]),
+         (inner.K_V_stages[i - 1], inner.V_stages[i - 1]), pg.core.is_boundary, inner.substep_ratio * dt, with_KI, false))
     return nothing
 end
 
-# The candidate MOOD checks at checkpoint `i` (the substep or the stage state / final combination), block `b`
-@inline function _block_candidate_view(ts::BlockTimeStepper, i::Int, cand_sub::Bool, b::Int, N::Int)
+# The candidate MOOD checks at checkpoint `i` (the substep or the stage state / final combination), all blocks
+@inline function _block_candidate(ts::BlockTimeStepper, i::Int, cand_sub::Bool)
     inner = ts.inner
-    cand_sub && return _blk(inner.rho_sub, b, N)
-    return i > inner.num_stages ? _blk(inner.rho_cand, b, N) : _blk(inner.Y_stages[i], b, N)
+    cand_sub && return inner.rho_sub
+    return i > inner.num_stages ? inner.rho_cand : inner.Y_stages[i]
 end
-@inline function _block_candidate_array(ts::BlockTimeStepper, i::Int, cand_sub::Bool)
-    inner = ts.inner
-    cand_sub && return parent(inner.rho_sub)
-    return parent(i > inner.num_stages ? inner.rho_cand : inner.Y_stages[i])
-end
+@inline _block_candidate_array(ts::BlockTimeStepper, i::Int, cand_sub::Bool) = parent(_block_candidate(ts, i, cand_sub))
 
-# `detect_and_drop!` of the block pipeline: the flag pass per block (the criterion on the block's components, the per-block
-# admissibility), the cross-block admissibility, one drop pass (the particle's order is shared by its blocks)
+# `detect_and_drop!` of the block pipeline: the flag pass over the blocks (the criterion on the block's components, the
+# per-block admissibility; a particle is flagged if any block flags it), the cross-block admissibility, one drop pass
+# (the particle's order is shared by its blocks)
 function _block_detect_and_drop!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub::Bool, full::Bool)
     inner = ts.inner
     work  = inner.work
-    inner.mood.criterion isa NoMOOD && return false
+    crit  = inner.mood.criterion
+    crit isa NoMOOD && return false
     N  = pg.meta.N
     nb = num_blocks(eq)
     _mood_reset!(work, N)
-    interp = inner.divergence_interpolator
-    regather = inner.mood.criterion isa MOODu2 && has_cached_gradients(interp)
-    for b in 1:nb
-        # MOODu2 reads the scheme's gradient cache (its curvature test), which holds the last block's gradients:
-        # the block's own gradients at the previous stage are gathered first (one pre-pass per block and checkpoint)
-        regather && foreach_particle(_rhs_gather!, get_backend(), N,
-            (_blk(inner.Y_stages[i - 1], b, N), pg.core.is_boundary, pg.neighbor.ranges, inner.int_buffer, interp, pg, parent(work.changed), true))
-        _mood_flag_pass!(inner.mood, work, interp, pg, _blk(inner.Y_stages[i - 1], b, N),
-                         _block_candidate_view(ts, i, cand_sub, b, N), full, BlockOf(eq, b))
+    interp  = inner.divergence_interpolator
+    backend = get_backend()
+    isb     = pg.core.is_boundary
+    Y_prev  = inner.Y_stages[i - 1]
+    cand    = _block_candidate(ts, i, cand_sub)
+    # MOODu2 reads the scheme's gradient cache (its curvature test), which holds another block's gradients: the block's
+    # own gradients at the previous stage are gathered first, into the cache of its launch slot (the chunks of the flux pass)
+    regather = crit isa MOODu2 && has_cached_gradients(interp)
+    stride   = _slot_stride(inner, pg)
+    for blocks in (regather ? _launch_chunks(ts, nb) : (1:nb,))
+        regather && foreach_block(_rhs_gather!, backend, N, blocks,
+            (PerBlock(Y_prev), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg, parent(work.changed), true))
+        foreach_block(_mood_flag!, backend, N, blocks,
+            (inner.mood, PerSlot((interp, ts.grad_scratch), N), pg, PerBlock(Y_prev), PerBlock(cand), pg.neighbor.ranges, isb, parent(work.dirty),
+             parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, Y_prev, blocks, N)))
     end
-    foreach_particle(_block_admissible_flag!, get_backend(), N,
-        (parent(work.triggered), pg.core.is_boundary, parent(work.dirty), full, eq, _block_candidate_array(ts, i, cand_sub), N, nb))
+    foreach_particle(_block_admissible_flag!, backend, N,
+        (parent(work.triggered), isb, parent(work.dirty), full, eq, _block_candidate_array(ts, i, cand_sub), N, nb))
     return _mood_drop_pass!(inner.mood, work, pg)
+end
+
+# The global range per block of a launch for the plateau test of MOODu2 (`_global_range` of every block, into the
+# stepper's per-slot array); `nothing` when the test is off or the criterion another
+_block_global_ranges!(ts::BlockTimeStepper, crit, Y_prev, blocks, N::Int) = nothing
+function _block_global_ranges!(ts::BlockTimeStepper{D, W, T}, crit::MOODu2, Y_prev, blocks::UnitRange{Int}, N::Int) where {D, W, T}
+    crit.plateau > zero(crit.plateau) || return nothing
+    ranges = Vector{State{W, T}}(undef, length(blocks))
+    for (c, b) in enumerate(blocks)
+        ranges[c] = _global_range(crit, _blk(Y_prev, b, N), N)
+    end
+    copyto!(parent(ts.u2_ranges), 1, ranges, 1, length(blocks))
+    return PerSlotEntry(parent(ts.u2_ranges))
 end
 
 # Interior particles whose candidate is not admissible across the blocks (counted into `work.inadmissible`)
@@ -854,22 +944,22 @@ function _block_checkpoint!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, dt::T
     end
 end
 
-# The predictor of stage `i` (the final combination for `i == s + 1`) for block `b`: the stage kernel of
-# `GeneralRKTimeStepper` on the block's views (static grid: the position and volume arguments are unused)
-function _block_candidate!(ts::BlockTimeStepper{D, W, T}, pg, b::Int, N::Int, i::Int, dt::T) where {D, W, T}
+# The predictor of stage `i` (the final combination for `i == s + 1`) for all blocks: the stage kernel of
+# `GeneralRKTimeStepper` over the (particle, block) pairs on the views of the blocks (the positions and volumes of a
+# moving grid are per particle: every block's work-item writes the same value)
+function _block_candidate!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, i::Int, dt::T) where {D, W, T}
     inner    = ts.inner
     s        = inner.num_stages
     is_final = i > s
-    target   = is_final ? _blk(inner.rho_cand, b, N) : _blk(inner.Y_stages[i], b, N)
-    U_n      = _blk(inner.rho_n, b, N)
-    K_E      = map(g -> _blk(g, b, N), inner.K_E_stages)
-    K_I      = map(g -> _blk(g, b, N), inner.K_I_stages)
+    target   = is_final ? inner.rho_cand : inner.Y_stages[i]
+    U_n      = PerBlock(inner.rho_n)
     moving   = _block_moving(pg)
     x_target = is_final ? inner.x_cand : inner.X_stages[i]
     v_target = is_final ? inner.v_cand : inner.V_stages[i]
-    foreach_particle(_stage_predictor!, get_backend(), N,
-        (target, (x_target, v_target), U_n, (inner.x_n, inner.v_n), K_E, K_I, (inner.K_X_stages, inner.K_V_stages, inner.V_stages),
-         U_n, pg.core.is_boundary, inner.tableau, i, is_final ? s : i - 1, is_final, dt, moving, false, zero(T), zero(Space{D, T})))
+    foreach_block(_stage_predictor!, get_backend(), N, 1:nb,
+        (PerBlock(target), (x_target, v_target), U_n, (inner.x_n, inner.v_n), map(PerBlock, inner.K_E_stages), map(PerBlock, inner.K_I_stages),
+         (inner.K_X_stages, inner.K_V_stages, inner.V_stages), U_n, pg.core.is_boundary, inner.tableau, i, is_final ? s : i - 1, is_final,
+         dt, moving, false, zero(T), zero(Space{D, T})))
     return nothing
 end
 
