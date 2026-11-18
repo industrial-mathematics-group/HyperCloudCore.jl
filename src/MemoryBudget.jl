@@ -58,9 +58,13 @@ _prepare_budget!(::Any, pg) = nothing
 function _prepare_budget!(ts::BlockTimeStepper, pg)
     for (tag, bc) in pg.geometry.bc_map
         _is_block_wall(bc, ts.pde) && _wall_params!(ts, bc, tag, ts.pde)
+        _ghost_budget!(ts, bc)
     end
     return nothing
 end
+_ghost_budget!(ts::BlockTimeStepper, ::Any) = nothing
+_ghost_budget!(ts::BlockTimeStepper, ::ExtrapolationBC{Q}) where {Q} = _ghost_geom!(ts, Val(Q))
+_ghost_budget!(ts::BlockTimeStepper, ::MirrorBC{Q}) where {Q} = _ghost_geom!(ts, Val(Q))
 struct _Blocked{G <: Growable}
     g::G
     nb::Int
@@ -78,10 +82,11 @@ function particle_buffers(ts::BlockTimeStepper, moving::Bool)
             ts.donors,
             map(st -> st.params, (ts.explicit_sources..., ts.implicit_sources...))...,
             (isempty(ts.wall_params) ? () : (_Blocked(ts.ghost_scratch, nb), values(ts.wall_params)...))...,
-            (ts.grad_scratch === nothing ? () : (_Blocked(ts.grad_scratch, nc),))...)
+            (ts.grad_scratch === nothing ? () : (_Blocked(ts.grad_scratch, nc),))...,
+            Iterators.flatten(_scratch_buffers(g) for g in values(ts.ghost_geom))...)
 end
 slot_buffers(ts::BlockTimeStepper) = map(g -> _Blocked(g, _launch_width(ts, num_blocks(ts.pde))), slot_buffers(ts.inner))
-particle_buffers(bs::BlockState, ::Bool) = (_Blocked(bs.data, bs.nb),)
+particle_buffers(bs::BlockState, ::Bool) = (_Blocked(bs.data, bs.nb), _Blocked(bs.cfl, bs.nb))
 
 _array_bytes(a::AbstractArray) = length(a) * sizeof(eltype(a))
 _element_bytes(b::AbstractArray) = sizeof(eltype(b))

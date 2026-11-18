@@ -855,5 +855,21 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         advance!((t, d) -> ts2(eq2, pg, bs, t, d), 0.1, 0.3 * (2 / 60) / 2.0)
         @test all(i -> all(isfinite, block_view(bs, 4)[i]), 1:pg.meta.N)
         @test_throws ArgumentError BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64); blocks_per_launch = -1)
+        # the ghost fits' per-ghost geometry: one scratch per basis size, priced by the budget (2-D degree 2: 6 rows), and
+        # the CFL buffer of the state (nb per particle)
+        pg_g = block_pg_1d(60, 2; bc = bce())
+        bs_g = BlockState(eq2, pg_g)
+        set_block_states!((x, b) -> State{2, Float64}(box(x[1], 2b - 1), box(x[1], 2b)), bs_g, pg_g)
+        ts_g = BlockTimeStepper(eq2, sc, RK3_SSP_Tableau(Float64))
+        e_g = memory_estimate(pg_g, ts_g, bs_g, sc)
+        @test collect(keys(ts_g.ghost_geom)) == [3]                                       # 1-D degree 2: 2 + 1 rows
+        gsc = HyperCloudCore._scratch_buffers(ts_g.ghost_geom[3])
+        @test sum(g -> sizeof(eltype(parent(g))), gsc) == 2 * sizeof(Int) + 8 + 8 + 9 * 8
+        @test memory_estimate(pg_g, bs_g).per_particle - memory_estimate(pg_g).per_particle == 4 * (sizeof(State{2, Float64}) + 8)
+        @test get_time_step(pg_g, eq2, sc, bs_g) == minimum(get_time_step(pg_g, BlockOf(eq2, b), sc; U = block_view(bs_g, b)) for b in 1:4)
+        r_g = reserve!(pg_g, ts_g, bs_g, sc; limit = 2 * e_g.bytes)
+        @test all(g -> g.fixed && length(parent(g)) == r_g.particles, gsc) && bs_g.cfl.fixed && length(parent(bs_g.cfl)) == 4 * r_g.particles
+        advance!((t, d) -> ts_g(eq2, pg_g, bs_g, t, d), 0.1, 0.3 * (2 / 60) / 2.0)
+        @test all(i -> all(isfinite, block_view(bs_g, 2)[i]), 1:pg_g.meta.N)
     end
 end

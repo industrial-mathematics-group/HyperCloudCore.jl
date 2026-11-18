@@ -118,7 +118,10 @@ work-items, the stage kernels of the standard stepper on the views of the blocks
 consecutive particles of one block as the block-major layout stores them): the predictor, the implicit and explicit
 sources, the Euler substep, the MOOD flag pass, the wall application and the package's boundary conditions
 (`FixedDirichlet`; `OutflowBC` with its donor search once per tag, every block copying from the root of the donor
-chain; `ExtrapolationBC` and `MirrorBC` fitted over the (ghost, block) pairs). The passes that use per-particle
+chain; `ExtrapolationBC` and `MirrorBC` with the geometry of the fit, the donor, the degree and the Cholesky factor
+of the moment matrix, computed once per ghost into a scratch of the stepper and the fit per (ghost, block) from it),
+the CFL step of the state (`get_time_step` of a block state, into its `cfl` buffer), and the plateau ranges of `MOODu2`
+in one reduction per launch. The passes that use per-particle
 scratch of the scheme, the pre-pass and the flux pass (the interaction buffer, the gradient cache) and the `MOODu2`
 pre-pass, run over `blocks_per_launch` blocks at a time (the keyword of the stepper; `0`: all blocks) with the
 scratch replicated once per block of the launch, which `memory_estimate` prices (the default 32 costs 32 times the

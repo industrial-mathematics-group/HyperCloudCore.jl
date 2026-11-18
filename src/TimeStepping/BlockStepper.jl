@@ -365,10 +365,11 @@ length `nb · N` in block-major order (block `b` of particle `i` at index `(b �
 a contiguous vector over the particles. `block_view(bs, b)` is that vector (a view); [`set_block_states!`](@ref)
 fills it from a function of the position. The array is a `Growable` with arrays of type `storage`.
 """
-struct BlockState{W, T, G <: Growable{State{W, T}}}
+struct BlockState{W, T, G <: Growable{State{W, T}}, GT <: Growable{T}}
     data::G
     nb::Int
     N::Base.RefValue{Int}
+    cfl::GT                         # the CFL estimate per (particle, block) (`get_time_step`)
 end
 
 function BlockState(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}; storage::Type{AT} = Array) where {D, W, T, AT <: AbstractArray}
@@ -376,7 +377,8 @@ function BlockState(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}; stora
     nb >= 1 || throw(ArgumentError("num_blocks($(nameof(typeof(eq)))) = $nb"))
     data = Growable{State{W, T}}(AT)
     ensure_capacity!(data, nb * pg.meta.N)
-    return BlockState{W, T, typeof(data)}(data, nb, Ref(pg.meta.N))
+    cfl  = Growable{T}(AT)
+    return BlockState{W, T, typeof(data), typeof(cfl)}(data, nb, Ref(pg.meta.N), cfl)
 end
 
 """
@@ -509,8 +511,9 @@ swept as in the standard stepper, the sweep remapping every block (`sweep_bounda
 arrays); [`adapt_particles!`](@ref)`(pg, ad, order, bs)` is the particle adaptivity between steps and
 [`reorder!`](@ref)`(pg, bs)` the spatial reordering. The boundary conditions of the grid apply per block with the
 block's state of the step start as the reference: the package's conditions (`FixedDirichlet`, `OutflowBC`,
-`ExtrapolationBC`, `MirrorBC`) in one launch over the blocks (the outflow's donor search once per tag), any other
-condition block by block through its functor; a `MirrorBC` whose operator reduces over the blocks
+`ExtrapolationBC`, `MirrorBC`) in one launch over the blocks (the outflow's donor search once per tag; the ghost fits
+with the geometry of the fit, the donor, the degree and the Cholesky factor, once per ghost and the fit per (ghost,
+block)), any other condition block by block through its functor; the CFL step of the state likewise; a `MirrorBC` whose operator reduces over the blocks
 ([`block_wall_reduce`](@ref)) runs in the pipeline's passes. For one block (`num_blocks(eq) == 1`) the
 result is bit-identical to `GeneralRKTimeStepper` without sources, and agrees to round-off with the equivalent
 sources (a separately compiled flux pass).
@@ -529,6 +532,7 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
     donors::GI                      # the donor of every outflow target (per particle)
     u2_ranges::GS                   # the global range per block of a launch (the plateau test of MOODu2)
     grad_scratch::GG                # the scheme's gradient cache for the blocks of a launch (`nothing`: none)
+    ghost_geom::Dict{Int, Any}      # the per-ghost geometry of the ghost fits per basis size (a `GhostFitScratch`)
 end
 
 """
@@ -563,7 +567,7 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     explicit_sts = map(st -> _on_storage(st, AT.name.wrapper), explicit_sts)
     implicit_sts = map(st -> _on_storage(st, AT.name.wrapper), implicit_sts)
     return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg)}(
-        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg)
+        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}())
 end
 
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, mood::MOOD,
@@ -577,6 +581,13 @@ end
 _launch_width(ts::BlockTimeStepper, nb::Int) = ts.blocks_per_launch == 0 ? nb : min(ts.blocks_per_launch, nb)
 # The chunks of blocks those passes run over
 _launch_chunks(ts::BlockTimeStepper, nb::Int) = (nc = _launch_width(ts, nb); (b0:min(b0 + nc - 1, nb) for b0 in 1:nc:nb))
+# The per-ghost scratch of the ghost fits of degree `Q` (one per basis size, on the stepper's storage), made on first use
+function _ghost_geom!(ts::BlockTimeStepper{D, W, T}, valQ::Val) where {D, W, T}
+    rows = _ghost_scratch_rows(Val(D), _ghost_degree(valQ, Val(D)))
+    return get!(ts.ghost_geom, rows) do
+        _ghost_scratch(Val(rows), T, Val(D), typeof(parent(ts.ghost_scratch)).name.wrapper)
+    end
+end
 # The slot stride of the interaction buffer in a launch (0: the scheme does not use it)
 _slot_stride(inner::GeneralRKTimeStepper, pg) = uses_slot_buffers(inner.divergence_interpolator) ? length(pg.neighbor.indices) : 0
 BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, sources::Tuple{Vararg{BlockSourceTerm}},
@@ -722,12 +733,12 @@ function _block_bc!(::OutflowBC, ts::BlockTimeStepper, pg, stage, tag::Int, eq, 
     return nothing
 end
 function _block_bc!(::ExtrapolationBC{Q}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q}
-    _launch_ghost_fit!(pg, stage, tag, eq, t, Val(Q), nothing, Val(false), Val(false); blocks = 1:nb)
+    _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), nothing, Val(false), Val(false), 1:nb, _ghost_geom!(ts, Val(Q)))
     return nothing
 end
 function _block_bc!(bc::MirrorBC{Q, F, B}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q, F, B}
     # (an operator without a reduction, applied to every block's mirrored state with `BlockOf(eq, b)`)
-    _launch_ghost_fit!(pg, stage, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B); blocks = 1:nb)
+    _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B), 1:nb, _ghost_geom!(ts, Val(Q)))
     return nothing
 end
 function _block_bc!(bc, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
@@ -741,7 +752,7 @@ end
 function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int) where {D, W, T, Q, F, B}
     scratch = ts.ghost_scratch
     ensure_capacity!(scratch, nb * N)
-    _launch_ghost_fit!(pg, stage, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B); out = scratch, blocks = 1:nb)
+    _launch_ghost_fit_blocks!(pg, stage, scratch, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B), 1:nb, _ghost_geom!(ts, Val(Q)))
     _block_mirror_passes!(_wall_params!(ts, bc, tag, eq), ts, bc, pg, stage, tag, eq, t, N, nb)
     return nothing
 end
@@ -902,11 +913,11 @@ end
 _block_global_ranges!(ts::BlockTimeStepper, crit, Y_prev, blocks, N::Int) = nothing
 function _block_global_ranges!(ts::BlockTimeStepper{D, W, T}, crit::MOODu2, Y_prev, blocks::UnitRange{Int}, N::Int) where {D, W, T}
     crit.plateau > zero(crit.plateau) || return nothing
-    ranges = Vector{State{W, T}}(undef, length(blocks))
-    for (c, b) in enumerate(blocks)
-        ranges[c] = _global_range(crit, _blk(Y_prev, b, N), N)
-    end
-    copyto!(parent(ts.u2_ranges), 1, ranges, 1, length(blocks))
+    # one reduction over the blocks of the launch (an N × nc view of the block-major array, reduced over the particles)
+    A  = reshape(view(parent(Y_prev), ((first(blocks) - 1) * N + 1):(last(blocks) * N)), N, length(blocks))
+    lo = mapreduce(identity, (a, b) -> min.(a, b), A; dims = 1, init = State{W, T}(ntuple(_ -> typemax(T), Val(W))))
+    hi = mapreduce(identity, (a, b) -> max.(a, b), A; dims = 1, init = State{W, T}(ntuple(_ -> typemin(T), Val(W))))
+    copyto!(parent(ts.u2_ranges), 1, vec(hi .- lo), 1, length(blocks))
     return PerSlotEntry(parent(ts.u2_ranges))
 end
 
@@ -967,15 +978,31 @@ end
     get_time_step(pg, eq, interp, bs::BlockState; cached_weights = true) -> T
 
 The CFL step of a block state: the smallest step over the blocks (`get_time_step` of every block with its
-`BlockOf` equation and its state view).
+`BlockOf` equation and its state), in one launch over the (particle, block) pairs into the state's `cfl` buffer.
 """
 function get_time_step(pg::ParticleGrid{D, W, T}, eq::HyperbolicPDE{D, W, T}, main_grad, bs::BlockState{W, T};
                        cached_weights::Bool = true) where {D, W, T}
     bs.N[] == pg.meta.N || throw(ArgumentError("get_time_step: the block state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
     bs.nb == num_blocks(eq) || throw(ArgumentError("get_time_step: the state has $(bs.nb) blocks, the equation $(num_blocks(eq))"))
-    dt = T(Inf)
-    for b in 1:bs.nb
-        dt = min(dt, get_time_step(pg, BlockOf(eq, b), main_grad; cached_weights = cached_weights, U = block_view(bs, b)))
+    N  = pg.meta.N
+    nb = bs.nb
+    N == 0 && return T(Inf)
+    ensure_capacity!(bs.cfl, nb * N)
+    buf = parent(bs.cfl)
+    fill!(view(buf, 1:(nb * N)), T(Inf))
+    nbr = pg.neighbor
+    cached_weights && prepare_geometry!(main_grad, pg)
+    sw = cached_weights ? _cfl_slot_weights(main_grad, pg) : nothing
+    Y  = parent(bs.data)
+    if sw === nothing
+        degree = _divergence_degree(main_grad)
+        invL   = one(T) / minimum(pg.meta.dx)
+        foreach_block(_cfl_body!, get_backend(), N, 1:nb,
+            (PerBlock(buf), pg.core.is_boundary, nbr.ranges, nbr.indices, PerBlock(Y), PerBlockEq(eq), degree, _cfl_degree_of(main_grad),
+             Val(D), get_distances(pg), get_weights(pg), invL, floatmin(T), one(T) / D))
+    else
+        foreach_block(_cfl_weights_body!, get_backend(), N, 1:nb,
+            (PerBlock(buf), pg.core.is_boundary, nbr.ranges, nbr.indices, PerBlock(Y), PerBlockEq(eq), sw, Val(D), floatmin(T), one(T) / D))
     end
-    return dt
+    return minimum(view(buf, 1:(nb * N)); init = T(Inf))
 end

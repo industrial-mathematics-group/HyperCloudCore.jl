@@ -343,10 +343,9 @@ end
 _ghost_degree(::Val{Q}, ::Val{D}) where {Q, D} = Val(D == 3 ? min(Q, 3) : Q)
 
 # `out`: the array the ghost states are written to (the data of the fit are always read from `buf`; the block pipeline
-# fits into a scratch array first and applies its wall operators from there). `blocks`: `buf` and `out` are block-major
-# arrays of these blocks, fitted in one launch over the (ghost, block) pairs with the block equation `BlockOf(eq, b)`
+# fits into a scratch array first and applies its wall operators from there)
 function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val;
-                            out = buf, blocks::Union{Nothing, UnitRange{Int}} = nothing) where {D, M, T}
+                            out = buf) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     invL = one(T) / minimum(pg.meta.dx)
@@ -354,18 +353,10 @@ function _launch_ghost_fit!(pg::ParticleGrid{D, M, T}, buf, tag::Int, eq, t, val
     # the time of the state being built (the interior cloud does not move), and the wall point gets the velocity
     gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
                                            GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}   # (inferred: the launch must not box)
-    c = pg.core
-    if blocks === nothing
-        foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
-            ((buf, out), c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, c.particle_orders,
-             nb.ranges, nb.indices, nb.weight_func, (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq,
-             mirror, bounded, Val(D)))   # (≤ 20 arguments)
-    else
-        foreach_block(_ghost_fit_body!, get_backend(), pg.meta.N, blocks,
-            ((PerBlock(buf), PerBlock(out)), c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures,
-             c.particle_orders, nb.ranges, nb.indices, nb.weight_func, (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag,
-             valQ, op, PerBlockEq(eq), mirror, bounded, Val(D)))
-    end
+    foreach_particle(_ghost_fit_body!, get_backend(), pg.meta.N,
+        ((buf, out), pg.core.positions, pg.core.is_boundary, pg.core.tags, pg.core.normals, pg.core.wall_distances,
+         pg.core.wall_curvatures, pg.core.particle_orders, nb.ranges, nb.indices, nb.weight_func,
+         (pg.domain.L_wrap, pg.domain.invL_wrap, invL), gm, tag, valQ, op, eq, mirror, bounded, Val(D)))   # (≤ 20 arguments)
     return nothing
 end
 
@@ -405,21 +396,19 @@ end
 # one-sided fit bounded (an exactly determined fit amplifies noise, and the ghost states feed back into the interior).
 @inline _fit_support(D, q) = (3 * (basis_count(D, q) + 1) + 1) ÷ 2
 
-# Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
-@inline function _ghost_fit_body!(i, bufs, pos, isb, tags, normals, wdist, curvs, orders, ranges, indices, wf,
-                                  wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
+# The donor of ghost `i` for a fit at the target point `x_t`, and the degree it carries; `j == 0`: no interior neighbour.
+# Donor: the interior particle nearest to the target point. Its neighbour list is the stencil of the fit (every
+# interior particle within R - |x_t - x_j| of the target is in it). Searched in the ghost's own neighbour list, then
+# in its neighbours' lists (the outermost ghosts of the R + dx band have no interior neighbour), then refined by
+# walking the neighbour graph towards the target.
+# Fit degree and donor: the requested degree, at most the donor's order - 1 (0 = order never set), lowered one step
+# at a time until the donor or, failing that, its interior neighbour nearest to the target carries the degree with
+# the margin. A donor at a wall or corner has too few interior neighbours for a high degree (3-4 for the 6 unknowns of
+# a 2-D quadratic) while its neighbours further inside do; the fit stays exact for polynomials whatever the distance.
+# (Trying the requested degree only and otherwise falling back to what the wall donor supports made a higher request
+# give a lower degree: 1-D, R = 3.5Δx, degree 4 ran as degree 1 while degree 3 ran as 3.)
+@inline function _ghost_donor(i, x_t, pos, isb, orders, ranges, indices, L, Li, ::Val{Q}, ::Val{D}) where {Q, D}
     @inbounds begin
-        (isb[i] && tags[i] == tag) || return nothing
-        buf, out = bufs
-        L, Li, invL = wrap
-        x_i = move(gm, pos[i])
-        n_i = rotate(gm, normals[i])
-        φ_i = wdist[i]
-        x_t = MIRROR ? x_i - 2φ_i * n_i : x_i
-        # Donor: the interior particle nearest to the target point. Its neighbour list is the stencil of the fit
-        # (every interior particle within R - |x_t - x_j| of the target is in it). Searched in the ghost's own
-        # neighbour list, then in its neighbours' lists (the outermost ghosts of the R + dx band have no interior
-        # neighbour), then refined by walking the neighbour graph towards the target.
         j, best = _nearest_interior(i, x_t, ranges, indices, isb, pos, L, Li)
         if j == 0
             for k in ranges[i]
@@ -427,19 +416,12 @@ end
                 (j2 != 0 && best2 < best) && (j = j2; best = best2)
             end
         end
-        j == 0 && return nothing
+        j == 0 && return 0, 0
         for _ in 1:3
             j2, best2 = _nearest_interior(j, x_t, ranges, indices, isb, pos, L, Li)
             (j2 != 0 && best2 < best) || break
             j, best = j2, best2
         end
-        # Fit degree and donor: the requested degree, at most the donor's order - 1 (0 = order never set), lowered
-        # one step at a time until the donor or, failing that, its interior neighbour nearest to the target carries
-        # the degree with the margin. A donor at a wall or corner has too few interior neighbours for a high degree
-        # (3-4 for the 6 unknowns of a 2-D quadratic) while its neighbours further inside do; the fit stays exact for
-        # polynomials whatever the distance. (Trying the requested degree only and otherwise falling back to what the
-        # wall donor supports made a higher request give a lower degree: 1-D, R = 3.5Δx, degree 4 ran as degree 1
-        # while degree 3 ran as 3.)
         q = Q
         n_sup = _support_count(j, ranges, indices, isb)
         jd = j
@@ -459,21 +441,42 @@ end
         j = jd
         o = orders[j]                                  # the MOOD cap of the donor that is fitted (a lower degree
         o > 0 && (q = min(q, o - 1))                   # needs less support, so the donor still carries it)
-        U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
-        if BOUNDED
-            # Discrete maximum principle on the ghost state: the mirrored value stays within the range of the data
-            # it was built from. Without it the feedback ghost -> near-wall stencils -> ghost grew without bound for
-            # degrees >= 2 with a 5th-order scheme (long runs along a wall), with it every tested case stayed bounded.
-            lo = buf[j]
-            hi = buf[j]
-            for k in ranges[j]
-                m = indices[k]
-                isb[m] && continue
-                lo = min.(lo, buf[m])
-                hi = max.(hi, buf[m])
-            end
-            U = clamp.(U, lo, hi)
+        return j, q
+    end
+end
+
+# Discrete maximum principle on the ghost state: the mirrored value stays within the range of the data it was built
+# from. Without it the feedback ghost -> near-wall stencils -> ghost grew without bound for degrees >= 2 with a
+# 5th-order scheme (long runs along a wall), with it every tested case stayed bounded.
+@inline function _ghost_clamp(U, j, buf, ranges, indices, isb)
+    @inbounds begin
+        lo = buf[j]
+        hi = buf[j]
+        for k in ranges[j]
+            m = indices[k]
+            isb[m] && continue
+            lo = min.(lo, buf[m])
+            hi = max.(hi, buf[m])
         end
+        return clamp.(U, lo, hi)
+    end
+end
+
+# Kernel body (see Backend.jl): the ghost state of particle `i` from an MLS fit centred at its target point.
+@inline function _ghost_fit_body!(i, bufs, pos, isb, tags, normals, wdist, curvs, orders, ranges, indices, wf,
+                                  wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}, ::Val{D}) where {Q, MIRROR, BOUNDED, D}
+    @inbounds begin
+        (isb[i] && tags[i] == tag) || return nothing
+        buf, out = bufs
+        L, Li, invL = wrap
+        x_i = move(gm, pos[i])
+        n_i = rotate(gm, normals[i])
+        φ_i = wdist[i]
+        x_t = MIRROR ? x_i - 2φ_i * n_i : x_i
+        j, q = _ghost_donor(i, x_t, pos, isb, orders, ranges, indices, L, Li, Val(Q), Val(D))
+        j == 0 && return nothing
+        U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
+        BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
         if MIRROR
             out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm))
         else
@@ -481,6 +484,199 @@ end
         end
     end
     return nothing
+end
+
+# =========================================================================
+# The ghost fits of a block-major state (the block pipeline): the geometry once per ghost, the fit per (ghost, block)
+# =========================================================================
+"""
+    GhostFitScratch
+
+Per-ghost geometry of the ghost fits of a block-major state, computed once per boundary tag and application
+(`_ghost_geometry_body!`) and reused by every block (`_ghost_apply_body!`): the donor (`0`: none), the degree whose
+moment matrix factorised (`-1`: none, the donor's value is used), the basis scale, the target point and the upper
+Cholesky factor of the moment matrix, padded to `B` rows (the basis length of the largest degree plus one).
+`Growable` buffers of a storage array type (`_ghost_scratch(Val(B), T, Val(D), storage)`), on the block stepper.
+"""
+struct GhostFitScratch{B, L, T, D, GI <: AbstractVector{Int}, GT <: AbstractVector{T}, GX <: AbstractVector{Space{D, T}},
+                       GF <: AbstractVector{SMatrix{B, B, T, L}}}
+    donor::GI
+    degree::GI
+    scale::GT
+    target::GX
+    factor::GF
+end
+_ghost_scratch(::Val{B}, ::Type{T}, ::Val{D}, donor, degree, scale, target, factor) where {B, T, D} =
+    GhostFitScratch{B, B * B, T, D, typeof(donor), typeof(scale), typeof(target), typeof(factor)}(donor, degree, scale, target, factor)
+_ghost_scratch(::Val{B}, ::Type{T}, ::Val{D}, ::Type{AT}) where {B, T, D, AT <: AbstractArray} =
+    _ghost_scratch(Val(B), T, Val(D), Growable{Int}(AT), Growable{Int}(AT), Growable{T}(AT), Growable{Space{D, T}}(AT),
+                   Growable{SMatrix{B, B, T, B * B}}(AT))
+Adapt.adapt_structure(to, g::GhostFitScratch{B, L, T, D}) where {B, L, T, D} =
+    _ghost_scratch(Val(B), T, Val(D), adapt(to, g.donor), adapt(to, g.degree), adapt(to, g.scale), adapt(to, g.target), adapt(to, g.factor))
+_scratch_buffers(g::GhostFitScratch) = (g.donor, g.degree, g.scale, g.target, g.factor)
+function _ensure_scratch!(g::GhostFitScratch, N::Int)
+    foreach(b -> ensure_capacity!(b, N), _scratch_buffers(g))
+    return nothing
+end
+# `B` of the scratch for the fits of degree `Q` in `D` dimensions (the degree-0 fit has the constant term only)
+_ghost_scratch_rows(::Val{D}, ::Val{0}) where {D} = 1
+_ghost_scratch_rows(::Val{D}, ::Val{q}) where {D, q} = _val_of(basis_length(Val(D), Val(q))) + 1
+_val_of(::Val{B}) where {B} = B
+
+# The ghost fits of the blocks `blocks` of the block-major state `buf` into `out`, in two launches: the geometry of
+# every ghost of `tag` into `gs` (the donor, the degree, the factor), then the fit per (ghost, block) with the block
+# equation `BlockOf(eq, b)`. The same arithmetic as `_launch_ghost_fit!` per block (the moment matrix and its factor
+# do not depend on the block, the right-hand side does), computed once instead of once per block.
+function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val,
+                                   blocks::UnitRange{Int}, gs::GhostFitScratch) where {D, M, T}
+    valQ = _ghost_degree(valQ, Val(D))
+    nb   = pg.neighbor
+    N    = pg.meta.N
+    invL = one(T) / minimum(pg.meta.dx)
+    gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
+                                           GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}
+    wrap = (pg.domain.L_wrap, pg.domain.invL_wrap, invL)
+    c = pg.core
+    backend = get_backend()
+    _ensure_scratch!(gs, N)
+    foreach_particle(_ghost_geometry_body!, backend, N,
+        (gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.particle_orders, nb.ranges, nb.indices, nb.weight_func,
+         wrap, gm, tag, valQ, mirror, Val(D)))
+    foreach_block(_ghost_apply_body!, backend, N, blocks,
+        ((PerBlock(buf), PerBlock(out)), gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures,
+         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded))   # (19 arguments)
+    return nothing
+end
+
+# Kernel bodies (see Backend.jl): the geometry of ghost `i` (its donor, the degree whose moment matrix factorises, the
+# factor), and the fit of one block from it
+@inline function _ghost_geometry_body!(i, gs::GhostFitScratch{B}, pos, isb, tags, normals, wdist, orders, ranges, indices, wf,
+                                       wrap, gm, tag, ::Val{Q}, ::Val{MIRROR}, ::Val{D}) where {B, Q, MIRROR, D}
+    @inbounds begin
+        (isb[i] && tags[i] == tag) || return nothing
+        L, Li, invL = wrap
+        x_i = move(gm, pos[i])
+        n_i = rotate(gm, normals[i])
+        φ_i = wdist[i]
+        x_t = MIRROR ? x_i - 2φ_i * n_i : x_i
+        j, q = _ghost_donor(i, x_t, pos, isb, orders, ranges, indices, L, Li, Val(Q), Val(D))
+        gs.donor[i] = j
+        j == 0 && return nothing
+        q_ok, F, s = _fit_geometry(Val(Q), q, Val(B), j, x_t, ranges[j], indices, pos, isb, L, Li, wf, invL)
+        gs.degree[i] = q_ok
+        gs.factor[i] = F
+        gs.scale[i]  = s
+        gs.target[i] = x_t
+    end
+    return nothing
+end
+@inline function _ghost_apply_body!(i, bufs, gs::GhostFitScratch, pos, isb, tags, normals, wdist, curvs, ranges, indices, wf,
+                                    wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}) where {Q, MIRROR, BOUNDED}
+    @inbounds begin
+        (isb[i] && tags[i] == tag) || return nothing
+        j = gs.donor[i]
+        j == 0 && return nothing
+        buf, out = bufs
+        L, Li, invL = wrap
+        q_ok = gs.degree[i]
+        U = q_ok < 0 ? buf[j] :
+            _fit_apply(Val(Q), q_ok, gs.factor[i], j, gs.target[i], gs.scale[i], buf, ranges[j], indices, pos, isb, L, Li, wf)
+        BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
+        if MIRROR
+            out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm))
+        else
+            out[i] = U
+        end
+    end
+    return nothing
+end
+
+# Static dispatch over the degrees Q, Q-1, …, 0 as `_fit_eval`: the geometry pass takes the first degree `≤ q_run`
+# whose moment matrix factorises (`-1` if none: the apply pass uses the donor's value), the apply pass the stored one
+@inline function _fit_geometry(::Val{q}, q_run::Int, ::Val{B}, args...) where {q, B}
+    if q_run >= q
+        F, s, ok = _geometry_degree(Val(q), args...)
+        ok && return q, _pad_factor(F, Val(B)), s
+    end
+    return _fit_geometry(Val(q - 1), q_run, Val(B), args...)
+end
+@inline function _fit_geometry(::Val{0}, q_run::Int, ::Val{B}, args...) where {B}
+    F, s, ok = _geometry_degree(Val(0), args...)
+    return (ok ? 0 : -1), _pad_factor(F, Val(B)), s
+end
+@inline _geometry_degree(::Val{q}, j, x_t::Space{D, T}, args...) where {q, D, T} =
+    _geometry_degree_b(basis_length(Val(D), Val(q)), Val(q), j, x_t, args...)
+@inline _geometry_degree(::Val{0}, j, x_t::Space{D, T}, args...) where {D, T} = _geometry_degree_b(Val(0), Val(0), j, x_t, args...)
+@inline function _geometry_degree_b(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, rg, indices, pos, isb, L, Li, wf, invL) where {B, q, D, T}
+    N_s, s = _ghost_moment_matrix(Val(B), Val(q), j, x_t, rg, indices, pos, isb, L, Li, wf, invL)
+    C, ok  = _cholesky_moment(N_s)
+    return C.factors, s, ok
+end
+@inline function _fit_apply(::Val{q}, q_ok::Int, F, args...) where {q}
+    q_ok == q && return _apply_degree(Val(q), F, args...)
+    return _fit_apply(Val(q - 1), q_ok, F, args...)
+end
+@inline _fit_apply(::Val{0}, q_ok::Int, F, args...) = _apply_degree(Val(0), F, args...)
+@inline _apply_degree(::Val{q}, F, j, x_t::Space{D, T}, args...) where {q, D, T} =
+    _apply_degree_b(basis_length(Val(D), Val(q)), Val(q), F, j, x_t, args...)
+@inline _apply_degree(::Val{0}, F, j, x_t::Space{D, T}, args...) where {D, T} = _apply_degree_b(Val(0), Val(0), F, j, x_t, args...)
+@inline function _apply_degree_b(::Val{B}, ::Val{q}, F, j, x_t::Space{D, T}, s, buf::AbstractVector{State{M, T}}, rg, indices,
+                                 pos, isb, L, Li, wf) where {B, q, D, T, M}
+    b_s = _ghost_rhs(Val(B), Val(q), j, x_t, s, buf, rg, indices, pos, isb, L, Li, wf)
+    c_s = Cholesky(_top_left(F, Val(B + 1)), 'U', 0) \ b_s
+    return State{M, T}(ntuple(m -> c_s[1, m], Val(M)))
+end
+# The factor of a degree below the largest, stored in the scratch's rows: zero-padded, and read back
+@inline _pad_factor(F::SMatrix{B, B, T}, ::Val{Bm}) where {B, T, Bm} =
+    SMatrix{Bm, Bm, T}(ntuple(k -> (r = (k - 1) % Bm + 1; c = (k - 1) ÷ Bm + 1; (r <= B && c <= B) ? (@inbounds F[r, c]) : zero(T)), Val(Bm * Bm)))
+@inline _top_left(F::SMatrix{Bm, Bm, T}, ::Val{B}) where {Bm, T, B} =
+    SMatrix{B, B, T}(ntuple(k -> (@inbounds F[(k - 1) % B + 1, (k - 1) ÷ B + 1]), Val(B * B)))
+
+# The moment matrix of the fit (`_ghost_moments` without the right-hand side) with the basis scale, and the right-hand
+# side alone for a stored scale: the same sums in the same order. Kept out of line like `_ghost_moments`.
+@noinline function _ghost_moment_matrix(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, rg, indices, pos, isb, L, Li, wf, invL) where {B, q, D, T}
+    N_s = zero(SMatrix{B + 1, B + 1, T, (B + 1) * (B + 1)})
+    @inbounds begin
+        r2max = sum(abs2, _min_image(pos[j] - x_t, L, Li))
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            r2max = max(r2max, sum(abs2, _min_image(pos[m] - x_t, L, Li)))
+        end
+        s   = r2max > zero(T) ? inv(sqrt(r2max)) : invL
+        r   = _min_image(pos[j] - x_t, L, Li)
+        p   = _target_basis(Val(q), r * s)
+        w   = wf(sum(abs2, r))
+        N_s += w * (p * p')
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            r    = _min_image(pos[m] - x_t, L, Li)
+            p    = _target_basis(Val(q), r * s)
+            w    = wf(sum(abs2, r))
+            N_s += w * (p * p')
+        end
+        return N_s, s
+    end
+end
+@noinline function _ghost_rhs(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, s, buf::AbstractVector{State{M, T}}, rg, indices,
+                              pos, isb, L, Li, wf) where {B, q, D, T, M}
+    b_s = zero(SMatrix{B + 1, M, T, (B + 1) * M})
+    @inbounds begin
+        r   = _min_image(pos[j] - x_t, L, Li)
+        p   = _target_basis(Val(q), r * s)
+        w   = wf(sum(abs2, r))
+        b_s += w * (p * buf[j]')
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            r    = _min_image(pos[m] - x_t, L, Li)
+            p    = _target_basis(Val(q), r * s)
+            w    = wf(sum(abs2, r))
+            b_s += w * (p * buf[m]')
+        end
+    end
+    return b_s
 end
 
 # The wall as seen from ghost `i` (the wall point: the body's velocity there, not at the ghost), at the time of `gm`
