@@ -775,6 +775,16 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         ts = BlockTimeStepper(eq_b, interp(), RK2_SSP_Tableau(Float64))
         @test_throws ArgumentError ts(eq_b, pg, bs_other, 0.0, 0.01)
         @test bs_other.N[] == 30
+        # with a moving piece the check comes before the sync of the pieces (which remaps the state it is given)
+        tube = intersect(Tagged(Cuboid((0.0,), (1.5,)), 1), Moving(Tagged(HalfSpace((1.0,), (1.0,)), 2), translating((-0.5,))))
+        gp = GeometricDomain(tube; mins = (0.0,), maxs = (1.5,), bc_map = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(), 2 => MirrorBC()))
+        pgp = ParticleGrid(gp, (0.025,), ExponentialWeightFunction(1.0, 2.5 * 0.025), 2)
+        bsp = BlockState(eq_b, block_pg_1d(30, 2))
+        set_block_states!((x, b) -> State{2, Float64}(1.0, 2.0), bsp, block_pg_1d(30, 2))
+        data0 = copy(parent(bsp.data))
+        tsp = BlockTimeStepper(eq_b, interp(), RK2_SSP_Tableau(Float64))
+        @test_throws ArgumentError tsp(eq_b, pgp, bsp, 0.1, 0.01)            # (t = 0.1: the sync would sweep)
+        @test bsp.N[] == 30 && view(parent(bsp.data), 1:(4 * 30)) == view(data0, 1:(4 * 30))     # (the used part: the headroom is uninitialised)
         @test_throws ArgumentError get_time_step(pg, eq_b, ts.inner.divergence_interpolator, bs_other)
         @test_throws BoundsError block_view(bs_other, 5)
         # the parameter arrays of the sources follow the stage buffers' storage (a source built with the default
@@ -931,13 +941,14 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
                        block_pg_1d(N, W; bc = bcs)
         interp(W; order = 2, limiter = MinmodLimiter(:hard)) = MUSCL(Float64, 1, W, order, limiter, RusanovFlux())
         # the split state: parts over `ranges` (host parts, no device to activate)
-        function split(eq_b, ranges, make_grid, ic; mood = MOOD(NoMOOD()), sources = () -> (), tableau = RK3_SSP_Tableau(Float64), order = 2, limiter = MinmodLimiter(:hard))
+        function split(eq_b, ranges, make_grid, ic; mood = MOOD(NoMOOD()), sources = () -> (), tableau = RK3_SSP_Tableau(Float64), order = 2, limiter = MinmodLimiter(:hard),
+                       activate = nothing)
             parts = map(ranges) do r
                 pg = make_grid()
                 ts = BlockTimeStepper(eq_b, interp(2; order, limiter), mood, sources(), tableau; blocks = r)
                 bs = BlockState(eq_b, pg; blocks = r)
                 set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg)
-                BlockPart(pg, ts, bs)
+                BlockPart(pg, ts, bs; activate)
             end
             return BlockDevices(eq_b, parts)
         end
@@ -992,6 +1003,13 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         @test all(pt -> mood_flags(pt.ts) == mood_flags(ts1), devs.parts)
         @test all(pt -> pt.pg.core.particle_orders[1:pg1.meta.N] == pg1.core.particle_orders[1:pg1.meta.N], devs.parts)
         @test mood_inadmissible(first(devs.parts).ts) == mood_inadmissible(ts1)
+        # the same with a (no-op) device per part: the parts' phases run concurrently, one task per part (with several
+        # threads; in sequence the devices never overlapped), bit for bit the sequential split
+        devc = split(g2, [1:2, 3:4], () -> grid(N, 2; periodic = true), box; mood, order = 3, limiter = NoLimiter(), activate = () -> nothing)
+        devq = split(g2, [1:2, 3:4], () -> grid(N, 2; periodic = true), box; mood, order = 3, limiter = NoLimiter())
+        advance!((t, d) -> (devc(t, d); devq(t, d)), 0.2, dt)
+        @test host_state(devc) == host_state(devq)
+        @test all(pt -> mood_flags(pt.ts) == mood_flags(first(devq.parts).ts), devc.parts)
 
         # 3. a Lagrangian mover: the frame velocity from the exchanged density and momentum partials
         devs = split(eq2, [1:3, 4:4], () -> grid(N, 2; periodic = true, mover = LagrangianMover()), wave)
