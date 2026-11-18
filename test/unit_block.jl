@@ -238,16 +238,7 @@ HyperCloudCore.admissible_partial_type(::GuardedTransport{D, W, T}) where {D, W,
     return s
 end
 @inline HyperCloudCore.finalize_admissible(g::GuardedTransport{D, W, T}, s) where {D, W, T} = s / (HyperCloudCore.num_blocks(g) * W) > T(1.5)
-HyperCloudCore.wall_partial_type(::ReflectOp, ::DiscreteTransport) = Float64
-@inline function HyperCloudCore.block_wall_partial(::ReflectOp, eq::DiscreteTransport, S, N, nb, blocks::UnitRange, g, wall)
-    s = 0.0
-    @inbounds for b in blocks
-        s += sum(S[(b - 1) * N + g])
-    end
-    return s
-end
-@inline HyperCloudCore.finalize_wall_reduction(::ReflectOp, eq::DiscreteTransport, s, wall) = s
-# a guarded equation without the additive form of its admissibility, and a wall operator without one: refused on a split state
+# a guarded equation without the additive form of its admissibility: refused on a split state
 struct GuardedNoPartial{D, W, T, EQ <: DiscreteTransport{D, W, T}} <: HyperbolicPDE{D, W, T}
     eq::EQ
 end
@@ -256,11 +247,6 @@ HyperCloudCore.num_blocks(g::GuardedNoPartial) = HyperCloudCore.num_blocks(g.eq)
 @inline HyperCloudCore.block_flux(g::GuardedNoPartial, U::State, b::Int) = HyperCloudCore.block_flux(g.eq, U, b)
 @inline HyperCloudCore.block_max_eigenvalue(g::GuardedNoPartial, U::State, d::Int, b::Int) = HyperCloudCore.block_max_eigenvalue(g.eq, U, d, b)
 @inline HyperCloudCore.block_admissible(g::GuardedNoPartial, Y, N::Int, nb::Int, p::Int) = true
-struct SumOp end
-@inline (::SumOp)(eq::DiscreteTransport, U::State, wall) = U
-HyperCloudCore.wall_reduction_type(::SumOp, ::DiscreteTransport) = Float64
-@inline HyperCloudCore.block_wall_reduce(::SumOp, eq::DiscreteTransport, Y, N, nb, g, wall) = 0.0
-@inline HyperCloudCore.block_wall_apply(::SumOp, eq::DiscreteTransport, U::State, b::Int, prm, wall, Y, N, nb, g) = U
 
 # The mean relaxation in the additive form: the sum and the count of the components of a block range (adds up over ranges)
 struct PartialMean <: AbstractImplicitBlockSource; tau::Float64; end
@@ -1014,13 +1000,17 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         @test maxdiff(host_state(devs), view(parent(bs1.data), 1:(4 * bs1.N[]))) < 1e-12
         @test all(pt -> maximum(norm, pt.pg.core.positions[1:pg1.meta.N] .- pg1.core.positions[1:pg1.meta.N]) < 1e-12, devs.parts)
 
-        # 4. reflecting walls whose operator reads the mirror partner's block from another part (the gathered ghost rows)
+        # 4. reflecting walls whose operator reads the mirror partner's block from another part: the reduction and the
+        #    application run on the gathered ghost rows, bit for bit the single stepper (no sources: nothing else is summed)
         bcw() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(ReflectOp()), 2 => MirrorBC(ReflectOp()))
         devs = split(eq2, [1:1, 2:3, 4:4], () -> grid(N, 2; bcs = bcw()), box)
         ts1, pg1, bs1 = single(eq2, () -> grid(N, 2; bcs = bcw()), box)
         advance!((t, d) -> (devs(t, d); ts1(eq2, pg1, bs1, t, d)), 0.3, dt)
-        @test maxdiff(host_state(devs), view(parent(bs1.data), 1:(4 * bs1.N[]))) < 1e-12
+        @test host_state(devs) == collect(view(parent(bs1.data), 1:(4 * bs1.N[])))
         @test all(i -> all(isfinite, host_state(devs)[i]), 1:(4 * bs1.N[]))
+        # the host reduction of a user's partial: the sum of the components of every interior particle
+        tot = host_reduction((Y, N, nb, blocks, p) -> sum(b -> sum(Y[(b - 1) * N + p]), blocks), devs, Float64)
+        @test all(i -> tot[i] ≈ sum(b -> sum(bs1.data[(b - 1) * bs1.N[] + i]), 1:4), 1:bs1.N[])
 
         # 5. the refusals: parts that do not cover the blocks, a source without the additive form, an equation whose
         #    cross-block admissibility has none, a wall operator without one
@@ -1032,8 +1022,6 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         @test_throws ArgumentError split(eq2, [1:2, 3:4], () -> grid(N, 2), box; sources = () -> (BlockSourceTerm(MeanRelaxation(0.05)),), tableau = IMEX_ARS222_Tableau(Float64))
         @test HyperCloudCore._overrides_block_admissible(g2) && !HyperCloudCore._overrides_block_admissible(eq2)
         @test_throws ArgumentError split(GuardedNoPartial(eq2), [1:2, 3:4], () -> grid(N, 2; periodic = true), box; mood)
-        bcn() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(SumOp()), 2 => MirrorBC(SumOp()))
-        @test_throws ArgumentError split(eq2, [1:2, 3:4], () -> grid(N, 2; bcs = bcn()), box)
         # a stepper of a block range does not step on its own
         pt = first(parts2)
         @test_throws ArgumentError pt.ts(eq2, pt.pg, pt.bs, 0.0, dt)

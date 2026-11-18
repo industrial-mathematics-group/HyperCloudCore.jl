@@ -158,17 +158,18 @@ reductions, and the step runs the phases of the single stepper in lockstep over 
   (the parameters from the sum); a source that gives it gets `block_reduce` for free, so the single stepper runs
   the same arithmetic;
 - the frame velocity of a Lagrangian mover ([`fluid_velocity_partial_type`](@ref), [`block_fluid_velocity_partial`](@ref),
-  [`finalize_fluid_velocity`](@ref): density and momentum), the cross-block admissibility of MOOD
-  ([`admissible_partial_type`](@ref), [`block_admissible_partial`](@ref), [`finalize_admissible`](@ref)) and the
-  reduction of a kinetic wall ([`wall_partial_type`](@ref), [`block_wall_partial`](@ref),
-  [`finalize_wall_reduction`](@ref)), each with the same fallback to the direct form;
+  [`finalize_fluid_velocity`](@ref): density and momentum) and the cross-block admissibility of MOOD
+  ([`admissible_partial_type`](@ref), [`block_admissible_partial`](@ref), [`finalize_admissible`](@ref)), each with
+  the same fallback to the direct form;
 - the MOOD flags, OR-ed over the parts before the drop pass that every part runs (the same orders everywhere);
-- for a kinetic wall whose operator reads other blocks of a ghost (a reflected velocity), the mirrored ghost rows
-  of all blocks, gathered per tag (`nb × ghosts` states) and read through the same indices as the whole scratch.
+- for a kinetic wall, the mirrored ghost rows of all blocks, gathered per tag (`nb × ghosts` states, the ghosts
+  being few) and read through the same indices as the whole scratch: every part then runs the operator's reduction
+  and application on them unchanged, so the walls are those of the single stepper bit for bit (no additive form of a
+  wall is needed; a specular reflection's flux balance reads the whole distribution twice);
+- [`host_reduction`](@ref) gives a user's per-particle partial (a snapshot's moments) summed over the parts.
 
-An equation that implements `block_admissible` or a wall operator its reduction without the additive form is
-refused, as are moving boundary pieces, the particle adaptivity and the reordering (host events of the single
-stepper). The result agrees with the single stepper to round-off (the partials are added in a different order).
+An equation that implements `block_admissible` without the additive form is refused, as are moving boundary pieces,
+the particle adaptivity and the reordering (host events of the single stepper). The result agrees with the single stepper to round-off (the partials are added in a different order).
 Checked with host parts: two and three parts of a four-block transport with the implicit mean relaxation, with
 inflow and outflow, with MOOD u1 and the cross-block admissibility (the same flags and orders on every part), with
 a Lagrangian mover and with reflecting walls whose operator reads the mirror partner's block from another part,
@@ -231,9 +232,7 @@ finalize_reduction
 BlockDevices
 BlockPart
 host_state
-wall_partial_type
-block_wall_partial
-finalize_wall_reduction
+host_reduction
 fluid_velocity_partial_type
 block_fluid_velocity_partial
 finalize_fluid_velocity

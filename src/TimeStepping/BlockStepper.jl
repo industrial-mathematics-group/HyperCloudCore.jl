@@ -4,7 +4,6 @@ export AbstractBlockSource, AbstractExplicitBlockSource, AbstractImplicitBlockSo
 export reduction_type, block_reduce, block_source, block_implicit_solve
 export reduction_partial_type, block_partial, finalize_reduction
 export block_fluid_velocity, wall_reduction_type, block_wall_reduce, block_wall_apply
-export wall_partial_type, block_wall_partial, finalize_wall_reduction
 export fluid_velocity_partial_type, block_fluid_velocity_partial, finalize_fluid_velocity
 export admissible_partial_type, block_admissible_partial, finalize_admissible
 export reorder!
@@ -125,30 +124,10 @@ reflected into another block), the scratch array. `wall_reduction_type(op, eq)` 
 reflection. Kernel functions, as the operators themselves.
 """
 wall_reduction_type(op, eq) = nothing
-"The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref)); by default the additive form (`finalize_wall_reduction` of `block_wall_partial` over `1:nb`) when the operator gives one."
-function block_wall_reduce end
+"The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref)); on a state split over devices it runs on every part over the gathered ghost rows of all blocks."
+block_wall_reduce(op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
 "The ghost state of block `b` from its mirrored value and the wall parameters (see [`wall_reduction_type`](@ref))."
 block_wall_apply(op, eq, U, b, params, wall, Y, N, nb, g) = error("`block_wall_apply` not implemented for $(typeof(op)) on $(typeof(eq))")
-
-"""
-    wall_partial_type(op, eq) -> Type or nothing
-    block_wall_partial(op, eq, S, N, nb, blocks::UnitRange, g, wall) -> partial
-    finalize_wall_reduction(op, eq, partial, wall) -> params
-
-The **additive form** of a wall operator's reduction (see [`wall_reduction_type`](@ref)): the contribution of the
-mirrored blocks `blocks` of ghost `g` is a bits value that adds up over block ranges, `finalize_wall_reduction` turns
-the sum over all blocks into the parameters of `block_wall_apply`. A state split over devices exchanges the partials
-(and the mirrored ghost rows, which `block_wall_apply` may read); an operator that gives the additive form gets
-`block_wall_reduce` for free. Default `nothing`: no additive form (the operator cannot act on a split state).
-"""
-wall_partial_type(op, eq) = nothing
-"The contribution of the mirrored blocks `blocks` of ghost `g` to the wall reduction, additive over block ranges (see [`wall_partial_type`](@ref))."
-block_wall_partial(op, eq, S, N, nb, blocks::UnitRange, g, wall) = error("`block_wall_partial` not implemented for $(typeof(op)) on $(typeof(eq))")
-"The parameters of `block_wall_apply` from the sum of the wall partials over all blocks (see [`wall_partial_type`](@ref))."
-finalize_wall_reduction(op, eq, partial, wall) = error("`finalize_wall_reduction` not implemented for $(typeof(op)) on $(typeof(eq))")
-@inline block_wall_reduce(op, eq, Y, N, nb, g, wall) = _block_wall_reduce(wall_partial_type(op, eq), op, eq, Y, N, nb, g, wall)
-@inline _block_wall_reduce(::Nothing, op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
-@inline _block_wall_reduce(::Type, op, eq, Y, N, nb, g, wall) = finalize_wall_reduction(op, eq, block_wall_partial(op, eq, Y, N, nb, 1:nb, g, wall), wall)
 
 """
     fluid_velocity_partial_type(eq) -> Type or nothing

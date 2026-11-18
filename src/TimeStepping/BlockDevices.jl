@@ -8,7 +8,7 @@
 # at a time, through host buffers (summed in block order), plus the MOOD flags (an OR) and, for a kinetic wall whose
 # operator reads other blocks of a ghost, the mirrored ghost rows. The step runs in lockstep phases over the parts.
 # =========================================================================
-export BlockDevices, BlockPart, host_state
+export BlockDevices, BlockPart, host_state, host_reduction
 
 """
     BlockPart(pg, ts::BlockTimeStepper, bs::BlockState; activate = nothing)
@@ -52,12 +52,13 @@ per-particle partial sums of the reductions, the MOOD flags and the mirrored gho
 
 - the sources give their reduction in the additive form ([`reduction_partial_type`](@ref)), the frame velocity of a
   Lagrangian mover in [`fluid_velocity_partial_type`](@ref), the cross-block admissibility of MOOD in
-  [`admissible_partial_type`](@ref) (an equation that implements `block_admissible` without it is refused), the
-  operator of a kinetic wall in [`wall_partial_type`](@ref); the sums are formed in block order on the host;
+  [`admissible_partial_type`](@ref) (an equation that implements `block_admissible` without it is refused); the sums
+  are formed in block order on the host;
 - the MOOD flag pass runs per part, the flags are OR-ed over the parts, the drop pass runs on every part (the same
   orders everywhere), as does every host-side decision;
-- the parameters of a kinetic wall come from the exchanged partials, and `block_wall_apply` reads the other blocks of
-  a ghost from the gathered ghost rows of all blocks (per tag: `nb × ghosts` states, exchanged per application).
+- a kinetic wall: the mirrored ghost rows of all blocks are gathered per tag (`nb × ghosts` states, exchanged per
+  application), and every part runs the operator's reduction (`block_wall_reduce`, unchanged) and its application on
+  them, so the walls are those of the single stepper bit for bit.
 
 The parts' grids are copies of one cloud (a `device_grid` per device; copies, not the shared arrays of
 `device_grid(Array, pg)`: every part moves its own positions and orders). Not supported on a split state: moving
@@ -99,10 +100,6 @@ function BlockDevices(eq::HyperbolicPDE{D, W, T}, parts::Vector{P}) where {D, W,
     end
     _lagrangian_type(p1.pg.mover) && fluid_velocity_partial_type(eq) === nothing &&
         throw(ArgumentError("BlockDevices: a Lagrangian mover on a split state needs the additive form of `block_fluid_velocity` (`fluid_velocity_partial_type`)"))
-    for (tag, bc) in p1.pg.geometry.bc_map
-        _is_block_wall(bc, eq) && wall_partial_type(bc.op, eq) === nothing &&
-            throw(ArgumentError("BlockDevices: the wall operator $(typeof(bc.op)) of tag $tag gives no additive form of its reduction (`wall_partial_type`)"))
-    end
     return BlockDevices{D, W, T, typeof(eq), P}(eq, parts, Dict{Any, Any}(), Dict{Int, Any}())
 end
 # Whether an equation implements `block_admissible` itself (the default is `true`, additive form or not)
@@ -202,16 +199,6 @@ end
 @inline function _admissible_finalize_body!(p, triggered, eq, sums, is_boundary, dirty, full)
     (is_boundary[p] || !(full || dirty[p])) && return nothing
     finalize_admissible(eq, sums[p]) || (triggered[p] = true)
-    return nothing
-end
-@inline function _wall_partial_body!(g, out, op, eq, S, N, nb, blocks, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
-    (is_boundary[g] && tags[g] == tag) || return nothing
-    out[g] = block_wall_partial(op, eq, S, N, nb, blocks, g, _ghost_wall_point(g, pos, normals, wdist, curvs, gm))
-    return nothing
-end
-@inline function _wall_finalize_body!(g, params, op, eq, sums, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
-    (is_boundary[g] && tags[g] == tag) || return nothing
-    params[g] = finalize_wall_reduction(op, eq, sums[g], _ghost_wall_point(g, pos, normals, wdist, curvs, gm))
     return nothing
 end
 # The local flags of the inadmissible count: a block of the part not admissible (the cross-block check is exchanged)
@@ -406,8 +393,9 @@ function _devices_form_candidate!(devs::BlockDevices{D, W, T}, i::Int, dt::T, ti
     return t_i
 end
 
-# The boundary conditions of the stage array `i` on every part: a kinetic wall with the exchange of its partials and
-# the gather of the mirrored ghost rows, every other condition per part
+# The boundary conditions of the stage array `i` on every part: a kinetic wall with the mirrored fit per part, the
+# gather of the ghost rows of all blocks, then the operator's reduction and application on every part over them; every
+# other condition per part
 function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W, T}
     parts = devs.parts
     eq    = devs.pde
@@ -415,29 +403,22 @@ function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W
     nb    = num_blocks(eq)
     for (tag, bc) in first(parts).pg.geometry.bc_map
         if _is_block_wall(bc, eq)
-            P = wall_partial_type(bc.op, eq)
             for pt in parts
                 _activate(pt)
                 _launch_wall_fit!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, pt.bs.nb)
-                buf = _part_scratch!(pt, P, N)
-                c   = pt.pg.core
-                gm  = _wall_motion(pt.pg, tag, t)
-                foreach_particle(_wall_partial_body!, get_backend(), N,
-                    (buf, bc.op, eq, _OffsetBlocks(parent(pt.ts.ghost_scratch), (first(pt.bs.blocks) - 1) * N), N, nb, pt.bs.blocks,
-                     c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
             end
-            _exchange_sum!(devs, P, N)
             _gather_ghost_rows!(devs, tag, N)
             ng = length(devs.ghosts[tag][1])
             for pt in parts
                 _activate(pt)
                 params = _wall_params!(pt.ts, bc, tag, eq)
                 ensure_capacity!(params, N)
+                rows = _ghost_rows(pt, tag, N, ng)
                 c  = pt.pg.core
                 gm = _wall_motion(pt.pg, tag, t)
-                foreach_particle(_wall_finalize_body!, get_backend(), N,
-                    (params, bc.op, eq, pt.scratch[P], c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
-                _launch_wall_apply!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, N, pt.bs.nb, params, _ghost_rows(pt, tag, N, ng))
+                foreach_particle(_block_wall_reduce_body!, get_backend(), N,
+                    (params, bc.op, eq, rows, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
+                _launch_wall_apply!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, N, pt.bs.nb, params, rows)
             end
         else
             for pt in parts
@@ -594,6 +575,31 @@ function _devices_count_inadmissible(devs::BlockDevices, i::Int, cand_sub::Bool)
         end
     end
     return count(view(flags, 1:N))
+end
+
+"""
+    host_reduction(f, devs::BlockDevices, ::Type{P}) -> Vector{P}
+
+The sum over all blocks of a per-particle partial `f(Y, N, nb, blocks, p)` (a kernel function: `Y` the block-major
+state of a part seen with global block indices, `blocks` the part's range), run on every part and summed on the host
+in block order, for every particle (ghosts included); `P` is the partial type (`+`, `zero`). What a snapshot of a
+split state reduces (the moments: `host_reduction((Y, N, nb, blocks, p) -> block_moments(bk, Y, N, nb, p, blocks), devs,
+SVector{D + 2, T})`).
+"""
+function host_reduction(f::F, devs::BlockDevices, ::Type{P}) where {F, P}
+    N  = first(devs.parts).pg.meta.N
+    nb = num_blocks(devs.pde)
+    for pt in devs.parts
+        _activate(pt)
+        buf = _part_scratch!(pt, P, N)
+        foreach_particle(_host_reduction_body!, get_backend(), N,
+            (buf, f, _OffsetBlocks(parent(pt.bs.data), (first(pt.bs.blocks) - 1) * N), N, nb, pt.bs.blocks))
+    end
+    return copy(view(_exchange_sum!(devs, P, N), 1:N))
+end
+@inline function _host_reduction_body!(p, out, f, Y, N, nb, blocks)
+    out[p] = f(Y, N, nb, blocks, p)
+    return nothing
 end
 
 """
