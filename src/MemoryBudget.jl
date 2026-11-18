@@ -47,8 +47,41 @@ particle_buffers(m::MUSCL, moving::Bool) = (m.gradients, particle_buffers(m.grad
     (m.div_weights === m.grad_weights ? () : particle_buffers(m.div_weights, moving))...)
 slot_buffers(m::MUSCL) = _moment_active(m) ? (m.dweights, m.mweights) : (m.dweights,)
 
+# `_prepare_budget!(x, pg)`: makes the buffers of `x` that the run on `pg` will need but that are created lazily (before
+# `memory_estimate` prices and `reserve!` freezes them)
+_prepare_budget!(::Any, pg) = nothing
+
+# The block pipeline: the state arrays are block-major, `nb` elements per particle (`_Blocked`); the positions, volumes,
+# MOOD masks and the source parameters are per particle. With a `MirrorBC` that reduces over the blocks (the kinetic
+# walls) the block-major scratch of the mirrored states and the wall parameters per tag count too: they are made for
+# the grid's conditions first (a full copy of the state grew outside the reservation at the first wall pass).
+function _prepare_budget!(ts::BlockTimeStepper, pg)
+    for (tag, bc) in pg.geometry.bc_map
+        _is_block_wall(bc, ts.pde) && _wall_params!(ts, bc, tag, ts.pde)
+    end
+    return nothing
+end
+struct _Blocked{G <: Growable}
+    g::G
+    nb::Int
+end
+function particle_buffers(ts::BlockTimeStepper, moving::Bool)
+    inner, nb = ts.inner, num_blocks(ts.pde)
+    blocked = map(g -> _Blocked(g, nb), (inner.rho_n, inner.rho_cand, (_checks_substeps(inner) ? (inner.rho_sub,) : ())...,
+                                         inner.Y_stages..., inner.K_E_stages..., inner.K_I_stages...))
+    return (blocked...,
+            (moving ? (inner.x_n, inner.x_cand, inner.X_stages..., inner.K_X_stages..., inner.v_n, inner.v_cand, inner.V_stages...,
+                       inner.K_V_stages..., ts.grid_w) : ())...,
+            inner.work.triggered, inner.work.changed, inner.work.dirty, inner.work.scratch, inner.work.snapshot, inner.work.triggered_step,
+            map(st -> st.params, (ts.explicit_sources..., ts.implicit_sources...))...,
+            (isempty(ts.wall_params) ? () : (_Blocked(ts.ghost_scratch, nb), values(ts.wall_params)...))...)
+end
+slot_buffers(ts::BlockTimeStepper) = slot_buffers(ts.inner)
+particle_buffers(bs::BlockState, ::Bool) = (_Blocked(bs.data, bs.nb),)
+
 _array_bytes(a::AbstractArray) = length(a) * sizeof(eltype(a))
 _element_bytes(b::AbstractArray) = sizeof(eltype(b))
+_element_bytes(b::_Blocked) = b.nb * _element_bytes(b.g)
 
 """
     slots_per_particle(pg::ParticleGrid) -> Float64
@@ -84,6 +117,7 @@ moving-grid position buffers of a time stepper count when the grid has a mover. 
 `(; bytes, per_particle, per_slot, fixed, particles, slots)`.
 """
 function memory_estimate(pg::ParticleGrid, objs...; particles::Int = pg.meta.N, slots::Int = _slots_needed(pg))
+    foreach(o -> _prepare_budget!(o, pg), objs)
     moving = _is_moving(pg)
     all = (pg, objs...)
     ranges       = _element_bytes(pg.neighbor.ranges)                    # `ranges` holds N + 1 entries
@@ -112,6 +146,7 @@ function reserve!(pg::ParticleGrid, objs...; limit::Integer, tolerance::Real = 0
                   slots_per_particle::Real = _slots_per_particle(pg))
     0 <= tolerance < 1 || throw(ArgumentError("tolerance must be in [0, 1), got $tolerance"))
     slots_per_particle >= 0 || throw(ArgumentError("slots_per_particle must be non-negative, got $slots_per_particle"))
+    foreach(o -> _prepare_budget!(o, pg), objs)
     est    = memory_estimate(pg, objs...; particles = 0, slots = 0)
     budget = floor(Int, limit * (1 - tolerance)) - est.fixed
     budget > 0 || throw(ArgumentError("a limit of $limit bytes does not even hold the cell list ($(est.fixed) bytes)"))
@@ -135,6 +170,7 @@ function reserve!(pg::ParticleGrid, objs...; limit::Integer, tolerance::Real = 0
     return (; particles, slots, bytes = memory_estimate(pg, objs...; particles, slots).bytes, limit = Int(limit))
 end
 
+_reserve!(b::_Blocked, n::Int) = _reserve!(b.g, b.nb * n)
 # Exactly `n` elements (no headroom; a buffer that is larger, e.g. from the 25 % headroom of a growth or
 # of the host grid a device grid was copied from, is shrunk), then fixed.
 function _reserve!(g::Growable, n::Int)
