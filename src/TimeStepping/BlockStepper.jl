@@ -912,9 +912,11 @@ function _block_detect_and_drop!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub:
     for blocks in (regather ? _launch_chunks(ts, nb) : (1:nb,))
         regather && foreach_block(_rhs_gather!, backend, N, blocks,
             (PerBlock(Y_prev), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg, parent(work.changed), true))
+        # (the scheme with the slot's gradient cache only when the pass reads it: the launch over all blocks at once would
+        # otherwise view the scratch beyond its `blocks_per_launch` slots, which a bounds-checked run refuses)
         foreach_block(_mood_flag!, backend, N, blocks,
-            (inner.mood, PerSlot((interp, ts.grad_scratch), N), pg, PerBlock(Y_prev), PerBlock(cand), pg.neighbor.ranges, isb, parent(work.dirty),
-             parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, Y_prev, blocks, N)))
+            (inner.mood, regather ? PerSlot((interp, ts.grad_scratch), N) : interp, pg, PerBlock(Y_prev), PerBlock(cand), pg.neighbor.ranges, isb,
+             parent(work.dirty), parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, Y_prev, blocks, N)))
     end
     foreach_particle(_block_admissible_flag!, backend, N,
         (parent(work.triggered), isb, parent(work.dirty), full, eq, _block_candidate_array(ts, i, cand_sub), N, nb))
