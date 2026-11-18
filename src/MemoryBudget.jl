@@ -71,7 +71,7 @@ struct _Blocked{G <: Growable}
 end
 # The scratch of the scheme (the interaction buffer, the gradient cache) is replicated for the blocks of one launch
 function particle_buffers(ts::BlockTimeStepper, moving::Bool)
-    inner, nb = ts.inner, num_blocks(ts.pde)
+    inner, nb = ts.inner, length(ts.blocks)
     nc = _launch_width(ts, nb)
     blocked = map(g -> _Blocked(g, nb), (inner.rho_n, inner.rho_cand, (_checks_substeps(inner) ? (inner.rho_sub,) : ())...,
                                          inner.Y_stages..., inner.K_E_stages..., inner.K_I_stages...))
@@ -85,7 +85,7 @@ function particle_buffers(ts::BlockTimeStepper, moving::Bool)
             (ts.grad_scratch === nothing ? () : (_Blocked(ts.grad_scratch, nc),))...,
             Iterators.flatten(_scratch_buffers(g) for g in values(ts.ghost_geom))...)
 end
-slot_buffers(ts::BlockTimeStepper) = map(g -> _Blocked(g, _launch_width(ts, num_blocks(ts.pde))), slot_buffers(ts.inner))
+slot_buffers(ts::BlockTimeStepper) = map(g -> _Blocked(g, _launch_width(ts, length(ts.blocks))), slot_buffers(ts.inner))
 particle_buffers(bs::BlockState, ::Bool) = (_Blocked(bs.data, bs.nb), _Blocked(bs.cfl, bs.nb))
 
 _array_bytes(a::AbstractArray) = length(a) * sizeof(eltype(a))

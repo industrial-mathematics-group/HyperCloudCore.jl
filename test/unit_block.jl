@@ -208,6 +208,65 @@ end
 end
 
 
+# The additive forms of the test equations' reductions, for a state split over devices (`BlockDevices`): the fluid velocity
+# of the transport (density and momentum), the guarded equation's mean (the sum of the components), the reflecting wall's
+# total; `PartialMean` is the mean relaxation in the additive form (sum and count)
+HyperCloudCore.fluid_velocity_partial_type(::DiscreteTransport{D, W, T}) where {D, W, T} = SVector{D + 1, T}
+@inline function HyperCloudCore.block_fluid_velocity_partial(eq::DiscreteTransport{D, W, T}, Y, N::Int, nb::Int, blocks::UnitRange, p::Int) where {D, W, T}
+    s = zero(Space{D, T})
+    n = zero(T)
+    @inbounds for b in blocks
+        U = Y[(b - 1) * N + p]
+        for j in 1:W
+            s += U[j] * eq.speeds[(b - 1) * W + j]
+            n += U[j]
+        end
+    end
+    return SVector{D + 1, T}(n, s...)
+end
+@inline function HyperCloudCore.finalize_fluid_velocity(eq::DiscreteTransport{D, W, T}, partial::SVector) where {D, W, T}
+    n = partial[1]
+    s = Space{D, T}(ntuple(d -> partial[d + 1], Val(D)))
+    return n > zero(T) ? s / n : zero(Space{D, T})
+end
+HyperCloudCore.admissible_partial_type(::GuardedTransport{D, W, T}) where {D, W, T} = T
+@inline function HyperCloudCore.block_admissible_partial(g::GuardedTransport{D, W, T}, Y, N::Int, nb::Int, blocks::UnitRange, p::Int) where {D, W, T}
+    s = zero(T)
+    @inbounds for b in blocks
+        s += sum(Y[(b - 1) * N + p])
+    end
+    return s
+end
+@inline HyperCloudCore.finalize_admissible(g::GuardedTransport{D, W, T}, s) where {D, W, T} = s / (HyperCloudCore.num_blocks(g) * W) > T(1.5)
+# a guarded equation without the additive form of its admissibility: refused on a split state
+struct GuardedNoPartial{D, W, T, EQ <: DiscreteTransport{D, W, T}} <: HyperbolicPDE{D, W, T}
+    eq::EQ
+end
+GuardedNoPartial(eq::DiscreteTransport{D, W, T}) where {D, W, T} = GuardedNoPartial{D, W, T, typeof(eq)}(eq)
+HyperCloudCore.num_blocks(g::GuardedNoPartial) = HyperCloudCore.num_blocks(g.eq)
+@inline HyperCloudCore.block_flux(g::GuardedNoPartial, U::State, b::Int) = HyperCloudCore.block_flux(g.eq, U, b)
+@inline HyperCloudCore.block_max_eigenvalue(g::GuardedNoPartial, U::State, d::Int, b::Int) = HyperCloudCore.block_max_eigenvalue(g.eq, U, d, b)
+@inline HyperCloudCore.block_admissible(g::GuardedNoPartial, Y, N::Int, nb::Int, p::Int) = true
+
+# The mean relaxation in the additive form: the sum and the count of the components of a block range (adds up over ranges)
+struct PartialMean <: AbstractImplicitBlockSource; tau::Float64; end
+HyperCloudCore.reduction_type(::PartialMean) = Float64
+HyperCloudCore.reduction_partial_type(::PartialMean) = SVector{2, Float64}
+@inline function HyperCloudCore.block_partial(::PartialMean, p, Y, N, nb, blocks::UnitRange, pg, t)
+    s, n = 0.0, 0.0
+    @inbounds for b in blocks
+        U = Y[(b - 1) * N + p]
+        for k in eachindex(U)
+            s += U[k]
+        end
+        n += length(U)
+    end
+    return SVector(s, n)
+end
+@inline HyperCloudCore.finalize_reduction(::PartialMean, p, partial, pg, t, dt_coeff) = partial[1] / partial[2]
+@inline HyperCloudCore.block_source(st::PartialMean, U, b, m, p, pg, t) = (m .- U) ./ st.tau
+@inline HyperCloudCore.block_implicit_solve(st::PartialMean, U, b, m, dt_coeff, p, pg, t) = (U .+ (dt_coeff / st.tau) * m) ./ (1 + dt_coeff / st.tau)
+
 # A backend that counts the kernel launches (runs them on the Polyester backend)
 struct CountingBackend <: HyperCloudCore.ExecutionBackend end
 const LAUNCHES = Ref(0)
@@ -672,23 +731,6 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         @test any(mood_flags(ts_b)) && mood_flags(ts_b) == mood_flags(ts_f)
         @test pg_b.core.particle_orders[1:pg_b.meta.N] == pg_f.core.particle_orders[1:pg_f.meta.N]
         # the additive form: the mean relaxation from partial sums over block ranges
-        struct PartialMean <: AbstractImplicitBlockSource; tau::Float64; end
-        HyperCloudCore.reduction_type(::PartialMean) = Float64
-        HyperCloudCore.reduction_partial_type(::PartialMean) = Tuple{Float64, Int}
-        @inline function HyperCloudCore.block_partial(::PartialMean, p, Y, N, nb, blocks::UnitRange, pg, t)
-            s, n = 0.0, 0
-            @inbounds for b in blocks
-                U = Y[(b - 1) * N + p]
-                for k in eachindex(U)
-                    s += U[k]
-                end
-                n += length(U)
-            end
-            return (s, n)
-        end
-        @inline HyperCloudCore.finalize_reduction(::PartialMean, p, partial, pg, t, dt_coeff) = partial[1] / partial[2]
-        @inline HyperCloudCore.block_source(st::PartialMean, U, b, m, p, pg, t) = (m .- U) ./ st.tau
-        @inline HyperCloudCore.block_implicit_solve(st::PartialMean, U, b, m, dt_coeff, p, pg, t) = (U .+ (dt_coeff / st.tau) * m) ./ (1 + dt_coeff / st.tau)
         # partials over two ranges add up to the whole; the stepper's reduction equals the direct one
         pg = block_pg_1d(10, 2)
         bs0 = BlockState(eq_b, pg)
@@ -697,7 +739,7 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         pa = HyperCloudCore.block_partial(PartialMean(0.1), 3, Y, 10, 4, 1:2, pg, 0.0)
         pb = HyperCloudCore.block_partial(PartialMean(0.1), 3, Y, 10, 4, 3:4, pg, 0.0)
         whole = HyperCloudCore.block_partial(PartialMean(0.1), 3, Y, 10, 4, 1:4, pg, 0.0)
-        @test (pa[1] + pb[1], pa[2] + pb[2]) == whole
+        @test pa + pb == whole
         @test HyperCloudCore.block_reduce(PartialMean(0.1), 3, Y, 10, 4, pg, 0.0, 0.01) ≈ HyperCloudCore.block_reduce(MeanRelaxation(0.1), 3, Y, 10, 4, pg, 0.0, 0.01)
         # the run with the additive source equals the run with the direct one, hence the standard run, to round-off
         dev3, _, _ = relaxation_runs((BlockSourceTerm(PartialMean(0.05)),), (MeanRelaxationFull(0.05),), IMEX_ARS222_Tableau(Float64))
@@ -874,5 +916,114 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         @test all(g -> g.fixed && length(parent(g)) == r_g.particles, gsc) && bs_g.cfl.fixed && length(parent(bs_g.cfl)) == 4 * r_g.particles
         advance!((t, d) -> ts_g(eq2, pg_g, bs_g, t, d), 0.1, 0.3 * (2 / 60) / 2.0)
         @test all(i -> all(isfinite, block_view(bs_g, 2)[i]), 1:pg_g.meta.N)
+    end
+
+    @testset "A block state split over devices: host parts in lockstep agree with the single stepper" begin
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq8 = DiscreteTransport(Val(8), sym)
+        eq2 = DiscreteTransport(Val(2), sym)                                       # 4 blocks
+        box(x, k) = 1 + (abs(x) < 0.3 ? 1.0 : 0.0) * (1 + 0.1k)
+        wave(x, k) = 1 + 0.3 * sin(π * x + 0.4k)
+        bc() = Dict{Int, AbstractBoundaryCondition}(1 => FixedDirichlet(), 2 => OutflowBC())
+        # the grid of a run: a copy per part (every part moves its own positions and orders)
+        grid(N, W; periodic = false, mover = NoGridMover(), bcs = bc()) =
+            periodic ? ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); is_periodic = true), (2 / N,), ExponentialWeightFunction(1.0, 2.5 * 2 / N), W; mover = mover) :
+                       block_pg_1d(N, W; bc = bcs)
+        interp(W; order = 2, limiter = MinmodLimiter(:hard)) = MUSCL(Float64, 1, W, order, limiter, RusanovFlux())
+        # the split state: parts over `ranges` (host parts, no device to activate)
+        function split(eq_b, ranges, make_grid, ic; mood = MOOD(NoMOOD()), sources = () -> (), tableau = RK3_SSP_Tableau(Float64), order = 2, limiter = MinmodLimiter(:hard))
+            parts = map(ranges) do r
+                pg = make_grid()
+                ts = BlockTimeStepper(eq_b, interp(2; order, limiter), mood, sources(), tableau; blocks = r)
+                bs = BlockState(eq_b, pg; blocks = r)
+                set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg)
+                BlockPart(pg, ts, bs)
+            end
+            return BlockDevices(eq_b, parts)
+        end
+        function single(eq_b, make_grid, ic; mood = MOOD(NoMOOD()), sources = () -> (), tableau = RK3_SSP_Tableau(Float64), order = 2, limiter = MinmodLimiter(:hard))
+            pg = make_grid()
+            ts = BlockTimeStepper(eq_b, interp(2; order, limiter), mood, sources(), tableau)
+            bs = BlockState(eq_b, pg)
+            set_block_states!((x, b) -> State{2, Float64}(ic(x[1], 2b - 1), ic(x[1], 2b)), bs, pg)
+            return ts, pg, bs
+        end
+        function full_run(eq_f, make_grid, ic; mood = MOOD(NoMOOD()), sources = () -> (), tableau = RK3_SSP_Tableau(Float64), order = 2, limiter = MinmodLimiter(:hard), tend = 0.2, dt = 0.3 * (2 / 60) / 2.0)
+            pg = make_grid()
+            for i in 1:pg.meta.N
+                x = pg.core.positions[i][1]
+                pg.rhos[i] = State{8, Float64}(ntuple(k -> ic(x, k), 8))
+            end
+            ts = GeneralRKTimeStepper(eq_f, interp(8; order, limiter), mood, sources(), tableau)
+            advance!((t, d) -> ts(eq_f, pg, t, d), tend, dt)
+            return pg
+        end
+        dev(devs, bs) = maximum(abs.(host_state(devs) .- view(parent(bs.data), 1:(bs.nb * bs.N[])))) |> x -> maximum(x)
+        maxdiff(a, b) = maximum(maximum(abs.(u - v)) for (u, v) in zip(a, b))
+        N  = 60
+        dt = 0.3 * (2 / N) / 2.0
+
+        # 1. transport with inflow/outflow, the implicit mean relaxation in its additive form (ARS222): two and three parts
+        for ranges in ([1:1, 2:4], [1:2, 3:4], [1:1, 2:2, 3:4])
+            devs = split(eq2, ranges, () -> grid(N, 2), box; sources = () -> (BlockSourceTerm(PartialMean(0.05)),), tableau = IMEX_ARS222_Tableau(Float64))
+            ts1, pg1, bs1 = single(eq2, () -> grid(N, 2), box; sources = () -> (BlockSourceTerm(PartialMean(0.05)),), tableau = IMEX_ARS222_Tableau(Float64))
+            advance!((t, d) -> (devs(t, d); ts1(eq2, pg1, bs1, t, d)), 0.2, dt)
+            @test maxdiff(host_state(devs), view(parent(bs1.data), 1:(4 * bs1.N[]))) < 1e-12
+            @test all(((pt, r),) -> pt.bs.blocks == r && pt.ts.blocks == r, zip(devs.parts, ranges))
+            @test get_time_step(devs) == get_time_step(pg1, eq2, ts1.inner.divergence_interpolator, bs1)
+        end
+        # against the eight-component standard run as well (the single block stepper is within 1e-13 of it)
+        devs = split(eq2, [1:1, 2:4], () -> grid(N, 2), box; sources = () -> (BlockSourceTerm(PartialMean(0.05)),), tableau = IMEX_ARS222_Tableau(Float64))
+        advance!((t, d) -> devs(t, d), 0.2, dt)
+        pg_f = full_run(eq8, () -> grid(N, 8), box; sources = () -> (MeanRelaxationFull(0.05),), tableau = IMEX_ARS222_Tableau(Float64))
+        Yd = host_state(devs)
+        Nt = pg_f.meta.N                                                           # (the grid's particles, ghosts included: the stride of the layout)
+        @test maximum(maximum(abs(Yd[(b - 1) * Nt + i][k] - pg_f.rhos[i][(b - 1) * 2 + k]) for b in 1:4, k in 1:2) for i in 1:Nt) < 1e-12
+
+        # 2. MOOD u1 with the cross-block admissibility in its additive form (the guarded equation): the same flags and
+        #    orders on every part as in the single stepper, states to round-off
+        g2 = GuardedTransport(eq2)
+        mood = MOOD(EPD1(), MOODu1(1e-3))
+        devs = split(g2, [1:2, 3:4], () -> grid(N, 2; periodic = true), box; mood, order = 3, limiter = NoLimiter())
+        ts1, pg1, bs1 = single(g2, () -> grid(N, 2; periodic = true), box; mood, order = 3, limiter = NoLimiter())
+        advance!((t, d) -> (devs(t, d); ts1(g2, pg1, bs1, t, d)), 0.2, dt)
+        @test maxdiff(host_state(devs), view(parent(bs1.data), 1:(4 * bs1.N[]))) < 1e-12
+        @test any(mood_flags(ts1))
+        @test all(pt -> mood_flags(pt.ts) == mood_flags(ts1), devs.parts)
+        @test all(pt -> pt.pg.core.particle_orders[1:pg1.meta.N] == pg1.core.particle_orders[1:pg1.meta.N], devs.parts)
+        @test mood_inadmissible(first(devs.parts).ts) == mood_inadmissible(ts1)
+
+        # 3. a Lagrangian mover: the frame velocity from the exchanged density and momentum partials
+        devs = split(eq2, [1:3, 4:4], () -> grid(N, 2; periodic = true, mover = LagrangianMover()), wave)
+        ts1, pg1, bs1 = single(eq2, () -> grid(N, 2; periodic = true, mover = LagrangianMover()), wave)
+        advance!((t, d) -> (devs(t, d); ts1(eq2, pg1, bs1, t, d)), 0.2, dt)
+        @test maxdiff(host_state(devs), view(parent(bs1.data), 1:(4 * bs1.N[]))) < 1e-12
+        @test all(pt -> maximum(norm, pt.pg.core.positions[1:pg1.meta.N] .- pg1.core.positions[1:pg1.meta.N]) < 1e-12, devs.parts)
+
+        # 4. reflecting walls whose operator reads the mirror partner's block from another part: the reduction and the
+        #    application run on the gathered ghost rows, bit for bit the single stepper (no sources: nothing else is summed)
+        bcw() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(ReflectOp()), 2 => MirrorBC(ReflectOp()))
+        devs = split(eq2, [1:1, 2:3, 4:4], () -> grid(N, 2; bcs = bcw()), box)
+        ts1, pg1, bs1 = single(eq2, () -> grid(N, 2; bcs = bcw()), box)
+        advance!((t, d) -> (devs(t, d); ts1(eq2, pg1, bs1, t, d)), 0.3, dt)
+        @test host_state(devs) == collect(view(parent(bs1.data), 1:(4 * bs1.N[])))
+        @test all(i -> all(isfinite, host_state(devs)[i]), 1:(4 * bs1.N[]))
+        # the host reduction of a user's partial: the sum of the components of every interior particle
+        tot = host_reduction((Y, N, nb, blocks, p) -> sum(b -> sum(Y[(b - 1) * N + p]), blocks), devs, Float64)
+        @test all(i -> tot[i] ≈ sum(b -> sum(bs1.data[(b - 1) * bs1.N[] + i]), 1:4), 1:bs1.N[])
+
+        # 5. the refusals: parts that do not cover the blocks, a source without the additive form, an equation whose
+        #    cross-block admissibility has none, a wall operator without one
+        parts2 = devs.parts
+        @test_throws ArgumentError BlockDevices(eq2, parts2[1:2])
+        @test_throws ArgumentError BlockDevices(eq2, [parts2[1], parts2[3]])
+        @test_throws ArgumentError BlockState(eq2, grid(N, 2); blocks = 2:5)
+        @test_throws ArgumentError BlockTimeStepper(eq2, interp(2), RK3_SSP_Tableau(Float64); blocks = 0:2)
+        @test_throws ArgumentError split(eq2, [1:2, 3:4], () -> grid(N, 2), box; sources = () -> (BlockSourceTerm(MeanRelaxation(0.05)),), tableau = IMEX_ARS222_Tableau(Float64))
+        @test HyperCloudCore._overrides_block_admissible(g2) && !HyperCloudCore._overrides_block_admissible(eq2)
+        @test_throws ArgumentError split(GuardedNoPartial(eq2), [1:2, 3:4], () -> grid(N, 2; periodic = true), box; mood)
+        # a stepper of a block range does not step on its own
+        pt = first(parts2)
+        @test_throws ArgumentError pt.ts(eq2, pt.pg, pt.bs, 0.0, dt)
     end
 end

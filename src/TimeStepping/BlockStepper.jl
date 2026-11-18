@@ -4,6 +4,8 @@ export AbstractBlockSource, AbstractExplicitBlockSource, AbstractImplicitBlockSo
 export reduction_type, block_reduce, block_source, block_implicit_solve
 export reduction_partial_type, block_partial, finalize_reduction
 export block_fluid_velocity, wall_reduction_type, block_wall_reduce, block_wall_apply
+export fluid_velocity_partial_type, block_fluid_velocity_partial, finalize_fluid_velocity
+export admissible_partial_type, block_admissible_partial, finalize_admissible
 export reorder!
 
 # =========================================================================
@@ -91,7 +93,9 @@ pipeline; block `b` of the particle is `Y[(b - 1) N + p]`): the default `true` l
 block finite, `is_admissible` of the `BlockOf` wrapper) as the only one; a discrete-velocity model adds the
 positivity of the moments here. Runs inside kernels.
 """
-@inline block_admissible(eq::HyperbolicPDE, Y, N::Int, nb::Int, p::Int) = true
+@inline block_admissible(eq::HyperbolicPDE, Y, N::Int, nb::Int, p::Int) = _block_admissible(admissible_partial_type(eq), eq, Y, N, nb, p)
+@inline _block_admissible(::Nothing, eq, Y, N, nb, p) = true
+@inline _block_admissible(::Type, eq, Y, N, nb, p) = finalize_admissible(eq, block_admissible_partial(eq, Y, N, nb, 1:nb, p))
 
 """
     block_fluid_velocity(eq::HyperbolicPDE{D, W, T}, Y, N, nb, p) -> Space{D, T}
@@ -100,8 +104,10 @@ The fluid velocity of particle `p` of a block equation across its blocks (block 
 `LagrangianMover` or `ScaledLagrangianMover` moves the particle with in the block pipeline (a discrete-velocity
 model: the mean velocity of the moments). Runs inside kernels. No default.
 """
-block_fluid_velocity(eq::HyperbolicPDE, Y, N::Int, nb::Int, p::Int) =
+@inline block_fluid_velocity(eq::HyperbolicPDE, Y, N::Int, nb::Int, p::Int) = _block_fluid_velocity(fluid_velocity_partial_type(eq), eq, Y, N, nb, p)
+@inline _block_fluid_velocity(::Nothing, eq, Y, N, nb, p) =
     error("`block_fluid_velocity` not implemented for $(typeof(eq)) (needed by a Lagrangian mover in the block pipeline)")
+@inline _block_fluid_velocity(::Type, eq, Y, N, nb, p) = finalize_fluid_velocity(eq, block_fluid_velocity_partial(eq, Y, N, nb, 1:nb, p))
 
 """
     wall_reduction_type(op, eq) -> Type or nothing
@@ -118,10 +124,58 @@ reflected into another block), the scratch array. `wall_reduction_type(op, eq)` 
 reflection. Kernel functions, as the operators themselves.
 """
 wall_reduction_type(op, eq) = nothing
-"The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref))."
+"The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref)); on a state split over devices it runs on every part over the gathered ghost rows of all blocks."
 block_wall_reduce(op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
 "The ghost state of block `b` from its mirrored value and the wall parameters (see [`wall_reduction_type`](@ref))."
 block_wall_apply(op, eq, U, b, params, wall, Y, N, nb, g) = error("`block_wall_apply` not implemented for $(typeof(op)) on $(typeof(eq))")
+
+"""
+    fluid_velocity_partial_type(eq) -> Type or nothing
+    block_fluid_velocity_partial(eq, Y, N, nb, blocks::UnitRange, p) -> partial
+    finalize_fluid_velocity(eq, partial) -> Space{D, T}
+
+The additive form of [`block_fluid_velocity`](@ref) (a discrete-velocity model: the density and momentum of the
+velocities of a block range, the velocity from the sum), which a state split over devices exchanges; an equation that
+gives it gets `block_fluid_velocity` for free. Default `nothing`.
+"""
+fluid_velocity_partial_type(eq::HyperbolicPDE) = nothing
+"The contribution of the blocks `blocks` of particle `p` to the fluid velocity, additive over block ranges (see [`fluid_velocity_partial_type`](@ref))."
+block_fluid_velocity_partial(eq::HyperbolicPDE, Y, N, nb, blocks::UnitRange, p) = error("`block_fluid_velocity_partial` not implemented for $(typeof(eq))")
+"The fluid velocity from the sum of the partials over all blocks (see [`fluid_velocity_partial_type`](@ref))."
+finalize_fluid_velocity(eq::HyperbolicPDE, partial) = error("`finalize_fluid_velocity` not implemented for $(typeof(eq))")
+
+"""
+    admissible_partial_type(eq) -> Type or nothing
+    block_admissible_partial(eq, Y, N, nb, blocks::UnitRange, p) -> partial
+    finalize_admissible(eq, partial) -> Bool
+
+The additive form of [`block_admissible`](@ref) (the moments of a block range, the positivity from the sum), which a
+state split over devices exchanges; an equation that gives it gets `block_admissible` for free. Default `nothing`: the
+default `block_admissible` (`true`) also holds on a split state; an equation that implements `block_admissible` without
+the additive form is refused by `BlockDevices`.
+"""
+admissible_partial_type(eq::HyperbolicPDE) = nothing
+"The contribution of the blocks `blocks` of particle `p` to the cross-block admissibility, additive over block ranges (see [`admissible_partial_type`](@ref))."
+block_admissible_partial(eq::HyperbolicPDE, Y, N, nb, blocks::UnitRange, p) = error("`block_admissible_partial` not implemented for $(typeof(eq))")
+"The admissibility of a particle from the sum of the partials over all blocks (see [`admissible_partial_type`](@ref))."
+finalize_admissible(eq::HyperbolicPDE, partial) = error("`finalize_admissible` not implemented for $(typeof(eq))")
+
+"""
+    _OffsetBlocks(a, shift)
+
+The block-major array of a block range seen with global block indices: `x[i] == a[i − shift]` with
+`shift = (first_block − 1) N`, so that the additive reductions of a part of a split state index it as they index the
+whole state. A bits struct (kernel argument), not an `AbstractVector`.
+"""
+struct _OffsetBlocks{A}
+    a::A
+    shift::Int
+end
+Base.@propagate_inbounds Base.getindex(x::_OffsetBlocks, i::Int) = x.a[i - x.shift]
+Base.@propagate_inbounds Base.setindex!(x::_OffsetBlocks, v, i::Int) = (x.a[i - x.shift] = v)
+Base.eltype(::Type{_OffsetBlocks{A}}) where {A} = eltype(A)
+Base.length(x::_OffsetBlocks) = x.shift + length(x.a)
+Adapt.adapt_structure(to, x::_OffsetBlocks) = _OffsetBlocks(adapt(to, x.a), x.shift)
 
 """
     BlockOf(eq, b) <: HyperbolicPDE{D, W, T}
@@ -258,16 +312,16 @@ end
     block_admissible(eq, Y, N, nb, p) || (triggered[p] = true)
     return nothing
 end
-@inline function _block_inadmissible_body!(p, flags, is_boundary, eq, Y, N, nb)
+@inline function _block_inadmissible_body!(p, flags, is_boundary, eq, Y, N, nb, off)
     if is_boundary[p]
         flags[p] = false
         return nothing
     end
     ok = true
     for b in 1:nb                                    # (the check of the flag pass, not only finiteness)
-        ok &= block_is_admissible(eq, Y[(b - 1) * N + p], b)
+        ok &= block_is_admissible(eq, Y[(b - 1) * N + p], b + off)
     end
-    flags[p] = !(ok && block_admissible(eq, Y, N, nb, p))
+    flags[p] = !(ok && (off != 0 || block_admissible(eq, Y, N, nb, p)))   # (a part's cross-block check is exchanged, see BlockDevices.jl)
     return nothing
 end
 @inline function _block_implicit_step!(p, Y, K_I, params, st, b, is_boundary, dt_ii, inv_dt_ii, pg, t, first)
@@ -327,7 +381,7 @@ end
 # =========================================================================
 # LAUNCHES OVER THE PAIRS (see `foreach_block`, Backend.jl): the block equation and the scratch of a launch slot
 # =========================================================================
-@inline _block_arg(x::PerBlockEq, b, c, N) = BlockOf(x.eq, b)
+@inline _block_arg(x::PerBlockEq, b, c, N, off) = BlockOf(x.eq, b + off)
 # The interaction buffer of a launch slot: the slots `off + 1 … off + len` (the neighbour slots of the grid, once per block
 # of the launch; `len == 0` when the scheme does not use them)
 @inline _slot_view(ib::InteractionBuffer{D, M, T}, off::Int, len::Int) where {D, M, T} =
@@ -367,18 +421,21 @@ fills it from a function of the position. The array is a `Growable` with arrays 
 """
 struct BlockState{W, T, G <: Growable{State{W, T}}, GT <: Growable{T}}
     data::G
-    nb::Int
+    nb::Int                         # the blocks held (all blocks of the equation, or the range of a part)
     N::Base.RefValue{Int}
     cfl::GT                         # the CFL estimate per (particle, block) (`get_time_step`)
+    blocks::UnitRange{Int}          # the global indices of the blocks held
 end
 
-function BlockState(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}; storage::Type{AT} = Array) where {D, W, T, AT <: AbstractArray}
+function BlockState(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}; storage::Type{AT} = Array,
+                    blocks::UnitRange{Int} = 1:num_blocks(eq)) where {D, W, T, AT <: AbstractArray}
     nb = num_blocks(eq)
     nb >= 1 || throw(ArgumentError("num_blocks($(nameof(typeof(eq)))) = $nb"))
+    (first(blocks) >= 1 && last(blocks) <= nb) || throw(ArgumentError("BlockState: the blocks $blocks are not within 1:$nb"))
     data = Growable{State{W, T}}(AT)
-    ensure_capacity!(data, nb * pg.meta.N)
+    ensure_capacity!(data, length(blocks) * pg.meta.N)
     cfl  = Growable{T}(AT)
-    return BlockState{W, T, typeof(data), typeof(cfl)}(data, nb, Ref(pg.meta.N), cfl)
+    return BlockState{W, T, typeof(data), typeof(cfl)}(data, length(blocks), Ref(pg.meta.N), cfl, blocks)
 end
 
 """
@@ -457,8 +514,9 @@ function set_block_states!(f, bs::BlockState{W, T}, pg::ParticleGrid{D, W, T}) w
     ensure_capacity!(bs.data, bs.nb * N)
     xs  = Array(view(pg.core.positions, 1:N))
     buf = Vector{State{W, T}}(undef, bs.nb * N)
+    off = first(bs.blocks) - 1
     for b in 1:bs.nb, i in 1:N
-        buf[(b - 1) * N + i] = f(xs[i], b)
+        buf[(b - 1) * N + i] = f(xs[i], b + off)
     end
     copyto!(parent(bs.data), 1, buf, 1, bs.nb * N)
     return nothing
@@ -488,6 +546,9 @@ at least one, so that a launch covers about 256 components whatever the width an
 the scheme's slot and gradient buffers of one block, see `memory_estimate`; `0`: all blocks at once; a width of 60 with
 32 blocks per launch ran out of memory on a 16 GB GPU where 8 with 32 did not). A launch of `N` work-items per block
 never filled a GPU and paid the launch latency `nb` times per pass.
+
+`blocks` is the range of blocks the stepper runs (all of the equation by default; a range for the part of a state
+split over devices, see [`BlockDevices`](@ref): such a stepper steps through the devices object only).
 
 `sources` are [`BlockSourceTerm`](@ref)s. Explicit ones enter the right-hand side of every stage after a
 reduction over the blocks at the stage state; implicit ones are solved at the stages with an implicit diagonal
@@ -535,6 +596,7 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
     u2_ranges::GS                   # the global range per block of a launch (the plateau test of MOODu2)
     grad_scratch::GG                # the scheme's gradient cache for the blocks of a launch (`nothing`: none)
     ghost_geom::Dict{Int, Any}      # the per-ghost geometry of the ghost fits per basis size (a `GhostFitScratch`)
+    blocks::UnitRange{Int}          # the blocks the stepper runs (all of the equation, or the range of a part)
 end
 
 """
@@ -546,8 +608,10 @@ The block stepper around an existing standard stepper for `W` components (built 
 (`256 ÷ W`, at least 1), `0` (all) or a positive number.
 """
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeStepper{D, W, T}, sources::Tuple{Vararg{BlockSourceTerm}};
-                          blocks_per_launch::Union{Int, Symbol} = :auto) where {D, W, T}
+                          blocks_per_launch::Union{Int, Symbol} = :auto, blocks::UnitRange{Int} = 1:num_blocks(eq)) where {D, W, T}
     blocks_per_launch = _blocks_per_launch(blocks_per_launch, W)
+    (first(blocks) >= 1 && last(blocks) <= num_blocks(eq)) ||
+        throw(ArgumentError("BlockTimeStepper: the blocks $blocks are not within 1:$(num_blocks(eq))"))
     inner.pde isa BlockOf && inner.pde.eq === eq ||
         throw(ArgumentError("BlockTimeStepper: the inner stepper must be built for BlockOf(eq, 1) of this equation"))
     (isempty(inner.explicit_sources) && isempty(inner.implicit_sources)) ||
@@ -570,7 +634,7 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     explicit_sts = map(st -> _on_storage(st, AT.name.wrapper), explicit_sts)
     implicit_sts = map(st -> _on_storage(st, AT.name.wrapper), implicit_sts)
     return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg)}(
-        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}())
+        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}(), blocks)
 end
 
 # The blocks per launch from the keyword: `:auto` covers about 256 components per launch
@@ -585,9 +649,9 @@ end
 
 function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, mood::MOOD,
                           sources::Tuple{Vararg{BlockSourceTerm}}, tableau::IMEXButcherTableau{T}; blocks_per_launch::Union{Int, Symbol} = :auto,
-                          kwargs...) where {D, W, T}
+                          blocks::UnitRange{Int} = 1:num_blocks(eq), kwargs...) where {D, W, T}
     inner = GeneralRKTimeStepper(BlockOf(eq, 1), div_interp, mood, tableau; kwargs...)
-    return BlockTimeStepper(eq, inner, sources; blocks_per_launch = blocks_per_launch)
+    return BlockTimeStepper(eq, inner, sources; blocks_per_launch, blocks)
 end
 
 # The blocks of one launch of the passes with per-particle scratch
@@ -658,38 +722,21 @@ mood_inadmissible(ts::BlockTimeStepper) = mood_inadmissible(ts.inner)
 
 function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::ParticleGrid{D, W, T}, bs::BlockState{W, T},
                                          time::Real, dt::T) where {D, W, T}
-    inner  = ts.inner
-    interp = inner.divergence_interpolator
-    max_order = _extract_order(interp)
     nb = bs.nb
-    (nb == num_blocks(eq) && nb == num_blocks(ts.pde)) ||
-        throw(ArgumentError("BlockTimeStepper: the state has $nb blocks, the equation $(num_blocks(eq)), the stepper's equation $(num_blocks(ts.pde))"))
-    bs.N[] == pg.meta.N || throw(ArgumentError("BlockTimeStepper: the state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
-    _check_block_bcs(pg, eq)
+    (nb == num_blocks(eq) && nb == num_blocks(ts.pde) && ts.blocks == 1:nb) ||
+        throw(ArgumentError("BlockTimeStepper: the state has $nb blocks, the equation $(num_blocks(eq)), the stepper's equation $(num_blocks(ts.pde)) " *
+                            "(a stepper of a block range steps through `BlockDevices`)"))
+    inner     = ts.inner
+    bt        = inner.tableau
+    s         = inner.num_stages
+    max_order = _extract_order(inner.divergence_interpolator)
     # moving pieces: the ghosts and the region at the step's time first (the sweep may change the particle set)
     has_moving_pieces(pg.geometry) &&
         _with_block_vectors(v -> _sync_boundaries!(pg, T(time), max_order; states = v), bs, pg)
+    _block_step_begin!(ts, eq, pg, bs, time, dt)
     N      = pg.meta.N
-    s      = inner.num_stages
-    bt     = inner.tableau
     orders = pg.core.particle_orders
     moving = _block_moving(pg)
-
-    nc = _launch_width(ts, nb)
-    _block_update_size!(inner, N, nb, length(pg.neighbor.indices), moving, nc)
-    update_size!(interp, N)
-    _launch_scratch_size!(ts.grad_scratch, nc * N)         # (the gradient cache once per block of a launch)
-    moving && ensure_capacity!(ts.grid_w, N)
-    ensure_capacity!(ts.donors, N)
-    ensure_capacity!(ts.u2_ranges, nc)
-    copyto!(parent(inner.rho_n), 1, parent(bs.data), 1, nb * N)
-    moving && copyto!(parent(inner.x_n), 1, pg.core.positions, 1, N)
-    moving && copyto!(parent(inner.v_n), 1, pg.core.volumes, 1, N)
-
-    fill!(view(orders, 1:N), max_order)
-    fill!(view(inner.work.triggered_step, 1:N), false)
-    inner.work.inadmissible[] = 0
-
     for i in 1:s
         if i == 1
             _block_form_candidate!(ts, eq, pg, 1, dt, time)
@@ -701,31 +748,25 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
         _block_rhs!(ts, eq, pg, i, time + bt.c_t[i] * dt, true)
     end
     _block_checkpoint!(ts, eq, pg, s + 1, dt, time)
-    copyto!(parent(bs.data), 1, parent(inner.rho_cand), 1, nb * N)
-    if inner.work.inadmissible[] > 0 && !inner.work.warned[]
-        inner.work.warned[] = true
-        @warn "MOOD accepted $(inner.work.inadmissible[]) inadmissible candidate(s) at first order in the step at t = $time " *
-              "(dt = $dt): the first-order update itself is not admissible there. Reported once per stepper; " *
-              "`mood_inadmissible(ts)` gives the count of each step."
-    end
-    if moving
-        place_ghosts!(pg, parent(inner.x_cand), time, time + dt)
-        copyto!(pg.core.positions, 1, parent(inner.x_cand), 1, N)
-        pg.neighbor(pg)                                    # full search + periodic wrap for the next step
-        if !(pg.mover isa NoGridMover)                     # (a static cloud with moving pieces keeps the sweep's volumes)
-            _check_cloud_quality(pg, time + dt)
-            inner.volume_estimator === nothing || update_volumes!(pg, inner.volume_estimator)
-        end
-        has_moving_pieces(pg.geometry) &&
-            _with_block_vectors(v -> sweep_boundaries!(pg, time, time + dt, max_order; states = v), bs, pg)
-    end
+    _block_step_end!(ts, eq, pg, bs, time, dt)
+    moving && has_moving_pieces(pg.geometry) &&
+        _with_block_vectors(v -> sweep_boundaries!(pg, time, time + dt, max_order; states = v), bs, pg)
     return nothing
 end
 
-# The boundary conditions of a stage array for all blocks: a `MirrorBC` whose operator reduces over the blocks runs in
-# the pipeline's passes (the mirrored fit of every block into the scratch, the reduction per ghost, the application per
-# block); the package's other conditions run in one launch over the blocks with the block's reference state, any other
-# condition block by block through its functor
+# =========================================================================
+# THE PHASES OF A STEP, as launches over the stepper's block range (`ts.blocks`: all blocks of the equation for the
+# stepper of a whole state, a range of them for the part of a state split over devices, see `BlockDevices.jl`). The
+# block index of a launch is global (`block_offset = first(ts.blocks) − 1`), the views and the state arrays local.
+# =========================================================================
+@inline _block_range(ts::BlockTimeStepper) = ts.blocks
+@inline _block_offset(ts::BlockTimeStepper) = first(ts.blocks) - 1
+@inline _num_local(ts::BlockTimeStepper) = length(ts.blocks)
+
+# The boundary conditions of a stage array for the blocks of the stepper: a `MirrorBC` whose operator reduces over the
+# blocks runs in the pipeline's passes (the mirrored fit of every block into the scratch, the reduction per ghost, the
+# application per block); the package's other conditions run in one launch over the blocks with the block's reference
+# state, any other condition block by block through its functor
 function _block_apply_bcs!(ts::BlockTimeStepper{D, W, T}, eq, pg, stage::Growable, t, N::Int, nb::Int) where {D, W, T}
     for (tag, bc) in pg.geometry.bc_map
         if _is_block_wall(bc, eq)
@@ -746,126 +787,164 @@ function _block_bc!(::OutflowBC, ts::BlockTimeStepper, pg, stage, tag::Int, eq, 
     return nothing
 end
 function _block_bc!(::ExtrapolationBC{Q}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q}
-    _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), nothing, Val(false), Val(false), 1:nb, _ghost_geom!(ts, Val(Q)))
+    _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), nothing, Val(false), Val(false), 1:nb, _ghost_geom!(ts, Val(Q));
+                              block_offset = _block_offset(ts))
     return nothing
 end
 function _block_bc!(bc::MirrorBC{Q, F, B}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q, F, B}
     # (an operator without a reduction, applied to every block's mirrored state with `BlockOf(eq, b)`)
-    _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B), 1:nb, _ghost_geom!(ts, Val(Q)))
+    _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B), 1:nb, _ghost_geom!(ts, Val(Q));
+                              block_offset = _block_offset(ts))
     return nothing
 end
 function _block_bc!(bc, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
     inner = ts.inner
+    off   = _block_offset(ts)
     for b in 1:nb
-        bc(pg, _blk(stage, b, N), tag, inner, BlockOf(eq, b), t, _blk(inner.rho_n, b, N))
+        bc(pg, _blk(stage, b, N), tag, inner, BlockOf(eq, b + off), t, _blk(inner.rho_n, b, N))
     end
     return nothing
 end
 
+# The kinetic wall of the stepper of a whole state: the mirrored fit of every block, the reduction per ghost over all
+# blocks, the application per block (a part of a split state runs the same launches with the exchanges in between,
+# see `BlockDevices.jl`)
 function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int) where {D, W, T, Q, F, B}
-    scratch = ts.ghost_scratch
-    ensure_capacity!(scratch, nb * N)
-    _launch_ghost_fit_blocks!(pg, stage, scratch, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B), 1:nb, _ghost_geom!(ts, Val(Q)))
-    _block_mirror_passes!(_wall_params!(ts, bc, tag, eq), ts, bc, pg, stage, tag, eq, t, N, nb)
+    _launch_wall_fit!(ts, bc, pg, stage, tag, eq, t, nb)
+    params = _wall_params!(ts, bc, tag, eq)
+    ensure_capacity!(params, N)
+    gm = _wall_motion(pg, tag, t)
+    c  = pg.core
+    foreach_particle(_block_wall_reduce_body!, get_backend(), N,
+        (params, bc.op, eq, parent(ts.ghost_scratch), N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances,
+         c.wall_curvatures, gm, tag))
+    _launch_wall_apply!(ts, bc, pg, stage, tag, eq, t, N, nb, params, parent(ts.ghost_scratch))
     return nothing
 end
+# The mirrored fit of the blocks of the stepper into its scratch (block-major, the blocks of the range)
+function _launch_wall_fit!(ts::BlockTimeStepper, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, nb::Int) where {Q, F, B}
+    ensure_capacity!(ts.ghost_scratch, nb * pg.meta.N)
+    _launch_ghost_fit_blocks!(pg, stage, ts.ghost_scratch, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B), 1:nb,
+                              _ghost_geom!(ts, Val(Q)); block_offset = _block_offset(ts))
+    return nothing
+end
+# The application per (ghost, block) from the reduced parameters; `S_all` is what the operator reads the other blocks
+# of the ghost from (the scratch of a whole state, or the gathered ghost rows of a split one)
+function _launch_wall_apply!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int,
+                             params::Growable, S_all) where {D, W, T}
+    gm = _wall_motion(pg, tag, t)
+    c  = pg.core
+    foreach_block(_block_wall_apply_body!, get_backend(), N, 1:nb,
+        (PerBlock(stage), PerBlock(ts.ghost_scratch), params, bc.op, eq, PerBlockIndex(), S_all, N, num_blocks(ts.pde), c.positions,
+         c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag); block_offset = _block_offset(ts))
+    return nothing
+end
+# A moving piece: the stored ghost positions and normals belong to `boundary_time`; the wall point is taken at `t`
+_wall_motion(pg::ParticleGrid{D, M, T}, tag::Int, t) where {D, M, T} =
+    (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
+                                      GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}
 # The wall parameter array of a tag (a `Growable` of `wall_reduction_type`, on the stepper's storage), made on first use
 _wall_params!(ts::BlockTimeStepper, bc::MirrorBC, tag::Int, eq) = get!(ts.wall_params, tag) do
     Growable{wall_reduction_type(bc.op, eq)}(typeof(parent(ts.ghost_scratch)).name.wrapper)
 end
 # Whether a condition runs in the pipeline's wall passes (a `MirrorBC` whose operator reduces over the blocks)
 _is_block_wall(bc, eq) = bc isa MirrorBC && bc.op !== nothing && wall_reduction_type(bc.op, eq) !== nothing
-# (a function barrier: the parameter array comes untyped out of `wall_params`)
-function _block_mirror_passes!(params::Growable, ts::BlockTimeStepper{D, W, T}, bc::MirrorBC, pg, stage::Growable, tag::Int, eq, t,
-                               N::Int, nb::Int) where {D, W, T}
-    scratch = ts.ghost_scratch
-    S = parent(scratch)
-    ensure_capacity!(params, N)
-    # A moving piece: the stored ghost positions and normals belong to `boundary_time`; the wall point is taken at `t`
-    gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
-                                           GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}
-    c  = pg.core
-    backend = get_backend()
-    foreach_particle(_block_wall_reduce_body!, backend, N,
-        (params, bc.op, eq, S, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
-    foreach_block(_block_wall_apply_body!, backend, N, 1:nb,
-        (PerBlock(stage), PerBlock(scratch), params, bc.op, eq, PerBlockIndex(), S, N, nb, c.positions, c.is_boundary, c.tags, c.normals,
-         c.wall_distances, c.wall_curvatures, gm, tag))
-    return nothing
-end
 
-# Stage `i` for all blocks (the final combination for `i == s + 1`): the predictor, the implicit sources (solve at a stage
-# with an implicit diagonal, explicit evaluation otherwise), the boundary conditions. Returns the stage time.
+# Stage `i` for the blocks of the stepper (the final combination for `i == s + 1`): the predictor, the implicit sources
+# (solve at a stage with an implicit diagonal, explicit evaluation otherwise), the boundary conditions. Returns the stage time.
 function _block_form_candidate!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, dt::T, time::Real) where {D, W, T}
     inner   = ts.inner
     s       = inner.num_stages
     bt      = inner.tableau
     N       = pg.meta.N
-    nb      = num_blocks(eq)
-    backend = get_backend()
-    isb     = pg.core.is_boundary
+    nb      = _num_local(ts)
     is_final = i > s
     t_i   = is_final ? time + dt : time + bt.c_t[i] * dt
     stage = is_final ? inner.rho_cand : inner.Y_stages[i]
-    _block_candidate!(ts, pg, N, nb, i, dt)
+    _launch_predictor!(ts, pg, N, nb, i, dt)
     if !is_final && !isempty(ts.implicit_sources)
         a_ii = bt.a[i, i]
         Y_i  = parent(stage)
         if abs(a_ii) > T(1e-14)
             for (n, src) in enumerate(ts.implicit_sources)
                 reduce_blocks!(src, Y_i, N, nb, pg, t_i, dt * a_ii)
-                foreach_block(_block_implicit_step!, backend, N, 1:nb,
-                    (PerBlock(stage), PerBlock(inner.K_I_stages[i]), src.params, src.term, PerBlockIndex(), isb,
-                     dt * a_ii, inv(dt * a_ii), pg, t_i, n == 1))
+                _launch_implicit_step!(ts, pg, src, stage, inner.K_I_stages[i], N, nb, dt * a_ii, t_i, n == 1)
             end
         else
             for (n, src) in enumerate(ts.implicit_sources)
                 reduce_blocks!(src, Y_i, N, nb, pg, t_i, zero(T))
-                foreach_block(_block_implicit_rhs!, backend, N, 1:nb,
-                    (PerBlock(inner.K_I_stages[i]), PerBlock(stage), src.params, src.term, PerBlockIndex(), isb, pg, t_i, n == 1))
+                _launch_implicit_rhs!(ts, pg, src, stage, inner.K_I_stages[i], N, nb, t_i, n == 1)
             end
         end
     end
     _block_apply_bcs!(ts, eq, pg, stage, t_i, N, nb)
     return t_i
 end
+# The implicit stage solve and its right-hand side, and the explicit evaluation of an implicit source, from the
+# source's reduced parameters (`src.params`), over the (particle, block) pairs
+function _launch_implicit_step!(ts::BlockTimeStepper, pg, src::BlockSourceTerm, stage, K_I, N::Int, nb::Int, dt_ii, t_i, first::Bool)
+    foreach_block(_block_implicit_step!, get_backend(), N, 1:nb,
+        (PerBlock(stage), PerBlock(K_I), src.params, src.term, PerBlockIndex(), pg.core.is_boundary, dt_ii, inv(dt_ii), pg, t_i, first);
+        block_offset = _block_offset(ts))
+    return nothing
+end
+function _launch_implicit_rhs!(ts::BlockTimeStepper, pg, src::BlockSourceTerm, stage, K_I, N::Int, nb::Int, t_i, first::Bool)
+    foreach_block(_block_implicit_rhs!, get_backend(), N, 1:nb,
+        (PerBlock(K_I), PerBlock(stage), src.params, src.term, PerBlockIndex(), pg.core.is_boundary, pg, t_i, first);
+        block_offset = _block_offset(ts))
+    return nothing
+end
 
-# The right-hand side of stage `i` for all blocks: the scheme's pre-pass and the flux pass of `compute_explicit_rhs!`
-# over the blocks of a launch (all interior particles, or the dirty ones of a MOOD re-form; a partial pass gathers the
-# gradients of all particles, as the cache holds another block's) and the explicit sources (reduced at the stage state
-# on a full pass; a partial pass reuses the parameters)
+# The right-hand side of stage `i` for the blocks of the stepper: the frame velocity of a moving grid (reduced over all
+# blocks), the scheme's pre-pass and the flux pass over the blocks of a launch (all interior particles, or the dirty
+# ones of a MOOD re-form; a partial pass gathers the gradients of all particles, as the cache holds another block's)
+# and the explicit sources (reduced at the stage state on a full pass; a partial pass reuses the parameters)
 function _block_rhs!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full::Bool) where {D, W, T}
+    inner = ts.inner
+    N     = pg.meta.N
+    nb    = _num_local(ts)
+    Y_i   = parent(inner.Y_stages[i])
+    if _block_moving(pg)
+        # the frame velocity of every particle at this stage state (also on a partial pass: the stage may be an earlier one)
+        foreach_particle(_block_velocity_body!, get_backend(), N,
+            (ts.grid_w, pg.mover, eq, Y_i, N, nb, pg, pg.core.is_boundary, t_i, zero(Space{D, T})))
+    end
+    _launch_flux!(ts, eq, pg, i, t_i, full, N, nb)
+    for src in ts.explicit_sources
+        full && reduce_blocks!(src, Y_i, N, nb, pg, t_i, zero(T))
+        _launch_explicit_source!(ts, pg, src, i, N, nb, t_i, full)
+    end
+    return nothing
+end
+# The pre-pass and the flux pass of `compute_explicit_rhs!` over the chunks of blocks (the frame velocities of a
+# moving grid in `ts.grid_w`)
+function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full::Bool, N::Int, nb::Int) where {D, W, T}
     inner   = ts.inner
-    N       = pg.meta.N
-    nb      = num_blocks(eq)
     backend = get_backend()
-    Y_i     = parent(inner.Y_stages[i])
     moving  = _block_moving(pg)
     interp  = inner.divergence_interpolator
     isb     = pg.core.is_boundary
-    if moving
-        # the frame velocity of every particle at this stage state (also on a partial pass: the stage may be an earlier one)
-        foreach_particle(_block_velocity_body!, backend, N,
-            (ts.grid_w, pg.mover, eq, Y_i, N, nb, pg, isb, t_i, zero(Space{D, T})))
-    end
-    mover  = _BlockMover(pg.mover, ts.grid_w)
-    stride = _slot_stride(inner, pg)
+    mover   = _BlockMover(pg.mover, ts.grid_w)
+    stride  = _slot_stride(inner, pg)
+    off     = _block_offset(ts)
     prepare_geometry!(interp, pg)                           # (refreshes the geometry caches only if the grid changed)
     for blocks in _launch_chunks(ts, nb)
         foreach_block(_rhs_gather!, backend, N, blocks,
             (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
-             inner.work.changed, true))
+             inner.work.changed, true); block_offset = off)
         foreach_block(_rhs_flux!, backend, N, blocks,
             (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
              inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
-             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})))
+             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off)
     end
-    for src in ts.explicit_sources
-        full && reduce_blocks!(src, Y_i, N, nb, pg, t_i, zero(T))
-        foreach_block(_block_explicit_source!, backend, N, 1:nb,
-            (PerBlock(inner.K_E_stages[i]), PerBlock(inner.Y_stages[i]), src.params, src.term, PerBlockIndex(), isb, pg, t_i,
-             full, parent(inner.work.dirty)))
-    end
+    return nothing
+end
+# An explicit source added to the right-hand side of stage `i` from its reduced parameters
+function _launch_explicit_source!(ts::BlockTimeStepper, pg, src::BlockSourceTerm, i::Int, N::Int, nb::Int, t_i, full::Bool)
+    inner = ts.inner
+    foreach_block(_block_explicit_source!, get_backend(), N, 1:nb,
+        (PerBlock(inner.K_E_stages[i]), PerBlock(inner.Y_stages[i]), src.params, src.term, PerBlockIndex(), pg.core.is_boundary, pg, t_i,
+         full, parent(inner.work.dirty)); block_offset = _block_offset(ts))
     return nothing
 end
 
@@ -873,7 +952,7 @@ end
 function _block_form_substep!(ts::BlockTimeStepper{D, W, T}, pg, i::Int, dt::T) where {D, W, T}
     inner = ts.inner
     N     = pg.meta.N
-    nb    = num_blocks(ts.pde)                 # (checked against the state's and the step's equation at the step start)
+    nb    = _num_local(ts)
     with_KI = !isempty(ts.implicit_sources)
     foreach_block(_substep_body!, get_backend(), N, 1:nb,
         (PerBlock(inner.rho_sub), PerBlock(inner.Y_stages[i - 1]), PerBlock(inner.K_E_stages[i - 1]), PerBlock(inner.K_I_stages[i - 1]),
@@ -895,32 +974,41 @@ end
 function _block_detect_and_drop!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub::Bool, full::Bool)
     inner = ts.inner
     work  = inner.work
-    crit  = inner.mood.criterion
-    crit isa NoMOOD && return false
+    inner.mood.criterion isa NoMOOD && return false
     N  = pg.meta.N
-    nb = num_blocks(eq)
+    nb = _num_local(ts)
     _mood_reset!(work, N)
+    _launch_flag_pass!(ts, eq, pg, i, cand_sub, full, N, nb)
+    foreach_particle(_block_admissible_flag!, get_backend(), N,
+        (parent(work.triggered), pg.core.is_boundary, parent(work.dirty), full, eq, _block_candidate_array(ts, i, cand_sub), N, nb))
+    return _mood_drop_pass!(inner.mood, work, pg)
+end
+# The flag pass of the criterion over the blocks of the stepper (into `work.triggered`, which is only ever set)
+function _launch_flag_pass!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub::Bool, full::Bool, N::Int, nb::Int)
+    inner   = ts.inner
+    work    = inner.work
+    crit    = inner.mood.criterion
     interp  = inner.divergence_interpolator
     backend = get_backend()
     isb     = pg.core.is_boundary
     Y_prev  = inner.Y_stages[i - 1]
     cand    = _block_candidate(ts, i, cand_sub)
+    off     = _block_offset(ts)
     # MOODu2 reads the scheme's gradient cache (its curvature test), which holds another block's gradients: the block's
     # own gradients at the previous stage are gathered first, into the cache of its launch slot (the chunks of the flux pass)
     regather = crit isa MOODu2 && has_cached_gradients(interp)
     stride   = _slot_stride(inner, pg)
     for blocks in (regather ? _launch_chunks(ts, nb) : (1:nb,))
         regather && foreach_block(_rhs_gather!, backend, N, blocks,
-            (PerBlock(Y_prev), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg, parent(work.changed), true))
+            (PerBlock(Y_prev), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
+             parent(work.changed), true); block_offset = off)
         # (the scheme with the slot's gradient cache only when the pass reads it: the launch over all blocks at once would
         # otherwise view the scratch beyond its `blocks_per_launch` slots, which a bounds-checked run refuses)
         foreach_block(_mood_flag!, backend, N, blocks,
             (inner.mood, regather ? PerSlot((interp, ts.grad_scratch), N) : interp, pg, PerBlock(Y_prev), PerBlock(cand), pg.neighbor.ranges, isb,
-             parent(work.dirty), parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, Y_prev, blocks, N)))
+             parent(work.dirty), parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, Y_prev, blocks, N)); block_offset = off)
     end
-    foreach_particle(_block_admissible_flag!, backend, N,
-        (parent(work.triggered), isb, parent(work.dirty), full, eq, _block_candidate_array(ts, i, cand_sub), N, nb))
-    return _mood_drop_pass!(inner.mood, work, pg)
+    return nothing
 end
 
 # The global range per block of a launch for the plateau test of MOODu2 (`_global_range` of every block, into the
@@ -942,7 +1030,7 @@ function _block_count_inadmissible(ts::BlockTimeStepper, eq, pg, i::Int, cand_su
     N == 0 && return 0
     flags = parent(ts.inner.work.scratch)
     foreach_particle(_block_inadmissible_body!, get_backend(), N,
-        (flags, pg.core.is_boundary, eq, _block_candidate_array(ts, i, cand_sub), N, num_blocks(eq)))
+        (flags, pg.core.is_boundary, eq, _block_candidate_array(ts, i, cand_sub), N, _num_local(ts), _block_offset(ts)))
     return count(view(flags, 1:N))
 end
 
@@ -970,10 +1058,10 @@ function _block_checkpoint!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, dt::T
     end
 end
 
-# The predictor of stage `i` (the final combination for `i == s + 1`) for all blocks: the stage kernel of
+# The predictor of stage `i` (the final combination for `i == s + 1`) for the blocks of the stepper: the stage kernel of
 # `GeneralRKTimeStepper` over the (particle, block) pairs on the views of the blocks (the positions and volumes of a
 # moving grid are per particle: every block's work-item writes the same value)
-function _block_candidate!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, i::Int, dt::T) where {D, W, T}
+function _launch_predictor!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, i::Int, dt::T) where {D, W, T}
     inner    = ts.inner
     s        = inner.num_stages
     is_final = i > s
@@ -989,18 +1077,67 @@ function _block_candidate!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, i
     return nothing
 end
 
+# The beginning of a step for the blocks of the stepper (the stepper of a whole state, or a part of a split one): the
+# sizes, the copy of the state into `rho_n`, the orders; and its end: the copy out, the positions of a moving grid
+function _block_step_begin!(ts::BlockTimeStepper{D, W, T}, eq, pg, bs::BlockState{W, T}, time::Real, dt::T) where {D, W, T}
+    inner  = ts.inner
+    interp = inner.divergence_interpolator
+    bs.N[] == pg.meta.N || throw(ArgumentError("BlockTimeStepper: the state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
+    bs.blocks == ts.blocks || throw(ArgumentError("BlockTimeStepper: the state holds the blocks $(bs.blocks), the stepper runs $(ts.blocks)"))
+    _check_block_bcs(pg, eq)
+    N      = pg.meta.N
+    nb     = _num_local(ts)
+    moving = _block_moving(pg)
+    nc = _launch_width(ts, nb)
+    _block_update_size!(inner, N, nb, length(pg.neighbor.indices), moving, nc)
+    update_size!(interp, N)
+    _launch_scratch_size!(ts.grad_scratch, nc * N)         # (the gradient cache once per block of a launch)
+    moving && ensure_capacity!(ts.grid_w, N)
+    ensure_capacity!(ts.donors, N)
+    ensure_capacity!(ts.u2_ranges, nc)
+    copyto!(parent(inner.rho_n), 1, parent(bs.data), 1, nb * N)
+    moving && copyto!(parent(inner.x_n), 1, pg.core.positions, 1, N)
+    moving && copyto!(parent(inner.v_n), 1, pg.core.volumes, 1, N)
+    fill!(view(pg.core.particle_orders, 1:N), _extract_order(interp))
+    fill!(view(inner.work.triggered_step, 1:N), false)
+    inner.work.inadmissible[] = 0
+    return nothing
+end
+function _block_step_end!(ts::BlockTimeStepper{D, W, T}, eq, pg, bs::BlockState{W, T}, time::Real, dt::T) where {D, W, T}
+    inner = ts.inner
+    N     = pg.meta.N
+    copyto!(parent(bs.data), 1, parent(inner.rho_cand), 1, _num_local(ts) * N)
+    if inner.work.inadmissible[] > 0 && !inner.work.warned[]
+        inner.work.warned[] = true
+        @warn "MOOD accepted $(inner.work.inadmissible[]) inadmissible candidate(s) at first order in the step at t = $time " *
+              "(dt = $dt): the first-order update itself is not admissible there. Reported once per stepper; " *
+              "`mood_inadmissible(ts)` gives the count of each step."
+    end
+    if _block_moving(pg)
+        place_ghosts!(pg, parent(inner.x_cand), time, time + dt)
+        copyto!(pg.core.positions, 1, parent(inner.x_cand), 1, N)
+        pg.neighbor(pg)                                    # full search + periodic wrap for the next step
+        if !(pg.mover isa NoGridMover)                     # (a static cloud with moving pieces keeps the sweep's volumes)
+            _check_cloud_quality(pg, time + dt)
+            inner.volume_estimator === nothing || update_volumes!(pg, inner.volume_estimator)
+        end
+    end
+    return nothing
+end
+
 """
     get_time_step(pg, eq, interp, bs::BlockState; cached_weights = true) -> T
 
-The CFL step of a block state: the smallest step over the blocks (`get_time_step` of every block with its
+The CFL step of a block state: the smallest step over the blocks it holds (`get_time_step` of every block with its
 `BlockOf` equation and its state), in one launch over the (particle, block) pairs into the state's `cfl` buffer.
 """
 function get_time_step(pg::ParticleGrid{D, W, T}, eq::HyperbolicPDE{D, W, T}, main_grad, bs::BlockState{W, T};
                        cached_weights::Bool = true) where {D, W, T}
     bs.N[] == pg.meta.N || throw(ArgumentError("get_time_step: the block state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
-    bs.nb == num_blocks(eq) || throw(ArgumentError("get_time_step: the state has $(bs.nb) blocks, the equation $(num_blocks(eq))"))
-    N  = pg.meta.N
-    nb = bs.nb
+    last(bs.blocks) <= num_blocks(eq) || throw(ArgumentError("get_time_step: the state holds the blocks $(bs.blocks), the equation has $(num_blocks(eq))"))
+    N   = pg.meta.N
+    nb  = bs.nb
+    off = first(bs.blocks) - 1
     N == 0 && return T(Inf)
     ensure_capacity!(bs.cfl, nb * N)
     buf = parent(bs.cfl)
@@ -1014,10 +1151,11 @@ function get_time_step(pg::ParticleGrid{D, W, T}, eq::HyperbolicPDE{D, W, T}, ma
         invL   = one(T) / minimum(pg.meta.dx)
         foreach_block(_cfl_body!, get_backend(), N, 1:nb,
             (PerBlock(buf), pg.core.is_boundary, nbr.ranges, nbr.indices, PerBlock(Y), PerBlockEq(eq), degree, _cfl_degree_of(main_grad),
-             Val(D), get_distances(pg), get_weights(pg), invL, floatmin(T), one(T) / D))
+             Val(D), get_distances(pg), get_weights(pg), invL, floatmin(T), one(T) / D); block_offset = off)
     else
         foreach_block(_cfl_weights_body!, get_backend(), N, 1:nb,
-            (PerBlock(buf), pg.core.is_boundary, nbr.ranges, nbr.indices, PerBlock(Y), PerBlockEq(eq), sw, Val(D), floatmin(T), one(T) / D))
+            (PerBlock(buf), pg.core.is_boundary, nbr.ranges, nbr.indices, PerBlock(Y), PerBlockEq(eq), sw, Val(D), floatmin(T), one(T) / D);
+            block_offset = off)
     end
     return minimum(view(buf, 1:(nb * N)); init = T(Inf))
 end
