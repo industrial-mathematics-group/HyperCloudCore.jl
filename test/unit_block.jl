@@ -934,7 +934,10 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
             pg_f = standard_run(; mood = mood, bc = bcs(), limiter = limiter)
             runs = [block_run(eq2, 2; blocks_per_launch = bpl, mood = mood, bc = bcs(), limiter = limiter) for bpl in (0, 1, 3)]
             @test all(r -> states(r[1]) == states(runs[1][1]), runs)
-            @test all(r -> block_vs_full(r[1], view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-12, runs)
+            # (relative: the block ghost fits sum precomputed weights of the stencil's states, the standard ones solve the
+            # fit per ghost, the same fit up to round-off, which the one-sided extrapolation amplifies to ~7e-13 here)
+            scale = maximum(maximum(abs.(u)) for u in view(pg_f.rhos, 1:pg_f.meta.N))
+            @test all(r -> block_vs_full(r[1], view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-12 * scale, runs)
             mood.criterion isa MOODu2 && @test any(mood_flags(runs[3][3])) && all(i -> all(isfinite, block_view(runs[3][1], 1)[i]), 1:runs[3][1].N[])
         end
         # the memory budget prices the scheme's scratch once per block of a launch, and the reservation holds a step
