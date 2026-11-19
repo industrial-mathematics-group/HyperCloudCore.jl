@@ -30,9 +30,9 @@ geometry of the block pipeline). The stepper's stage buffers and
 MOOD masks are set at the start of every step and are not part of the state. The checkpoint also records `D`,
 `M`, the float type, the support radius and the spacing: a checkpoint of another kind of run is refused.
 
-The kernels are deterministic (no atomics in the sums; the neighbour search sorts the particles of every bin), the
-per-particle sums run in a fixed order, and the partial sums of a split block state are added on the host in block order, which is why a
-restart is exact rather than close.
+The per-particle sums run in a fixed order (every particle sums over its own slots), the neighbour search sorts the
+particles of every bin, and the partial sums of a split block state are added on the host in block order, which is
+why a restart is exact rather than close.
 
 ## Usage
 
