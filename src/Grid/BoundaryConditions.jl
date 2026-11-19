@@ -198,7 +198,7 @@ end
 # =========================================================================
 # Ghost states from the interior: one-sided fits at the nearest interior particle
 # =========================================================================
-export ExtrapolationBC, MirrorBC, WallPoint, requires_shape
+export ExtrapolationBC, MirrorBC, WallPoint, requires_shape, uses_wall_state
 
 """
     WallPoint{D, T, L}
@@ -292,8 +292,9 @@ ExtrapolationBC(degree::Int = 1) = ExtrapolationBC{degree}()
 Wall condition built from the mirror image: every boundary particle with the tag builds the interior fit of
 [`ExtrapolationBC`](@ref) (same donor, data, degree rule and fallbacks) centred at its mirror point
 `x - 2 φ n` behind the wall (`φ` its wall distance, `n` the outward normal; both from the domain's shape, see
-[`wall_geometry`](@ref)) and stores `op(eq, U, wall::WallPoint)` of the value `U` found there. The mirror point
-lies inside the cloud, so the fit interpolates. Without `op`
+[`wall_geometry`](@ref)) and stores `op(eq, U, wall::WallPoint)` of the value `U` found there (or
+`op(eq, U, wall, U_wall)` with the same fit's value at the wall point, see [`uses_wall_state`](@ref)). The mirror
+point lies inside the cloud, so the fit interpolates. Without `op`
 the mirrored value itself is used, i.e. an even reflection of every component (a symmetry plane, zero normal
 derivative). Physics packages supply the operators of their walls (reflecting the normal velocity for a slip
 wall, a Maxwellian for a diffuse kinetic wall, ...); `op` must be a bits-type callable, and the state it
@@ -367,6 +368,24 @@ struct _WallOp{F}
 end
 @inline _apply_wall_op(::_WallOp{Nothing}, eq, U, wall) = U
 @inline _apply_wall_op(w::_WallOp, eq, U, wall) = w.op(eq, U, wall)
+@inline _apply_wall_op(::_WallOp{Nothing}, eq, U, wall, Uw) = U
+@inline _apply_wall_op(w::_WallOp, eq, U, wall, Uw) = w.op(eq, U, wall, Uw)
+@inline _uses_wall_state(::_WallOp{Nothing}) = false
+@inline _uses_wall_state(w::_WallOp) = uses_wall_state(w.op)
+
+"""
+    uses_wall_state(op) -> Bool
+
+Whether a wall operator of [`MirrorBC`](@ref) takes the fit's value at the wall point (the foot of the ghost's
+normal) as a fourth argument: `op(eq, U, wall, U_wall)`, with `U` the fitted value at the ghost's mirror point. A
+balance imposed at the wall belongs at the wall point, a diffuse kinetic wall's returning flux for one: taken at the
+mirror point, it differs from ghost to ghost by the depth of the mirror point (`O(Δx ∂f)`), a first-order error of
+the scheme's flux through the wall out of equilibrium. `U_wall` is clamped to the donor's data range like `U` when
+the condition is `bounded`. In the block pipeline such an operator's reduction gets the wall-point states of all
+blocks as a further scratch array, `block_wall_reduce(op, eq, Y, N, nb, g, wall, Yw)`. Default `false`:
+`op(eq, U, wall)`.
+"""
+uses_wall_state(op) = false
 
 @inline _min_image(dx::Space{D, T}, L::Space{D, T}, Li::Space{D, T}) where {D, T} =
     Space{D, T}(ntuple(d -> dx[d] - L[d] * round(dx[d] * Li[d]), Val(D)))
@@ -475,12 +494,22 @@ end
         x_t = MIRROR ? x_i - 2φ_i * n_i : x_i
         j, q = _ghost_donor(i, x_t, pos, isb, orders, ranges, indices, L, Li, Val(Q), Val(D))
         j == 0 && return nothing
-        U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
-        BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
-        if MIRROR
-            out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm))
+        if MIRROR && _uses_wall_state(op)
+            # the operator takes the fit at the wall point too: the same fit evaluated there
+            U, Uw = _fit_eval2(Val(Q), q, x_i - φ_i * n_i, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
+            if BOUNDED
+                U  = _ghost_clamp(U, j, buf, ranges, indices, isb)
+                Uw = _ghost_clamp(Uw, j, buf, ranges, indices, isb)
+            end
+            out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm), Uw)
         else
-            out[i] = U
+            U = _fit_eval(Val(Q), q, j, x_t, buf, ranges[j], indices, pos, isb, L, Li, wf, invL)
+            BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
+            if MIRROR
+                out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm))
+            else
+                out[i] = U
+            end
         end
     end
     return nothing
@@ -528,7 +557,7 @@ _val_of(::Val{B}) where {B} = B
 # equation `BlockOf(eq, b)`. The same arithmetic as `_launch_ghost_fit!` per block (the moment matrix and its factor
 # do not depend on the block, the right-hand side does), computed once instead of once per block.
 function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val,
-                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0) where {D, M, T}
+                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0, out_w = nothing) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     N    = pg.meta.N
@@ -543,7 +572,9 @@ function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int
         (gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.particle_orders, nb.ranges, nb.indices, nb.weight_func,
          wrap, gm, tag, valQ, mirror, Val(D)))
     foreach_block(_ghost_apply_body!, backend, N, blocks,
-        ((PerBlock(buf), PerBlock(out)), gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures,
+        ((PerBlock(buf), PerBlock(out), out_w === nothing ? nothing : PerBlock(out_w)), gs,
+         c.positions, c.is_boundary, c.tags, c.normals,
+         c.wall_distances, c.wall_curvatures,
          nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded); block_offset)   # (19 arguments)
     return nothing
 end
@@ -576,20 +607,32 @@ end
         (isb[i] && tags[i] == tag) || return nothing
         j = gs.donor[i]
         j == 0 && return nothing
-        buf, out = bufs
+        buf, out, out_w = bufs
         L, Li, invL = wrap
         q_ok = gs.degree[i]
-        U = q_ok < 0 ? buf[j] :
-            _fit_apply(Val(Q), q_ok, gs.factor[i], j, gs.target[i], gs.scale[i], buf, ranges[j], indices, pos, isb, L, Li, wf)
-        BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
-        if MIRROR
-            out[i] = _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm))
+        if out_w !== nothing || (MIRROR && _uses_wall_state(op))
+            # the wall-point state as well: into its own scratch (`out_w`, the fit pass of a block wall), or for the
+            # operator applied here
+            x_w = move(gm, pos[i]) - wdist[i] * rotate(gm, normals[i])
+            U, Uw = q_ok < 0 ? (buf[j], buf[j]) :
+                _fit_apply2(Val(Q), q_ok, gs.factor[i], x_w, j, gs.target[i], gs.scale[i], buf, ranges[j], indices, pos, isb, L, Li, wf)
+            if BOUNDED
+                U  = _ghost_clamp(U, j, buf, ranges, indices, isb)
+                Uw = _ghost_clamp(Uw, j, buf, ranges, indices, isb)
+            end
+            _store_wall_state!(out_w, i, Uw)
+            out[i] = MIRROR ? _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm), Uw) : U
         else
-            out[i] = U
+            U = q_ok < 0 ? buf[j] :
+                _fit_apply(Val(Q), q_ok, gs.factor[i], j, gs.target[i], gs.scale[i], buf, ranges[j], indices, pos, isb, L, Li, wf)
+            BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
+            out[i] = MIRROR ? _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm)) : U
         end
     end
     return nothing
 end
+@inline _store_wall_state!(::Nothing, i, Uw) = nothing
+@inline _store_wall_state!(out_w, i, Uw) = (@inbounds out_w[i] = Uw; nothing)
 
 # Static dispatch over the degrees Q, Q-1, …, 0 as `_fit_eval`: the geometry pass takes the first degree `≤ q_run`
 # whose moment matrix factorises (`-1` if none: the apply pass uses the donor's value), the apply pass the stored one
@@ -625,6 +668,29 @@ end
     b_s = _ghost_rhs(Val(B), Val(q), j, x_t, s, buf, rg, indices, pos, isb, L, Li, wf)
     c_s = Cholesky(_top_left(F, Val(B + 1)), 'U', 0) \ b_s
     return State{M, T}(ntuple(m -> c_s[1, m], Val(M)))
+end
+# The same, with the fit evaluated at the wall point `x_w` as well: `(U_target, U_w)`
+@inline function _fit_apply2(::Val{q}, q_ok::Int, F, x_w, args...) where {q}
+    q_ok == q && return _apply_degree2(Val(q), F, x_w, args...)
+    return _fit_apply2(Val(q - 1), q_ok, F, x_w, args...)
+end
+@inline _fit_apply2(::Val{0}, q_ok::Int, F, x_w, args...) = _apply_degree2(Val(0), F, x_w, args...)
+@inline _apply_degree2(::Val{q}, F, x_w, j, x_t::Space{D, T}, args...) where {q, D, T} =
+    _apply_degree_b2(basis_length(Val(D), Val(q)), Val(q), F, x_w, j, x_t, args...)
+@inline _apply_degree2(::Val{0}, F, x_w, j, x_t::Space{D, T}, args...) where {D, T} = _apply_degree_b2(Val(0), Val(0), F, x_w, j, x_t, args...)
+@inline function _apply_degree_b2(::Val{B}, ::Val{q}, F, x_w, j, x_t::Space{D, T}, s, buf::AbstractVector{State{M, T}}, rg, indices,
+                                  pos, isb, L, Li, wf) where {B, q, D, T, M}
+    b_s = _ghost_rhs(Val(B), Val(q), j, x_t, s, buf, rg, indices, pos, isb, L, Li, wf)
+    c_s = Cholesky(_top_left(F, Val(B + 1)), 'U', 0) \ b_s
+    return _fit_values(Val(q), c_s, x_w - x_t, s)
+end
+# The fitted polynomial (coefficients `c_s`, basis scaled by `s`) at the target (its constant term) and at the offset `d_w`
+@inline function _fit_values(::Val{q}, c_s::SMatrix{B1, M, T}, d_w::Space{D, T}, s) where {q, B1, M, T, D}
+    return State{M, T}(ntuple(m -> c_s[1, m], Val(M))), _fit_at(Val(q), c_s, d_w * s)
+end
+@inline function _fit_at(::Val{q}, c_s::SMatrix{B1, M, T}, d::SVector{D, T}) where {q, B1, M, T, D}
+    p = _target_basis(Val(q), d)
+    return State{M, T}(ntuple(m -> sum(ntuple(r -> p[r] * c_s[r, m], Val(B1))), Val(M)))
 end
 # The factor of a degree below the largest, stored in the scratch's rows: zero-padded, and read back
 @inline _pad_factor(F::SMatrix{B, B, T}, ::Val{Bm}) where {B, T, Bm} =
@@ -704,6 +770,30 @@ end
     U, ok = _fit_degree(Val(0), args...)
     return U
 end
+# The same with the fit evaluated at the wall point `x_w` as well: `(U_target, U_w)`
+@inline function _fit_eval2(::Val{q}, q_run::Int, x_w, args...) where {q}
+    if q_run >= q
+        U, Uw, ok = _fit_degree2(Val(q), x_w, args...)
+        ok && return U, Uw
+    end
+    return _fit_eval2(Val(q - 1), q_run, x_w, args...)
+end
+@inline function _fit_eval2(::Val{0}, q_run::Int, x_w, args...)
+    U, Uw, ok = _fit_degree2(Val(0), x_w, args...)
+    return U, Uw
+end
+@inline _fit_degree2(::Val{q}, x_w, j, x_t::Space{D, T}, args...) where {q, D, T} =
+    _fit_degree_b2(basis_length(Val(D), Val(q)), Val(q), x_w, j, x_t, args...)
+@inline _fit_degree2(::Val{0}, x_w, j, x_t::Space{D, T}, args...) where {D, T} = _fit_degree_b2(Val(0), Val(0), x_w, j, x_t, args...)
+@inline function _fit_degree_b2(::Val{B}, ::Val{q}, x_w, j, x_t::Space{D, T}, buf::AbstractVector{State{M, T}}, rg, indices,
+                                pos, isb, L, Li, wf, invL) where {B, q, D, T, M}
+    N_s, b_s, s = _ghost_moments(Val(B), Val(q), j, x_t, buf, rg, indices, pos, isb, L, Li, wf, invL)
+    C, ok = _cholesky_moment(N_s)
+    ok || return (@inbounds(buf[j]), @inbounds(buf[j]), false)
+    c_s = C \ b_s
+    U, Uw = _fit_values(Val(q), c_s, x_w - x_t, s)
+    return U, Uw, true
+end
 
 @inline _fit_degree(::Val{q}, j, x_t::Space{D, T}, args...) where {q, D, T} =
     _fit_degree_b(basis_length(Val(D), Val(q)), Val(q), j, x_t, args...)
@@ -720,7 +810,7 @@ end
 # jittered clouds and destabilised the interior scheme.
 @inline function _fit_degree_b(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, buf::AbstractVector{State{M, T}}, rg, indices,
                                pos, isb, L, Li, wf, invL) where {B, q, D, T, M}
-    N_s, b_s = _ghost_moments(Val(B), Val(q), j, x_t, buf, rg, indices, pos, isb, L, Li, wf, invL)
+    N_s, b_s, _ = _ghost_moments(Val(B), Val(q), j, x_t, buf, rg, indices, pos, isb, L, Li, wf, invL)
     C, ok = _cholesky_moment(N_s)
     ok || return (@inbounds(buf[j]), false)
     c_s = C \ b_s
@@ -762,5 +852,5 @@ end
             b_s += w * (p * buf[m]')
         end
     end
-    return N_s, b_s
+    return N_s, b_s, s
 end

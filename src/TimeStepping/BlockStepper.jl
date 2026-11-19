@@ -111,7 +111,7 @@ model: the mean velocity of the moments). Runs inside kernels. No default.
 
 """
     wall_reduction_type(op, eq) -> Type or nothing
-    block_wall_reduce(op, eq, Y, N, nb, g, wall::WallPoint) -> params
+    block_wall_reduce(op, eq, Y, N, nb, g, wall::WallPoint[, Yw]) -> params
     block_wall_apply(op, eq, U::State{W}, b, params, wall::WallPoint, Y, N, nb, g) -> State{W}
 
 The operator of a `MirrorBC` in the block pipeline, in the two passes of the pipeline: the mirrored interior state
@@ -126,6 +126,10 @@ reflection. Kernel functions, as the operators themselves.
 wall_reduction_type(op, eq) = nothing
 "The reduction of a wall operator over the mirrored blocks of ghost `g` (see [`wall_reduction_type`](@ref)); on a state split over devices it runs on every part over the gathered ghost rows of all blocks."
 block_wall_reduce(op, eq, Y, N, nb, g, wall) = error("`block_wall_reduce` not implemented for $(typeof(op)) on $(typeof(eq))")
+"The reduction of an operator that takes the wall-point states too (`uses_wall_state`): `Yw` holds them, block-major like `Y`."
+block_wall_reduce(op, eq, Y, N, nb, g, wall, Yw) = error("`block_wall_reduce` with the wall-point states not implemented for $(typeof(op)) on $(typeof(eq))")
+@inline _wall_reduce(op, eq, S, N, nb, g, wall, ::Nothing) = block_wall_reduce(op, eq, S, N, nb, g, wall)
+@inline _wall_reduce(op, eq, S, N, nb, g, wall, Sw) = block_wall_reduce(op, eq, S, N, nb, g, wall, Sw)
 "The ghost state of block `b` from its mirrored value and the wall parameters (see [`wall_reduction_type`](@ref))."
 block_wall_apply(op, eq, U, b, params, wall, Y, N, nb, g) = error("`block_wall_apply` not implemented for $(typeof(op)) on $(typeof(eq))")
 
@@ -367,9 +371,9 @@ end
 end
 
 # Kernel bodies of the block wall (see Backend.jl): the reduction over the mirrored blocks of a ghost and the application
-@inline function _block_wall_reduce_body!(g, params, op, eq, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
+@inline function _block_wall_reduce_body!(g, params, op, eq, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag, Sw)
     (is_boundary[g] && tags[g] == tag) || return nothing
-    params[g] = block_wall_reduce(op, eq, S, N, nb, g, _ghost_wall_point(g, pos, normals, wdist, curvs, gm))
+    params[g] = _wall_reduce(op, eq, S, N, nb, g, _ghost_wall_point(g, pos, normals, wdist, curvs, gm), Sw)
     return nothing
 end
 @inline function _block_wall_apply_body!(g, Y_b, S_b, params, op, eq, b, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
@@ -590,6 +594,7 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
     implicit_sources::IST
     grid_w::GW                      # the frame velocities of a moving grid (per particle)
     ghost_scratch::GS               # the mirrored blocks of the wall ghosts (block-major)
+    ghost_scratch_w::GS             # the wall-point blocks of the ghosts, for an operator with `uses_wall_state` (block-major)
     wall_params::Dict{Int, Any}     # the wall parameters per boundary tag (a Growable of `wall_reduction_type`)
     blocks_per_launch::Int          # blocks per launch of the passes with per-particle scratch (0: all)
     donors::GI                      # the donor of every outflow target (per particle)
@@ -625,7 +630,8 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     end
     AT = typeof(parent(inner.rho_n))
     gw = Growable{Space{D, T}}(AT.name.wrapper)
-    gs = Growable{State{W, T}}(AT.name.wrapper)
+    gs  = Growable{State{W, T}}(AT.name.wrapper)
+    gsw = Growable{State{W, T}}(AT.name.wrapper)
     gi = Growable{Int}(AT.name.wrapper)
     gr = Growable{State{W, T}}(AT.name.wrapper)
     gg = _launch_scratch(inner.divergence_interpolator, AT.name.wrapper)
@@ -634,7 +640,7 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     explicit_sts = map(st -> _on_storage(st, AT.name.wrapper), explicit_sts)
     implicit_sts = map(st -> _on_storage(st, AT.name.wrapper), implicit_sts)
     return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg)}(
-        eq, inner, explicit_sts, implicit_sts, gw, gs, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}(), blocks)
+        eq, inner, explicit_sts, implicit_sts, gw, gs, gsw, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}(), blocks)
 end
 
 # The blocks per launch from the keyword: `:auto` covers about 256 components per launch
@@ -819,17 +825,25 @@ function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg
     c  = pg.core
     foreach_particle(_block_wall_reduce_body!, get_backend(), N,
         (params, bc.op, eq, parent(ts.ghost_scratch), N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances,
-         c.wall_curvatures, gm, tag))
+         c.wall_curvatures, gm, tag, _wall_scratch_w(ts, bc)))
     _launch_wall_apply!(ts, bc, pg, stage, tag, eq, t, N, nb, params, parent(ts.ghost_scratch))
     return nothing
 end
-# The mirrored fit of the blocks of the stepper into its scratch (block-major, the blocks of the range)
+# The mirrored fit of the blocks of the stepper into its scratch (block-major, the blocks of the range); for an operator
+# that takes the wall-point states, those into the second scratch
 function _launch_wall_fit!(ts::BlockTimeStepper, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, nb::Int) where {Q, F, B}
     ensure_capacity!(ts.ghost_scratch, nb * pg.meta.N)
+    out_w = nothing
+    if uses_wall_state(bc.op)
+        ensure_capacity!(ts.ghost_scratch_w, nb * pg.meta.N)
+        out_w = ts.ghost_scratch_w
+    end
     _launch_ghost_fit_blocks!(pg, stage, ts.ghost_scratch, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B), 1:nb,
-                              _ghost_geom!(ts, Val(Q)); block_offset = _block_offset(ts))
+                              _ghost_geom!(ts, Val(Q)); block_offset = _block_offset(ts), out_w)
     return nothing
 end
+# The wall-point scratch an operator's reduction reads (`nothing` for one that does not take it)
+_wall_scratch_w(ts::BlockTimeStepper, bc::MirrorBC) = uses_wall_state(bc.op) ? parent(ts.ghost_scratch_w) : nothing
 # The application per (ghost, block) from the reduced parameters; `S_all` is what the operator reads the other blocks
 # of the ghost from (the scratch of a whole state, or the gathered ghost rows of a split one)
 function _launch_wall_apply!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int,

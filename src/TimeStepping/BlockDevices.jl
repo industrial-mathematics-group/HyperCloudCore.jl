@@ -284,38 +284,46 @@ function _ghost_list!(devs::BlockDevices, tag::Int, N::Int)
     for pt in devs.parts
         _activate(pt)
         AT = _storage(pt)
-        pt.rows[tag] = (Growable{eltype(parent(pt.ts.ghost_scratch))}(AT), Growable(adapt(AT, list)), Growable(adapt(AT, gmap)), Growable{eltype(parent(pt.ts.ghost_scratch))}(AT))
+        E = eltype(parent(pt.ts.ghost_scratch))
+        pt.rows[tag] = (Growable{E}(AT), Growable(adapt(AT, list)), Growable(adapt(AT, gmap)), Growable{E}(AT), Growable{E}(AT), Growable{E}(AT))
     end
     devs.ghosts[tag] = (list, v)
     return list
 end
 # The mirrored ghost rows of all blocks of `tag`, gathered from the parts' scratches and given to every part
-function _gather_ghost_rows!(devs::BlockDevices{D, W, T}, tag::Int, N::Int) where {D, W, T}
+function _gather_ghost_rows!(devs::BlockDevices{D, W, T}, tag::Int, N::Int; wall_state::Bool = false) where {D, W, T}
+    _gather_ghost_rows!(devs, tag, N, :rows, 1, 4, pt -> parent(pt.ts.ghost_scratch))
+    wall_state && _gather_ghost_rows!(devs, tag, N, :rows_w, 5, 6, pt -> parent(pt.ts.ghost_scratch_w))
+    return nothing
+end
+# One scratch (`get(pt)`) gathered into the parts' rows arrays at `slot_all` / `slot_local` of `pt.rows[tag]`
+function _gather_ghost_rows!(devs::BlockDevices{D, W, T}, tag::Int, N::Int, key::Symbol, slot_all::Int, slot_local::Int, get::F) where {D, W, T, F}
     list = _ghost_list!(devs, tag, N)
     ng   = length(list)
     nb   = num_blocks(devs.pde)
-    full = get!(devs.host, (:rows, tag)) do
+    full = get!(devs.host, (key, tag)) do
         Vector{State{W, T}}(undef, 0)
     end::Vector{State{W, T}}
     length(full) < nb * ng && resize!(full, nb * ng)
     ng == 0 && return nothing
     for pt in devs.parts
         _activate(pt)
-        rows_all, idx, gmap, rows_local = pt.rows[tag]
+        idx, rows_local = pt.rows[tag][2], pt.rows[tag][slot_local]
         nbl = pt.bs.nb
         ensure_capacity!(rows_local, nbl * ng)
-        foreach_particle(_gather_rows_body!, get_backend(), nbl * ng, (rows_local, parent(pt.ts.ghost_scratch), idx, N, ng))
+        foreach_particle(_gather_rows_body!, get_backend(), nbl * ng, (rows_local, get(pt), idx, N, ng))
         copyto!(full, (first(pt.bs.blocks) - 1) * ng + 1, parent(rows_local), 1, nbl * ng)
     end
     for pt in devs.parts
         _activate(pt)
-        rows_all = pt.rows[tag][1]
+        rows_all = pt.rows[tag][slot_all]
         ensure_capacity!(rows_all, nb * ng)
         copyto!(parent(rows_all), 1, full, 1, nb * ng)
     end
     return nothing
 end
 _ghost_rows(pt::BlockPart, tag::Int, N::Int, ng::Int) = (r = pt.rows[tag]; _GhostRows(parent(r[1]), parent(r[3]), N, ng))
+_ghost_rows_w(pt::BlockPart, tag::Int, N::Int, ng::Int) = (r = pt.rows[tag]; _GhostRows(parent(r[5]), parent(r[3]), N, ng))
 
 # =========================================================================
 # THE STEP IN LOCKSTEP OVER THE PARTS
@@ -429,7 +437,8 @@ function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W
             _foreach_part(parts) do pt
                 _launch_wall_fit!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, pt.bs.nb)
             end
-            _gather_ghost_rows!(devs, tag, N)
+            ws = uses_wall_state(bc.op)
+            _gather_ghost_rows!(devs, tag, N; wall_state = ws)
             ng = length(devs.ghosts[tag][1])
             _foreach_part(parts) do pt
                 params = _wall_params!(pt.ts, bc, tag, eq)
@@ -438,7 +447,8 @@ function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W
                 c  = pt.pg.core
                 gm = _wall_motion(pt.pg, tag, t)
                 foreach_particle(_block_wall_reduce_body!, get_backend(), N,
-                    (params, bc.op, eq, rows, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag))
+                    (params, bc.op, eq, rows, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag,
+                     ws ? _ghost_rows_w(pt, tag, N, ng) : nothing))
                 _launch_wall_apply!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, N, pt.bs.nb, params, rows)
             end
         else
