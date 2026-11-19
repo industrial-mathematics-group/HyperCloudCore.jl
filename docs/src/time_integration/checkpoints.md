@@ -21,15 +21,17 @@ holds:
 | `is_boundary`, `tags`, `normals`, `wall_distances`, `wall_curvatures` | change with the particle set (inserted, removed and swept particles, ghosts of moving pieces) |
 | `particle_orders` | the orders of the last step (a step resets them at its start; kept so the restored grid is the grid at the end of the step) |
 | `boundary_time`, `sweep_time` | the time the moving pieces' ghosts and the swept region belong to (`_sync_boundaries!` compares them with the step's time) |
+| the neighbour lists: counts, indices, weights, distances (per particle in slot order, whatever the slot layout) | derived, but not reproducible across devices: a run's grid is built and searched on the host and then stepped on a GPU, an adaptivity event searches a host copy, and a GPU's `exp` rounds differently from the host's (a restore that searched again on the GPU was 1e-13 off the run that went through) |
 
-Rebuilt on restore: the neighbour lists, distances and weights (a search over the restored positions, without
-wrapping them into the periodic box again), and through `geometry_version` every cache derived from them (the
-MLS moment matrices, the slot weights, the ghost geometry of the block pipeline). The stepper's stage buffers and
+Rebuilt on restore: the cell list (a search over the restored positions, without wrapping them into the periodic
+box again, whose lists are then replaced by the saved ones in the grid's slot layout), and through
+`geometry_version` every cache derived from the lists (the MLS moment matrices, the slot weights, the ghost
+geometry of the block pipeline). The stepper's stage buffers and
 MOOD masks are set at the start of every step and are not part of the state. The checkpoint also records `D`,
 `M`, the float type, the support radius and the spacing: a checkpoint of another kind of run is refused.
 
-The neighbour search is deterministic (the particles of every bin are sorted), the per-particle sums run in a
-fixed order, and the partial sums of a split block state are added on the host in block order, which is why a
+The kernels are deterministic (no atomics in the sums; the neighbour search sorts the particles of every bin), the
+per-particle sums run in a fixed order, and the partial sums of a split block state are added on the host in block order, which is why a
 restart is exact rather than close.
 
 ## Usage

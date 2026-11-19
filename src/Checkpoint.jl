@@ -3,12 +3,14 @@
 #
 # A run resumes from the state at the end of a step. What cannot be recomputed is saved: the states, and the particle
 # set with its geometry (positions in memory order, volumes, the boundary data, the counts), which particle movers,
-# adaptivity and the sweep of moving pieces change during a run. Everything else is derived and rebuilt: the neighbour
-# lists, distances and weights (a search over the restored positions, deterministic: every bin's segment is sorted),
-# the geometry caches of the schemes (stale after the search, `geometry_version`), the stepper's stage buffers and MOOD
-# masks (set at the start of every step). A run rebuilt from its configuration and given the checkpoint continues bit
-# for bit as the run that wrote it would have (same backend and device model; a GPU of another model may round
-# differently).
+# adaptivity and the sweep of moving pieces change during a run, and the neighbour lists with their weights and
+# distances: they are derived, but not reproducibly anywhere (a run's grid is built on the host and searched on the
+# device afterwards, an adaptivity event searches a host copy, and a GPU's `exp` rounds differently from the host's).
+# Everything else is rebuilt: the cell list (a search over the restored positions, whose lists are then replaced by the
+# saved ones), the geometry caches of the schemes (stale after the restore, `geometry_version`), the stepper's stage
+# buffers and MOOD masks (set at the start of every step). A run rebuilt from its configuration and given the checkpoint
+# continues bit for bit as the run that wrote it would have (same backend and device model; a GPU of another model may
+# round differently).
 # =========================================================================
 export checkpoint_state, restore_checkpoint!
 
@@ -29,10 +31,14 @@ The state of a run at the end of a step, as host arrays (copies, device grids in
 - the particle set: `positions` (in memory order), `volumes`, `is_boundary`, `tags`, `particle_orders`, `normals`,
   `wall_distances`, `wall_curvatures` and the counts `N`, `N_interior`, `N_ghost`;
 - `boundary_time` and `sweep_time` (the time the moving pieces' ghosts and the swept region belong to);
+- the neighbour lists: `neighbor_counts` (per particle) and `neighbor_indices`, `neighbor_weights`, `neighbor_distances`
+  (particle by particle, in slot order; independent of the grid's slot layout);
 - the states: `rhos`, and for a block state `blocks` (the block-major array of all blocks, `nb N` entries) with `nb`;
 - for the consistency check of the restore: `format`, `D`, `M`, `T` (the float type's name), `R` and `dx`.
 
-The neighbour lists and every cache derived from the geometry are not part of it (the restore rebuilds them). A split
+The neighbour lists are saved although a search would find them again: their weights are not reproducible across
+devices (a run's grid is built and searched on the host, then stepped on a GPU whose `exp` rounds differently). The
+caches derived from the geometry are not part of it (the restore makes them stale). A split
 block state ([`BlockDevices`](@ref)) is saved as one block state: the grid of the first part (every part holds the same
 cloud) and the blocks of all parts ([`host_state`](@ref)). Plain data only (`Vector`s of static vectors, numbers,
 strings), for any file format (`JLD2`, `Serialization`).
@@ -44,7 +50,24 @@ function checkpoint_state(pg::ParticleGrid{D, M, T}) where {D, M, T}
             positions = _host_copy(c.positions, N), volumes = _host_copy(c.volumes, N), is_boundary = _host_copy(c.is_boundary, N),
             tags = _host_copy(c.tags, N), particle_orders = _host_copy(c.particle_orders, N), normals = _host_copy(c.normals, N),
             wall_distances = _host_copy(c.wall_distances, N), wall_curvatures = _host_copy(c.wall_curvatures, N),
-            rhos = _host_copy(pg.rhos, N))
+            _neighbour_lists(pg)..., rhos = _host_copy(pg.rhos, N))
+end
+
+# The neighbour lists particle by particle in slot order (what `with_slot_layout` preserves), from host copies
+function _neighbour_lists(pg::ParticleGrid{D, M, T}) where {D, M, T}
+    N, nb = pg.meta.N, pg.neighbor
+    ranges = _host_copy(nb.ranges, N)
+    S = maximum(r -> isempty(r) ? 0 : last(r), ranges; init = 0)      # the last slot in use (either layout)
+    idx, w, dist = _host_copy(nb.indices, S), _host_copy(nb.weights, S), _host_copy(nb.distances, S)
+    counts = Int[length(r) for r in ranges]
+    n = sum(counts; init = 0)
+    I, Wt, Dd = Vector{Int}(undef, n), Vector{T}(undef, n), Vector{Space{D, T}}(undef, n)
+    k = 0
+    @inbounds for i in 1:N, s in ranges[i]
+        k += 1
+        I[k], Wt[k], Dd[k] = idx[s], w[s], dist[s]
+    end
+    return (neighbor_counts = counts, neighbor_indices = I, neighbor_weights = Wt, neighbor_distances = Dd)
 end
 
 function checkpoint_state(pg::ParticleGrid{D, W, T}, bs::BlockState{W, T}) where {D, W, T}
@@ -65,9 +88,9 @@ end
 
 Puts the state of a [`checkpoint_state`](@ref) back into a run built from the same configuration (the same equation,
 grid parameters, scheme and stepper; the initial conditions may be set or not, they are overwritten): the particle set
-and the states are copied (the grid grows if the checkpoint holds more particles), and the neighbour lists are searched
-anew over the restored positions without wrapping them again (`pg.neighbor(pg; wrap = false)`), which also makes every
-geometry cache stale. The next step then continues the run that wrote the checkpoint bit for bit (same backend and
+and the states are copied (the grid grows if the checkpoint holds more particles), the cell list is rebuilt by a search
+over the restored positions without wrapping them again (`pg.neighbor(pg; wrap = false)`), and the neighbour lists are
+then replaced by the saved ones, in the grid's slot layout; every geometry cache is stale afterwards. The next step then continues the run that wrote the checkpoint bit for bit (same backend and
 device model).
 
 A split block state takes a checkpoint of any split or of a single block state (the blocks are distributed by the
@@ -120,6 +143,10 @@ function _check_checkpoint(pg::ParticleGrid{D, M, T}, ck) where {D, M, T}
     all(a -> length(a) == n, (ck.positions, ck.volumes, ck.is_boundary, ck.tags, ck.particle_orders, ck.normals,
                               ck.wall_distances, ck.wall_curvatures, ck.rhos)) || bad("arrays of the wrong length for N = $n")
     ck.N_interior + ck.N_ghost == n || bad("N_interior + N_ghost ≠ N")
+    (length(ck.neighbor_counts) == n && all(>=(0), ck.neighbor_counts) &&
+     all(a -> length(a) == sum(ck.neighbor_counts; init = 0), (ck.neighbor_indices, ck.neighbor_weights, ck.neighbor_distances))) ||
+        bad("neighbour lists of the wrong length")
+    all(j -> 1 <= j <= n, ck.neighbor_indices) || bad("neighbour indices outside 1:N")
     return nothing
 end
 
@@ -131,7 +158,8 @@ function _check_blocks(ck, nb::Int)
     return nothing
 end
 
-# The particle set and its geometry, then the neighbour search over the restored positions (no second wrap)
+# The particle set and its geometry, the cell list by a search over the restored positions (no second wrap), then the saved
+# neighbour lists in the grid's slot layout
 function _restore_grid!(pg::ParticleGrid, ck)
     N = ck.N
     ensure_capacity!(pg, N)
@@ -145,6 +173,33 @@ function _restore_grid!(pg::ParticleGrid, ck)
     m.N, m.N_interior, m.N_ghost = N, ck.N_interior, ck.N_ghost
     m.boundary_time, m.sweep_time = ck.boundary_time, ck.sweep_time
     pg.neighbor(pg; wrap = false)
+    _restore_neighbours!(pg, ck)
+    return nothing
+end
+
+function _restore_neighbours!(pg::ParticleGrid{D, M, T}, ck) where {D, M, T}
+    nd, N = pg.neighbor, ck.N
+    R = eltype(nd.ranges)                                    # the slot layout of the grid
+    counts = ck.neighbor_counts
+    max_nb = maximum(counts; init = 0)
+    cap = _slot_capacity(R, sum(counts; init = 0), max_nb, N)
+    incl = cumsum(counts)
+    ranges = R[_slot_range(R, i, counts[i], incl[i], N) for i in 1:N]
+    push!(ranges, _slot_sentinel(R, cap, N))
+    I, Wt, Dd = zeros(Int, cap), zeros(T, cap), zeros(Space{D, T}, cap)     # (the padding of the slot-major layout: zeros)
+    k = 0
+    @inbounds for i in 1:N, s in ranges[i]
+        k += 1
+        I[s], Wt[s], Dd[s] = ck.neighbor_indices[k], ck.neighbor_weights[k], ck.neighbor_distances[k]
+    end
+    ensure_capacity!(nd, cap)
+    copyto!(nd.ranges, 1, ranges, 1, N + 1)
+    copyto!(nd.indices, 1, I, 1, cap)
+    copyto!(nd.weights, 1, Wt, 1, cap)
+    copyto!(nd.distances, 1, Dd, 1, cap)
+    copyto!(nd.counts, 1, counts, 1, N)
+    pg.meta.max_nb = max_nb
+    pg.meta.geometry_version += 1
     return nothing
 end
 

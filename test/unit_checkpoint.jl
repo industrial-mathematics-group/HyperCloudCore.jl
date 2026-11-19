@@ -67,6 +67,36 @@ end
         @test isequal(a, c)
     end
 
+    @testset "Neighbour lists are restored as saved (a GPU recomputes other weights), in either slot layout" begin
+        # weights that a search over the same positions would not reproduce (as the host-built lists of a grid stepped on
+        # a GPU, whose exp rounds differently): the restore keeps the saved ones
+        r = standard(() -> periodic(N, 8), box)()
+        nb = r.pg.neighbor
+        for i in 1:N, k in nb.ranges[i]
+            nb.weights[k] = nextfloat(nb.weights[k])
+        end
+        ck = r.save()
+        @test length(ck.neighbor_counts) == N && length(ck.neighbor_weights) == sum(ck.neighbor_counts)
+        c = standard(() -> periodic(N, 8), box)()
+        c.restore!(ck)
+        @test grid_state(c.pg).weights == grid_state(r.pg).weights != grid_state(standard(() -> periodic(N, 8), box)().pg).weights
+        @test isequal(grid_state(c.pg), grid_state(r.pg))
+        # into a grid with the slot-major layout of the devices: the same lists per particle, the same step
+        function slot_major(pg)
+            nd = HyperCloudCore.with_slot_layout(pg.neighbor, pg.meta.N, HyperCloudCore.SlotMajorSlots)
+            return ParticleGrid(pg.meta, pg.geometry, pg.domain, pg.core, pg.shared, nd, pg.reorder, pg.bins, pg.mover, pg.rhos, pg.curvatures)
+        end
+        sm = slot_major(set8!(periodic(N, 8), box))
+        @test eltype(sm.neighbor.ranges) === HyperCloudCore.SlotMajorSlots
+        restore_checkpoint!(sm, ck)
+        @test isequal(grid_state(sm), grid_state(r.pg))
+        ts1 = GeneralRKTimeStepper(eq8, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK2_SSP_Tableau(Float64))
+        ts2 = GeneralRKTimeStepper(eq8, MUSCL(Float64, 1, 8, 2, MinmodLimiter(:hard), RusanovFlux()), MOOD(NoMOOD()), RK2_SSP_Tableau(Float64))
+        ts1(eq8, c.pg, 0.0, dt)
+        ts2(eq8, sm, 0.0, dt)
+        @test view(sm.rhos, 1:N) == view(c.pg.rhos, 1:N)
+    end
+
     @testset "Moving clouds: a Lagrangian mover across the periodic ends (the restore keeps the positions bit for bit)" begin
         mk = standard(() -> periodic(N, 8; mover = LagrangianMover()), wave)
         a, c, ck = straight_and_resumed(mk, 40, 40, 0.2 * dt)
