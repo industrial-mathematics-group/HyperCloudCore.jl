@@ -598,7 +598,7 @@ end
 @inline function _ghost_geometry_body!(i, gs::GhostFitScratch{B}, pos, isb, tags, normals, wdist, orders, ranges, indices, wf,
                                        wrap, gm, tag, ::Val{Q}, ::Val{MIRROR}, ::Val{D}) where {B, Q, MIRROR, D}
     @inbounds begin
-        (isb[i] && tags[i] == tag) || return nothing
+        (isb[i] && (tag == 0 || tags[i] == tag)) || return nothing      # (tag 0: a group of walls, every listed ghost)
         L, Li, invL, S = wrap
         x_i = move(gm, pos[i])
         n_i = rotate(gm, normals[i])
@@ -621,7 +621,7 @@ end
 @inline function _ghost_apply_body!(i, bufs, gs::GhostFitScratch, pos, isb, tags, normals, wdist, curvs, ranges, indices, wf,
                                     wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}) where {Q, MIRROR, BOUNDED}
     @inbounds begin
-        (isb[i] && tags[i] == tag) || return nothing
+        (isb[i] && (tag == 0 || tags[i] == tag)) || return nothing
         j = gs.donor[i]
         j == 0 && return nothing
         buf, out, out_w = bufs

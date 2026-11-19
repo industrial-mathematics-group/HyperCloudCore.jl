@@ -62,6 +62,11 @@ function _prepare_budget!(ts::BlockTimeStepper, pg)
         _ghost_budget!(ts, bc)
         # (the ghost list of a tag with ghost fits: at most one entry per particle, see `_tag_list!`)
         (bc isa MirrorBC || bc isa ExtrapolationBC) && _tag_list!(ts, pg, tag)
+        # (the group of walls with the same condition, see `_block_apply_bcs!`)
+        if _is_block_wall(bc, ts.pde) && !has_moving_pieces(pg.geometry)
+            group = Tuple(sort!([tg for (tg, b) in pg.geometry.bc_map if b === bc]))
+            length(group) > 1 && _tag_list!(ts, pg, group)
+        end
         # (an operator that takes the wall-point states fills the second scratch: made here so that it is priced)
         bc isa MirrorBC && uses_wall_state(bc.op) && ensure_capacity!(ts.ghost_scratch_w, 1)
     end
