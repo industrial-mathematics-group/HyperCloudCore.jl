@@ -54,6 +54,7 @@ include("./TimeStepping/TimeSteppers.jl")
 include("./Interpolation/Interpolators.jl")
 include("./TimeStepping/BlockStepper.jl")
 include("./TimeStepping/BlockDevices.jl")
+include("Checkpoint.jl")
 
 include("./Builders/Builders.jl")
 include("DeviceAdapt.jl")
