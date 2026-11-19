@@ -219,26 +219,28 @@ end
 # UNIFIED NEIGHBOR SEARCH (Branchless & Type-Stable)
 # =========================================================================
 """
-    (nd::NeighborData)(pg::ParticleGrid)
+    (nd::NeighborData)(pg::ParticleGrid; wrap = true)
 
 The universal, branchless neighbor search functor managing topology updates. Every pass is a kernel
 or a device reduction, so it runs on a grid built with `device_grid` as well.
 
 # Details
-- Forces physical coordinates back into the primary periodic domain limits if periodicity is active.
+- Forces physical coordinates back into the primary periodic domain limits if periodicity is active
+  (`wrap = false` skips it, for positions that a search has wrapped already, e.g. those restored from a checkpoint:
+  `mins + mod(x − mins, L)` is not guaranteed to return such a position bit for bit in floating point).
 - Rebuilds the cell list (`build_global_bins!`).
 - **Pass 1 (Counting):** Scans the adjacent bins to count the neighbours within the interaction radius
   `R_sq` of each particle. A prefix sum of the counts gives the neighbour slots (`ranges`, in the
   layout of the grid), and the slot arrays are grown to the capacity.
 - **Pass 2 (Writing):** Rescans the bins, writing neighbour indices, weights and distances into the slots.
 """
-function (nd::NeighborData{D, T})(pg::ParticleGrid{D, M, T}) where {D, M, T}
+function (nd::NeighborData{D, T})(pg::ParticleGrid{D, M, T}; wrap::Bool = true) where {D, M, T}
     backend = _launch_backend(pg)
     N = pg.meta.N
     R = eltype(nd.ranges)                                 # the slot layout
 
     # --- ENFORCE PER-AXIS PERIODIC WRAPPING ---
-    foreach_particle(_wrap_position!, backend, N, (pg.core.positions, pg.domain.is_periodic, pg.domain.L, pg.domain.canvas_mins))
+    wrap && foreach_particle(_wrap_position!, backend, N, (pg.core.positions, pg.domain.is_periodic, pg.domain.L, pg.domain.canvas_mins))
 
     build_global_bins!(pg)
 

@@ -55,6 +55,7 @@ makedocs(
             "MOOD"             => "time_integration/mood.md",
             "Moving Grids"     => "time_integration/moving_grids.md",
             "Block States"     => "time_integration/block_state.md",
+            "Checkpoints"      => "time_integration/checkpoints.md",
         ],
         "Extending" => [
             "API Contracts"  => "extending/api.md",
