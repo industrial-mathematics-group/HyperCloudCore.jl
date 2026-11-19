@@ -129,17 +129,24 @@ function _limit_slopes(
 ) where {B_LEN, M, D, T, DEGREE, Mode}
     
     u_max, u_min = _local_extrema(f_i, f_neighbors, nb_slice)
-    phi_i = _bounding_phi(strategy, raw_grad, nb_slice, f_i, u_max, u_min, distVec, Val(DEGREE))
+    return _limit_with_extrema(strategy, raw_grad, nb_slice, f_i, u_max, u_min, distVec, Val(D), Val(DEGREE))
+end
 
-    limited_grad = SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do k
+# The bounding limiters from the local extrema (`_local_extrema`, or taken in the pass of the cached fit,
+# `apply_weights_extrema`: the same values)
+@inline _uses_extrema(::Union{BarthJespersenLimiter, VenkatakrishnanLimiter}) = true
+@inline _uses_extrema(::Any) = false
+@inline function _limit_with_extrema(strategy::Union{BarthJespersenLimiter{Mode}, VenkatakrishnanLimiter{Mode}},
+                                     raw_grad::SVector{B_LEN, State{M, T}}, nb_slice, f_i::State{M, T}, u_max::State{M, T},
+                                     u_min::State{M, T}, distVec, ::Val{D}, ::Val{DEGREE}) where {B_LEN, M, T, D, DEGREE, Mode}
+    phi_i = _bounding_phi(strategy, raw_grad, nb_slice, f_i, u_max, u_min, distVec, Val(DEGREE))
+    return SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do k
         if Mode === :hard || k <= D
             raw_grad[k] .* phi_i
         else
-            raw_grad[k] 
+            raw_grad[k]
         end
     end)
-    
-    return limited_grad
 end
 
 # =========================================================================

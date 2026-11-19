@@ -368,7 +368,14 @@ function update_content!(
     w_all = get_weights(pg)
 
     wg = muscl.grad_weights
-    raw_grad = if p_order == MAX_ORDER && p_order > 1 && is_current(wg, pg) && wg.ok[i]
+    cached = p_order == MAX_ORDER && p_order > 1 && is_current(wg, pg) && wg.ok[i]
+    if cached && _uses_extrema(muscl.limiter)
+        # the cached fit and the extrema of the bounding limiters in one pass over the neighbours' states
+        raw_grad, u_max, u_min = apply_weights_extrema(wg, i, nb_slice, dist_all, w_all, U, pg.neighbor.indices, f_i)
+        muscl.gradients[i] = _limit_with_extrema(muscl.limiter, raw_grad, nb_slice, f_i, u_max, u_min, dist_all, Val(D), Val(MAX_ORDER - 1))
+        return nothing
+    end
+    raw_grad = if cached
         apply_weights(wg, i, nb_slice, dist_all, w_all, df)   # cached full-order fit
     else
         scale_val = minimum(pg.meta.dx)
