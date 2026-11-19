@@ -686,7 +686,9 @@ function _tag_list!(ts::BlockTimeStepper, pg::ParticleGrid, tag::Int)
     ent !== nothing && ent[1] == v && ent[4] == N && return (ent[2], ent[3])
     isb = Array(view(parent(pg.core.is_boundary), 1:N))
     tgs = Array(view(parent(pg.core.tags), 1:N))
-    idx = Int[i for i in 1:N if isb[i] && tgs[i] == tag]
+    # (tag 0: every interior particle, tag −1: every boundary particle; the flux pass, see `_launch_flux!`)
+    sel = tag == 0 ? (i -> !isb[i]) : tag == -1 ? (i -> isb[i]) : (i -> isb[i] && tgs[i] == tag)
+    idx = Int[i for i in 1:N if sel(i)]
     g = ent === nothing ? Growable{Int}(typeof(parent(ts.ghost_scratch)).name.wrapper) : ent[2]
     n = length(idx)
     ensure_capacity!(g, max(n, 1))
@@ -968,6 +970,13 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
     stride  = _slot_stride(inner, pg)
     off     = _block_offset(ts)
     prepare_geometry!(interp, pg)                           # (refreshes the geometry caches only if the grid changed)
+    # The flux pass over the interior particles only (a boundary particle's work-item returns at once, and a warp of
+    # interior particles with ghosts among them idled those lanes: a quarter of the particles of the 2-D orifice are
+    # ghosts); the boundary rows of the right-hand side are zeroed over the boundary particles (a full pass)
+    interior = _tag_list!(ts, pg, 0)
+    full && foreach_block(_boundary_rhs_body!, backend, N, 1:nb,
+        (PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i], moving, zero(State{W, T}), zero(Space{D, T}));
+        list = _tag_list!(ts, pg, -1))
     for blocks in _launch_chunks(ts, nb)
         foreach_block(_rhs_gather!, backend, N, blocks,
             (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
@@ -975,7 +984,16 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
         foreach_block(_rhs_flux!, backend, N, blocks,
             (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
              inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
-             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off)
+             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off,
+            list = interior)
+    end
+    return nothing
+end
+# Kernel body: the right-hand side of a boundary particle, zero (what `_rhs_flux!` writes for it on a full pass)
+@inline function _boundary_rhs_body!(p, K_E, K_X, K_V, moving, zero_state, zero_space)
+    @inbounds begin
+        K_E[p] = zero_state
+        moving && (K_X[p] = zero_space; K_V[p] = zero(eltype(K_V)))
     end
     return nothing
 end

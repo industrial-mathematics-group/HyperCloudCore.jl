@@ -56,6 +56,7 @@ _prepare_budget!(::Any, pg) = nothing
 # walls) the block-major scratch of the mirrored states and the wall parameters per tag count too: they are made for
 # the grid's conditions first (a full copy of the state grew outside the reservation at the first wall pass).
 function _prepare_budget!(ts::BlockTimeStepper, pg)
+    _tag_list!(ts, pg, 0); _tag_list!(ts, pg, -1)          # (the flux pass's lists of interior and boundary particles)
     for (tag, bc) in pg.geometry.bc_map
         _is_block_wall(bc, ts.pde) && _wall_params!(ts, bc, tag, ts.pde)
         _ghost_budget!(ts, bc)
