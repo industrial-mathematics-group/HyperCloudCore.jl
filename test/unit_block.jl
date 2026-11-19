@@ -833,6 +833,34 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         advance!((t, d) -> ts(eq_b, pg, bs, t, d), 0.3, dt)
         @test length(parent(ts.ghost_scratch)) == 4 * r.particles
         @test all(i -> all(isfinite, block_view(bs, 3)[i]), 1:pg.meta.N)
+        # MOODu2 with a scheme without a gradient cache: the flag pass runs over all blocks at once, and so do its plateau
+        # ranges (they were written into a buffer of one launch's blocks)
+        pgu = block_pg_1d(60, 2)
+        bsu = BlockState(eq_b, pgu)
+        set_block_states!((x, b) -> State{2, Float64}(1 + (abs(x[1]) < 0.3 ? 1.0 : 0.0), 1.0 + 0.1b), bsu, pgu)
+        tsu = BlockTimeStepper(eq_b, CentralDivergence(Float64, 1, 2, 2), MOOD(EPD1(), MOODu2(1e-3)), (), RK3_SSP_Tableau(Float64); blocks_per_launch = 1)
+        tsu(eq_b, pgu, bsu, 0.0, 0.005)
+        @test all(i -> all(isfinite, block_view(bsu, 4)[i]), 1:pgu.meta.N)
+        # a neighbour search per stage on a compressing grid (the slots grow within a step): every chunking gives the same
+        # run (the interaction buffer was resized for one block's slots, the last slots of a launch ran past it)
+        mkc() = ParticleGrid(get_rectangular_domain(Float64, (-1.0,), (1.0,); bc_map = Dict{Int, AbstractBoundaryCondition}(1 => OutflowBC(), 2 => OutflowBC())),
+                             (2 / 60,), ExponentialWeightFunction(1.0, 2.5 * 2 / 60), 2; mover = PrescribedMover((x, t) -> SVector(-3.0 * x[1])))
+        function runc(bpl)
+            pgc = mkc()
+            bsc = BlockState(eq_b, pgc)
+            set_block_states!((x, b) -> State{2, Float64}(1 + 0.3 * sinpi(x[1] + 0.2b), 1.0), bsc, pgc)
+            tsc = BlockTimeStepper(eq_b, interp(), MOOD(NoMOOD()), (), RK3_SSP_Tableau(Float64); blocks_per_launch = bpl, full_search_per_stage = true)
+            M0 = length(pgc.neighbor.indices)
+            t = 0.0
+            for _ in 1:4
+                tsc(eq_b, pgc, bsc, t, 0.04)
+                t += 0.04
+            end
+            return copy(view(parent(bsc.data), 1:(4 * pgc.meta.N))), length(pgc.neighbor.indices) > M0
+        end
+        r0, grew = runc(0)
+        r1, _ = runc(1)
+        @test grew && r0 == r1
     end
 
     @testset "One launch per pass over the (particle, block) pairs: launch counts, chunks, the package's conditions" begin
@@ -1010,6 +1038,13 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         advance!((t, d) -> (devc(t, d); devq(t, d)), 0.2, dt)
         @test host_state(devc) == host_state(devq)
         @test all(pt -> mood_flags(pt.ts) == mood_flags(first(devq.parts).ts), devc.parts)
+        # parts sharing a grid are refused (every part's drop pass lowered the shared orders again: 0.09 off, silently)
+        pgs = grid(N, 2; periodic = true)
+        sh = map([1:2, 3:4]) do r
+            tsr = BlockTimeStepper(g2, interp(2; order = 3, limiter = NoLimiter()), mood, (), RK3_SSP_Tableau(Float64); blocks = r)
+            BlockPart(pgs, tsr, BlockState(g2, pgs; blocks = r))
+        end
+        @test_throws ArgumentError BlockDevices(g2, sh)
 
         # 3. a Lagrangian mover: the frame velocity from the exchanged density and momentum partials
         devs = split(eq2, [1:3, 4:4], () -> grid(N, 2; periodic = true, mover = LagrangianMover()), wave)

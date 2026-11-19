@@ -34,12 +34,14 @@ end
 # `f(pt)` on every part with its device made current: concurrently, one task per part, when every part has its own device
 # (an `activate`) and Julia runs with several threads, sequentially otherwise (host parts). In sequence the devices never
 # overlapped (every launch synchronises), and two GPUs took twice as long as one. A device's current context and stream
-# are task-local, and every launch synchronises before its task ends, so the host exchanges between the phases see
-# finished work.
+# are task-local: a task synchronises its device before it ends (a phase can end with a plain asynchronous copy, e.g.
+# the state copied out at the step's end), so the next task and the host exchanges see finished work.
+_sync_device(b::KABackend) = KA.synchronize(b.backend)
+_sync_device(::ExecutionBackend) = nothing
 function _foreach_part(f::F, parts) where {F}
     if length(parts) > 1 && Threads.nthreads() > 1 && all(pt -> pt.activate !== nothing, parts)
         @sync for pt in parts
-            Threads.@spawn (_activate(pt); f(pt); nothing)
+            Threads.@spawn (_activate(pt); f(pt); _sync_device(get_backend()); nothing)
         end
     else
         for pt in parts
@@ -109,6 +111,15 @@ function BlockDevices(eq::HyperbolicPDE{D, W, T}, parts::Vector{P}) where {D, W,
          length(pt.ts.explicit_sources) == length(p1.ts.explicit_sources) && length(pt.ts.implicit_sources) == length(p1.ts.implicit_sources)) ||
             throw(ArgumentError("BlockDevices: the parts' steppers must share the tableau and the sources"))
         has_moving_pieces(pt.pg.geometry) && throw(ArgumentError("BlockDevices: moving boundary pieces are not supported on a split state"))
+    end
+    # every part owns its cloud and its sources' parameters: on a shared grid every part's drop pass lowered the orders
+    # once more (MOOD silently wrong), shared parameter arrays race between the concurrent parts
+    for k in 2:length(parts), j in 1:(k - 1)
+        (parts[k].pg === parts[j].pg || parent(parts[k].pg.core.particle_orders) === parent(parts[j].pg.core.particle_orders)) &&
+            throw(ArgumentError("BlockDevices: parts $j and $k share a grid; every part needs its own copy of the cloud (`deepcopy`, or a `device_grid` per device)"))
+        any(((a, b),) -> a.params === b.params, zip((parts[k].ts.explicit_sources..., parts[k].ts.implicit_sources...),
+                                                   (parts[j].ts.explicit_sources..., parts[j].ts.implicit_sources...))) &&
+            throw(ArgumentError("BlockDevices: parts $j and $k share a source's parameter array; build the sources per part"))
     end
     # the additive forms the exchange needs
     for st in (p1.ts.explicit_sources..., p1.ts.implicit_sources...)
@@ -329,7 +340,7 @@ function (devs::BlockDevices{D, W, T})(time::Real, dt::T) where {D, W, T}
             _devices_checkpoint!(devs, i, dt, time)
             if moving
                 _foreach_part(parts) do pt
-                    _apply_stage_geometry!(pt.ts.inner, pt.pg, pt.ts.inner.X_stages[i], time, time + bt.c_t[i] * dt)
+                    _block_stage_geometry!(pt.ts, pt.pg, i, time, time + bt.c_t[i] * dt)
                 end
             end
         end
