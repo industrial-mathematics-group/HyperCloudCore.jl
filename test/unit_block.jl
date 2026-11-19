@@ -267,6 +267,24 @@ end
 @inline HyperCloudCore.block_source(st::PartialMean, U, b, m, p, pg, t) = (m .- U) ./ st.tau
 @inline HyperCloudCore.block_implicit_solve(st::PartialMean, U, b, m, dt_coeff, p, pg, t) = (U .+ (dt_coeff / st.tau) * m) ./ (1 + dt_coeff / st.tau)
 
+# Wall operators that take the state at the wall point (`uses_wall_state`): `WallProbe` returns it as the ghost state (the
+# test of the second evaluation), `WallSumOp` reduces the wall-point states of all blocks to their sum and keeps the mirrored
+# value (the two-pass form of the block pipeline with the second scratch)
+struct WallProbe end
+HyperCloudCore.uses_wall_state(::WallProbe) = true
+@inline (::WallProbe)(eq, U::State, wall, Uw::State) = Uw
+struct WallSumOp end
+HyperCloudCore.uses_wall_state(::WallSumOp) = true
+HyperCloudCore.wall_reduction_type(::WallSumOp, ::DiscreteTransport) = Float64
+@inline function HyperCloudCore.block_wall_reduce(::WallSumOp, eq::DiscreteTransport, Y, N, nb, g, wall, Yw)
+    s = 0.0
+    @inbounds for b in 1:nb
+        s += sum(Yw[(b - 1) * N + g])
+    end
+    return s
+end
+@inline HyperCloudCore.block_wall_apply(::WallSumOp, eq::DiscreteTransport, U::State, b::Int, prm, wall, Y, N, nb, g) = U
+
 # A backend that counts the kernel launches (runs them on the Polyester backend)
 struct CountingBackend <: HyperCloudCore.ExecutionBackend end
 const LAUNCHES = Ref(0)
@@ -1078,5 +1096,91 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         # a stepper of a block range does not step on its own
         pt = first(parts2)
         @test_throws ArgumentError pt.ts(eq2, pt.pg, pt.bs, 0.0, dt)
+    end
+
+    @testset "A wall operator that takes the state at the wall point (uses_wall_state): the same fit, evaluated at the wall" begin
+        # a linear field on [-1, 1] with walls at both ends: the mirror value is the field at the mirror point, the wall-point
+        # value the field at the wall, exactly (a degree-1 fit reproduces linear data)
+        field(x) = 2.0 + 0.5 * x
+        N  = 40
+        bcp() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(WallProbe()), 2 => MirrorBC(WallProbe()))
+        pg = block_pg_1d(N, 1; bc = bcp())
+        for i in 1:pg.meta.N
+            pg.rhos[i] = State{1, Float64}(field(pg.core.positions[i][1]))
+        end
+        eq  = Burgers()
+        buf = copy(pg.rhos)
+        for tag in (1, 2)
+            HyperCloudCore._launch_ghost_fit!(pg, buf, tag, eq, 0.0, Val(1), HyperCloudCore._WallOp(WallProbe()), Val(true), Val(false))
+        end
+        for i in 1:pg.meta.N
+            pg.core.is_boundary[i] || continue
+            x_w = pg.core.positions[i][1] - pg.core.wall_distances[i] * pg.core.normals[i][1]
+            @test abs(buf[i][1] - field(x_w)) < 1e-12
+            @test abs(x_w) ≈ 1.0 atol = 1e-12
+        end
+        # the plain mirror (no operator) gives the field at the mirror point instead
+        buf2 = copy(pg.rhos)
+        HyperCloudCore._launch_ghost_fit!(pg, buf2, 1, eq, 0.0, Val(1), HyperCloudCore._WallOp(nothing), Val(true), Val(false))
+        g1 = findfirst(i -> pg.core.is_boundary[i] && pg.core.tags[i] == 1, 1:pg.meta.N)
+        x_m = pg.core.positions[g1][1] - 2 * pg.core.wall_distances[g1] * pg.core.normals[g1][1]
+        @test abs(buf2[g1][1] - field(x_m)) < 1e-12 && abs(field(x_m) - field(-1.0)) > 1e-3
+        # the block pipeline's fit pass writes the wall-point states into the second scratch
+        gs  = HyperCloudCore._ghost_scratch(Val(2), Float64, Val(1), Array)
+        out = copy(pg.rhos); outw = copy(pg.rhos)
+        HyperCloudCore._launch_ghost_fit_blocks!(pg, pg.rhos, out, 2, eq, 0.0, Val(1), HyperCloudCore._WallOp(nothing), Val(true), Val(false), 1:1, gs; out_w = outw)
+        for i in 1:pg.meta.N
+            (pg.core.is_boundary[i] && pg.core.tags[i] == 2) || continue
+            x_w = pg.core.positions[i][1] - pg.core.wall_distances[i] * pg.core.normals[i][1]
+            x_m = pg.core.positions[i][1] - 2 * pg.core.wall_distances[i] * pg.core.normals[i][1]
+            @test abs(outw[i][1] - field(x_w)) < 1e-12 && abs(out[i][1] - field(x_m)) < 1e-12
+        end
+        # a block wall with a reduction that takes the wall-point states: the stepper fills the second scratch and prices it
+        # (unbounded fits: the clamp of `bounded` would hold the outermost ghost's wall value, 3 Δx from its mirror point,
+        # inside its donor's data range)
+        sym = [(-2.0,), (-1.5,), (-1.0,), (-0.5,), (0.5,), (1.0,), (1.5,), (2.0,)]
+        eq2 = DiscreteTransport(Val(2), sym)
+        bcw() = Dict{Int, AbstractBoundaryCondition}(1 => MirrorBC(WallSumOp(); bounded = false), 2 => MirrorBC(WallSumOp(); bounded = false))
+        pgw = block_pg_1d(60, 2; bc = bcw())
+        bsw = BlockState(eq2, pgw)
+        set_block_states!((x, b) -> State{2, Float64}(1 + 0.2 * x[1] + 0.1b, 1 + 0.3 * x[1] + 0.2b), bsw, pgw)
+        sc  = MUSCL(Float64, 1, 2, 2, MinmodLimiter(:hard), RusanovFlux())
+        tsw = BlockTimeStepper(eq2, sc, RK2_SSP_Tableau(Float64))
+        e_w = memory_estimate(pgw, tsw, bsw, sc)
+        @test length(parent(tsw.ghost_scratch_w)) >= 1                                 # made by the budget
+        tsw(eq2, pgw, bsw, 0.0, 1e-8)
+        # the reduction saw the wall-point sums (the parameters of the last stage, whose state is the initial field up to
+        # O(dt)): for the linear fields, every ghost's parameter is the sum of the fields at the wall, Σ_b (2 + 0.5 x_w + 0.3 b)
+        # at x_w = -1, and not the sum at its mirror point
+        prm = parent(tsw.wall_params[1])
+        for i in 1:pgw.meta.N
+            (pgw.core.is_boundary[i] && pgw.core.tags[i] == 1) || continue
+            x_m = pgw.core.positions[i][1] - 2 * pgw.core.wall_distances[i] * pgw.core.normals[i][1]
+            @test abs(prm[i] - (8 + 0.5 * 4 * (-1.0) + 0.3 * 10)) < 1e-6
+            @test abs(prm[i] - (8 + 0.5 * 4 * x_m + 0.3 * 10)) > 1e-3
+        end
+        @test all(i -> all(isfinite, block_view(bsw, 1)[i]), 1:pgw.meta.N)
+        # split over host parts: the wall-point rows are gathered like the mirrored ones, every part's reduction is the
+        # single stepper's bit for bit
+        field2(x, b) = State{2, Float64}(1 + 0.2 * x[1] + 0.1b, 1 + 0.3 * x[1] + 0.2b)
+        parts = map([1:1, 2:3, 4:4]) do r
+            pgp = block_pg_1d(60, 2; bc = bcw())
+            tsp = BlockTimeStepper(eq2, sc, RK2_SSP_Tableau(Float64); blocks = r)
+            bsp = BlockState(eq2, pgp; blocks = r)
+            set_block_states!(field2, bsp, pgp)
+            BlockPart(pgp, tsp, bsp)
+        end
+        devs = BlockDevices(eq2, parts)
+        pg1 = block_pg_1d(60, 2; bc = bcw())
+        ts1 = BlockTimeStepper(eq2, sc, RK2_SSP_Tableau(Float64))
+        bs1 = BlockState(eq2, pg1)
+        set_block_states!(field2, bs1, pg1)
+        for k in 0:4
+            devs(k * 1e-3, 1e-3)
+            ts1(eq2, pg1, bs1, k * 1e-3, 1e-3)
+        end
+        gl = [i for i in 1:pg1.meta.N if pg1.core.is_boundary[i] && pg1.core.tags[i] == 1]
+        @test all(pt -> parent(pt.ts.wall_params[1])[gl] == parent(ts1.wall_params[1])[gl], devs.parts)
+        @test host_state(devs) == collect(view(parent(bs1.data), 1:(4 * bs1.N[])))
     end
 end

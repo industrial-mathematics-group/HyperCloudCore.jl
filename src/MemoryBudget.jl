@@ -59,6 +59,8 @@ function _prepare_budget!(ts::BlockTimeStepper, pg)
     for (tag, bc) in pg.geometry.bc_map
         _is_block_wall(bc, ts.pde) && _wall_params!(ts, bc, tag, ts.pde)
         _ghost_budget!(ts, bc)
+        # (an operator that takes the wall-point states fills the second scratch: made here so that it is priced)
+        bc isa MirrorBC && uses_wall_state(bc.op) && ensure_capacity!(ts.ghost_scratch_w, 1)
     end
     return nothing
 end
@@ -82,6 +84,7 @@ function particle_buffers(ts::BlockTimeStepper, moving::Bool)
             ts.donors,
             map(st -> st.params, (ts.explicit_sources..., ts.implicit_sources...))...,
             (isempty(ts.wall_params) ? () : (_Blocked(ts.ghost_scratch, nb), values(ts.wall_params)...))...,
+            (length(parent(ts.ghost_scratch_w)) > 0 || ts.ghost_scratch_w.fixed ? (_Blocked(ts.ghost_scratch_w, nb),) : ())...,
             (ts.grad_scratch === nothing ? () : (_Blocked(ts.grad_scratch, nc),))...,
             Iterators.flatten(_scratch_buffers(g) for g in values(ts.ghost_geom))...)
 end
