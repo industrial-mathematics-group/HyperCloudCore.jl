@@ -31,6 +31,26 @@ function BlockPart(pg::ParticleGrid{D, W, T}, ts::BlockTimeStepper{D, W, T}, bs:
     return BlockPart(pg, ts, bs, activate, Dict{DataType, Any}(), Dict{Int, Any}())
 end
 @inline _activate(pt::BlockPart) = (pt.activate === nothing || pt.activate(); nothing)
+# `f(pt)` on every part with its device made current: concurrently, one task per part, when every part has its own device
+# (an `activate`) and Julia runs with several threads, sequentially otherwise (host parts). In sequence the devices never
+# overlapped (every launch synchronises), and two GPUs took twice as long as one. A device's current context and stream
+# are task-local: a task synchronises its device before it ends (a phase can end with a plain asynchronous copy, e.g.
+# the state copied out at the step's end), so the next task and the host exchanges see finished work.
+_sync_device(b::KABackend) = KA.synchronize(b.backend)
+_sync_device(::ExecutionBackend) = nothing
+function _foreach_part(f::F, parts) where {F}
+    if length(parts) > 1 && Threads.nthreads() > 1 && all(pt -> pt.activate !== nothing, parts)
+        @sync for pt in parts
+            Threads.@spawn (_activate(pt); f(pt); _sync_device(get_backend()); nothing)
+        end
+    else
+        for pt in parts
+            _activate(pt)
+            f(pt)
+        end
+    end
+    return nothing
+end
 _storage(pt::BlockPart) = typeof(parent(pt.bs.data)).name.wrapper
 function _part_scratch!(pt::BlockPart, ::Type{P}, n::Int) where {P}
     g = get!(pt.scratch, P) do
@@ -60,6 +80,8 @@ per-particle partial sums of the reductions, the MOOD flags and the mirrored gho
   application), and every part runs the operator's reduction (`block_wall_reduce`, unchanged) and its application on
   them, so the walls are those of the single stepper bit for bit.
 
+The parts' device work runs concurrently, one task per part, when every part has its own device (an `activate`) and
+Julia runs with several threads (start it with at least as many threads as parts); the exchanges in between run on the host.
 The parts' grids are copies of one cloud (a `device_grid` per device; copies, not the shared arrays of
 `device_grid(Array, pg)`: every part moves its own positions and orders). Not supported on a split state: moving
 boundary pieces, the particle adaptivity and the reordering (host events of the single stepper). The result agrees
@@ -89,6 +111,15 @@ function BlockDevices(eq::HyperbolicPDE{D, W, T}, parts::Vector{P}) where {D, W,
          length(pt.ts.explicit_sources) == length(p1.ts.explicit_sources) && length(pt.ts.implicit_sources) == length(p1.ts.implicit_sources)) ||
             throw(ArgumentError("BlockDevices: the parts' steppers must share the tableau and the sources"))
         has_moving_pieces(pt.pg.geometry) && throw(ArgumentError("BlockDevices: moving boundary pieces are not supported on a split state"))
+    end
+    # every part owns its cloud and its sources' parameters: on a shared grid every part's drop pass lowered the orders
+    # once more (MOOD silently wrong), shared parameter arrays race between the concurrent parts
+    for k in 2:length(parts), j in 1:(k - 1)
+        (parts[k].pg === parts[j].pg || parent(parts[k].pg.core.particle_orders) === parent(parts[j].pg.core.particle_orders)) &&
+            throw(ArgumentError("BlockDevices: parts $j and $k share a grid; every part needs its own copy of the cloud (`deepcopy`, or a `device_grid` per device)"))
+        any(((a, b),) -> a.params === b.params, zip((parts[k].ts.explicit_sources..., parts[k].ts.implicit_sources...),
+                                                   (parts[j].ts.explicit_sources..., parts[j].ts.implicit_sources...))) &&
+            throw(ArgumentError("BlockDevices: parts $j and $k share a source's parameter array; build the sources per part"))
     end
     # the additive forms the exchange needs
     for st in (p1.ts.explicit_sources..., p1.ts.implicit_sources...)
@@ -292,8 +323,7 @@ _ghost_rows(pt::BlockPart, tag::Int, N::Int, ng::Int) = (r = pt.rows[tag]; _Ghos
 function (devs::BlockDevices{D, W, T})(time::Real, dt::T) where {D, W, T}
     eq    = devs.pde
     parts = devs.parts
-    for pt in parts
-        _activate(pt)
+    _foreach_part(parts) do pt
         _block_step_begin!(pt.ts, eq, pt.pg, pt.bs, time, dt)
     end
     p1     = first(parts)
@@ -309,23 +339,20 @@ function (devs::BlockDevices{D, W, T})(time::Real, dt::T) where {D, W, T}
         else
             _devices_checkpoint!(devs, i, dt, time)
             if moving
-                for pt in parts
-                    _activate(pt)
-                    _apply_stage_geometry!(pt.ts.inner, pt.pg, pt.ts.inner.X_stages[i], time, time + bt.c_t[i] * dt)
+                _foreach_part(parts) do pt
+                    _block_stage_geometry!(pt.ts, pt.pg, i, time, time + bt.c_t[i] * dt)
                 end
             end
         end
         if inner1.reset_orders_per_stage
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 fill!(view(pt.pg.core.particle_orders, 1:N), max_order)
             end
         end
         _devices_rhs!(devs, i, time + bt.c_t[i] * dt, true)
     end
     _devices_checkpoint!(devs, s + 1, dt, time)
-    for pt in parts
-        _activate(pt)
+    _foreach_part(parts) do pt
         _block_step_end!(pt.ts, eq, pt.pg, pt.bs, time, dt)
     end
     return nothing
@@ -341,8 +368,7 @@ function _devices_reduce!(devs::BlockDevices{D, W, T}, which::Symbol, n::Int, i:
     nb = num_blocks(devs.pde)
     src(pt) = which === :implicit ? pt.ts.implicit_sources[n] : pt.ts.explicit_sources[n]
     P = reduction_partial_type(src(first(devs.parts)).term)
-    for pt in devs.parts
-        _activate(pt)
+    _foreach_part(devs.parts) do pt
         st  = src(pt)
         buf = _part_scratch!(pt, P, N)
         off = first(pt.bs.blocks) - 1
@@ -350,8 +376,7 @@ function _devices_reduce!(devs::BlockDevices{D, W, T}, which::Symbol, n::Int, i:
             (buf, st.term, _OffsetBlocks(parent(_part_stage(pt, i)), off * N), N, nb, pt.bs.blocks, pt.pg, pt.pg.core.is_boundary, t_i))
     end
     _exchange_sum!(devs, P, N)
-    for pt in devs.parts
-        _activate(pt)
+    _foreach_part(devs.parts) do pt
         st = src(pt)
         ensure_capacity!(st.params, N)
         foreach_particle(_block_finalize_body!, get_backend(), N,
@@ -369,8 +394,7 @@ function _devices_form_candidate!(devs::BlockDevices{D, W, T}, i::Int, dt::T, ti
     N      = first(parts).pg.meta.N
     is_final = i > s
     t_i = is_final ? time + dt : time + bt.c_t[i] * dt
-    for pt in parts
-        _activate(pt)
+    _foreach_part(parts) do pt
         _launch_predictor!(pt.ts, pt.pg, N, pt.bs.nb, i, dt)
     end
     if !is_final && !isempty(first(parts).ts.implicit_sources)
@@ -378,8 +402,7 @@ function _devices_form_candidate!(devs::BlockDevices{D, W, T}, i::Int, dt::T, ti
         implicit = abs(a_ii) > T(1e-14)
         for n in eachindex(first(parts).ts.implicit_sources)
             _devices_reduce!(devs, :implicit, n, i, t_i, implicit ? dt * a_ii : zero(T))
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 src = pt.ts.implicit_sources[n]
                 if implicit
                     _launch_implicit_step!(pt.ts, pt.pg, src, _part_stage(pt, i), pt.ts.inner.K_I_stages[i], N, pt.bs.nb, dt * a_ii, t_i, n == 1)
@@ -403,14 +426,12 @@ function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W
     nb    = num_blocks(eq)
     for (tag, bc) in first(parts).pg.geometry.bc_map
         if _is_block_wall(bc, eq)
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 _launch_wall_fit!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, pt.bs.nb)
             end
             _gather_ghost_rows!(devs, tag, N)
             ng = length(devs.ghosts[tag][1])
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 params = _wall_params!(pt.ts, bc, tag, eq)
                 ensure_capacity!(params, N)
                 rows = _ghost_rows(pt, tag, N, ng)
@@ -421,8 +442,7 @@ function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W
                 _launch_wall_apply!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, N, pt.bs.nb, params, rows)
             end
         else
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 _block_bc!(bc, pt.ts, pt.pg, _part_stage(pt, i), tag, eq, t, N, pt.bs.nb)
             end
         end
@@ -441,35 +461,30 @@ function _devices_rhs!(devs::BlockDevices{D, W, T}, i::Int, t_i, full::Bool) whe
     if _block_moving(pg1)
         if _lagrangian_type(pg1.mover)
             P = fluid_velocity_partial_type(eq)
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 buf = _part_scratch!(pt, P, N)
                 foreach_particle(_velocity_partial_body!, get_backend(), N,
                     (buf, eq, _OffsetBlocks(parent(pt.ts.inner.Y_stages[i]), (first(pt.bs.blocks) - 1) * N), N, nb, pt.bs.blocks, pt.pg.core.is_boundary))
             end
             _exchange_sum!(devs, P, N)
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 alpha = pt.pg.mover isa ScaledLagrangianMover ? pt.pg.mover.alpha : one(T)
                 foreach_particle(_velocity_finalize_body!, get_backend(), N,
                     (pt.ts.grid_w, eq, pt.scratch[P], alpha, pt.pg.core.is_boundary, zero(Space{D, T})))
             end
         else
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 foreach_particle(_block_velocity_body!, get_backend(), N,
                     (pt.ts.grid_w, pt.pg.mover, eq, parent(pt.ts.inner.Y_stages[i]), N, pt.bs.nb, pt.pg, pt.pg.core.is_boundary, t_i, zero(Space{D, T})))
             end
         end
     end
-    for pt in parts
-        _activate(pt)
+    _foreach_part(parts) do pt
         _launch_flux!(pt.ts, eq, pt.pg, i, t_i, full, N, pt.bs.nb)
     end
     for n in eachindex(first(parts).ts.explicit_sources)
         full && _devices_reduce!(devs, :explicit, n, i, t_i, zero(T))
-        for pt in parts
-            _activate(pt)
+        _foreach_part(parts) do pt
             _launch_explicit_source!(pt.ts, pt.pg, pt.ts.explicit_sources[n], i, N, pt.bs.nb, t_i, full)
         end
     end
@@ -488,8 +503,7 @@ function _devices_checkpoint!(devs::BlockDevices{D, W, T}, i::Int, dt::T, time::
         _devices_form_candidate!(devs, i, dt, time)
         cand_sub = _checks_substeps(inner1)
         if cand_sub
-            for pt in parts
-                _activate(pt)
+            _foreach_part(parts) do pt
                 _block_form_substep!(pt.ts, pt.pg, i, dt)
             end
         end
@@ -497,8 +511,7 @@ function _devices_checkpoint!(devs::BlockDevices{D, W, T}, i::Int, dt::T, time::
             inner1.mood.criterion isa NoMOOD || (inner1.work.inadmissible[] += _devices_count_inadmissible(devs, i, cand_sub))
             return nothing
         end
-        for pt in parts
-            _activate(pt)
+        _foreach_part(parts) do pt
             work = pt.ts.inner.work
             copyto!(parent(work.dirty), 1, parent(work.changed), 1, N)
             expand_mask!(parent(work.dirty), parent(work.scratch), pt.pg, reach)
@@ -513,8 +526,7 @@ function _devices_admissible_sums!(devs::BlockDevices, i::Int, cand_sub::Bool, f
     eq = devs.pde
     P  = admissible_partial_type(eq)
     nb = num_blocks(eq)
-    for pt in devs.parts
-        _activate(pt)
+    _foreach_part(devs.parts) do pt
         buf = _part_scratch!(pt, P, N)
         foreach_particle(_admissible_partial_body!, get_backend(), N,
             (buf, eq, _OffsetBlocks(_block_candidate_array(pt.ts, i, cand_sub), (first(pt.bs.blocks) - 1) * N), N, nb, pt.bs.blocks,
@@ -529,16 +541,14 @@ function _devices_detect_and_drop!(devs::BlockDevices, i::Int, cand_sub::Bool, f
     inner1 = first(parts).ts.inner
     inner1.mood.criterion isa NoMOOD && return false
     N = first(parts).pg.meta.N
-    for pt in parts
-        _activate(pt)
+    _foreach_part(parts) do pt
         _mood_reset!(pt.ts.inner.work, N)
         _launch_flag_pass!(pt.ts, eq, pt.pg, i, cand_sub, full, N, pt.bs.nb)
     end
     P = admissible_partial_type(eq)
     if P !== nothing
         _devices_admissible_sums!(devs, i, cand_sub, full, N)
-        for pt in parts
-            _activate(pt)
+        _foreach_part(parts) do pt
             work = pt.ts.inner.work
             foreach_particle(_admissible_finalize_body!, get_backend(), N,
                 (parent(work.triggered), eq, pt.scratch[P], pt.pg.core.is_boundary, parent(work.dirty), full))
@@ -559,8 +569,7 @@ function _devices_count_inadmissible(devs::BlockDevices, i::Int, cand_sub::Bool)
     eq    = devs.pde
     N     = first(parts).pg.meta.N
     N == 0 && return 0
-    for pt in parts
-        _activate(pt)
+    _foreach_part(parts) do pt
         foreach_particle(_local_inadmissible_body!, get_backend(), N,
             (parent(pt.ts.inner.work.scratch), pt.pg.core.is_boundary, eq, _block_candidate_array(pt.ts, i, cand_sub), N, pt.bs.nb, first(pt.bs.blocks) - 1))
     end
@@ -589,8 +598,7 @@ SVector{D + 2, T})`).
 function host_reduction(f::F, devs::BlockDevices, ::Type{P}) where {F, P}
     N  = first(devs.parts).pg.meta.N
     nb = num_blocks(devs.pde)
-    for pt in devs.parts
-        _activate(pt)
+    _foreach_part(devs.parts) do pt
         buf = _part_scratch!(pt, P, N)
         foreach_particle(_host_reduction_body!, get_backend(), N,
             (buf, f, _OffsetBlocks(parent(pt.bs.data), (first(pt.bs.blocks) - 1) * N), N, nb, pt.bs.blocks))

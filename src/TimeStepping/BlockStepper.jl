@@ -730,6 +730,8 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
     bt        = inner.tableau
     s         = inner.num_stages
     max_order = _extract_order(inner.divergence_interpolator)
+    # (before the sync of moving pieces, which remaps the state: a state of another particle count is refused untouched)
+    bs.N[] == pg.meta.N || throw(ArgumentError("BlockTimeStepper: the state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
     # moving pieces: the ghosts and the region at the step's time first (the sweep may change the particle set)
     has_moving_pieces(pg.geometry) &&
         _with_block_vectors(v -> _sync_boundaries!(pg, T(time), max_order; states = v), bs, pg)
@@ -742,7 +744,7 @@ function (ts::BlockTimeStepper{D, W, T})(eq::HyperbolicPDE{D, W, T}, pg::Particl
             _block_form_candidate!(ts, eq, pg, 1, dt, time)
         else
             _block_checkpoint!(ts, eq, pg, i, dt, time)      # uses the geometry of stage i-1
-            moving && _apply_stage_geometry!(inner, pg, inner.X_stages[i], time, time + bt.c_t[i] * dt)
+            moving && _block_stage_geometry!(ts, pg, i, time, time + bt.c_t[i] * dt)
         end
         inner.reset_orders_per_stage && fill!(view(orders, 1:N), max_order)
         _block_rhs!(ts, eq, pg, i, time + bt.c_t[i] * dt, true)
@@ -1077,6 +1079,17 @@ function _launch_predictor!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, 
     return nothing
 end
 
+# The stage geometry of a moving grid (`_apply_stage_geometry!`): a neighbour search per stage resizes the interaction
+# buffer for one block's slots, the launches over the blocks need them once per block of a launch (sized only at the
+# step's start, a cloud whose neighbourhoods grew within the step made the last slots of a launch run past the buffer)
+function _block_stage_geometry!(ts::BlockTimeStepper, pg, i::Int, t_n, t_i)
+    inner = ts.inner
+    _apply_stage_geometry!(inner, pg, inner.X_stages[i], t_n, t_i)
+    inner.full_search_per_stage && uses_slot_buffers(inner.divergence_interpolator) &&
+        update_size!(inner.int_buffer, _launch_width(ts, _num_local(ts)) * length(pg.neighbor.indices))
+    return nothing
+end
+
 # The beginning of a step for the blocks of the stepper (the stepper of a whole state, or a part of a split one): the
 # sizes, the copy of the state into `rho_n`, the orders; and its end: the copy out, the positions of a moving grid
 function _block_step_begin!(ts::BlockTimeStepper{D, W, T}, eq, pg, bs::BlockState{W, T}, time::Real, dt::T) where {D, W, T}
@@ -1094,7 +1107,7 @@ function _block_step_begin!(ts::BlockTimeStepper{D, W, T}, eq, pg, bs::BlockStat
     _launch_scratch_size!(ts.grad_scratch, nc * N)         # (the gradient cache once per block of a launch)
     moving && ensure_capacity!(ts.grid_w, N)
     ensure_capacity!(ts.donors, N)
-    ensure_capacity!(ts.u2_ranges, nc)
+    ensure_capacity!(ts.u2_ranges, nb)                     # (one launch over all blocks when the scheme has no gradient cache)
     copyto!(parent(inner.rho_n), 1, parent(bs.data), 1, nb * N)
     moving && copyto!(parent(inner.x_n), 1, pg.core.positions, 1, N)
     moving && copyto!(parent(inner.v_n), 1, pg.core.volumes, 1, N)
