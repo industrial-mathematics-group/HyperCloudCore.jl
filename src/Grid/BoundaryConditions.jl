@@ -557,7 +557,8 @@ _val_of(::Val{B}) where {B} = B
 # equation `BlockOf(eq, b)`. The same arithmetic as `_launch_ghost_fit!` per block (the moment matrix and its factor
 # do not depend on the block, the right-hand side does), computed once instead of once per block.
 function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val,
-                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0, out_w = nothing) where {D, M, T}
+                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0, out_w = nothing,
+                                   list = nothing) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     N    = pg.meta.N
@@ -568,14 +569,16 @@ function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int
     c = pg.core
     backend = get_backend()
     _ensure_scratch!(gs, N)
-    foreach_particle(_ghost_geometry_body!, backend, N,
-        (gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.particle_orders, nb.ranges, nb.indices, nb.weight_func,
-         wrap, gm, tag, valQ, mirror, Val(D)))
+    geom_args = (gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.particle_orders, nb.ranges, nb.indices, nb.weight_func,
+                 wrap, gm, tag, valQ, mirror, Val(D))
+    # (`list = (indices, n)`: the ghosts of the tag only, see `_tag_list!`; the same per-ghost work either way)
+    list === nothing ? foreach_particle(_ghost_geometry_body!, backend, N, geom_args) :
+                       foreach_listed(_ghost_geometry_body!, backend, list..., geom_args)
     foreach_block(_ghost_apply_body!, backend, N, blocks,
         ((PerBlock(buf), PerBlock(out), out_w === nothing ? nothing : PerBlock(out_w)), gs,
          c.positions, c.is_boundary, c.tags, c.normals,
          c.wall_distances, c.wall_curvatures,
-         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded); block_offset)   # (19 arguments)
+         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded); block_offset, list)   # (19 arguments)
     return nothing
 end
 

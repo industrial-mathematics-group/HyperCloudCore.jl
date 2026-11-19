@@ -446,7 +446,7 @@ function _devices_apply_bcs!(devs::BlockDevices{D, W, T}, i::Int, t) where {D, W
                 rows = _ghost_rows(pt, tag, N, ng)
                 c  = pt.pg.core
                 gm = _wall_motion(pt.pg, tag, t)
-                foreach_particle(_block_wall_reduce_body!, get_backend(), N,
+                foreach_listed(_block_wall_reduce_body!, get_backend(), _tag_list!(pt.ts, pt.pg, tag)...,
                     (params, bc.op, eq, rows, N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag,
                      ws ? _ghost_rows_w(pt, tag, N, ng) : nothing))
                 _launch_wall_apply!(pt.ts, bc, pt.pg, _part_stage(pt, i), tag, eq, t, N, pt.bs.nb, params, rows)

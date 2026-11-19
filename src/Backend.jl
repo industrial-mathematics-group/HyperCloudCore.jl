@@ -203,10 +203,48 @@ arguments are those of the per-particle launch, with the per-block ones marked:
 `block_offset`: the arrays hold the blocks `blocks` of a block range starting at `block_offset + 1` (a part of a
 state split over devices): the views are those of the local block `b`, the equation and the index get the global
 block `b + block_offset`.
+
+`list = (indices, n)`: only the particles `indices[1:n]` (see `foreach_listed`), `n · length(blocks)`
+work-items.
 """
-function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0) where {F}
+function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0,
+                       list = nothing) where {F}
     (N == 0 || isempty(blocks)) && return nothing
+    if list !== nothing                               # only the listed particles (`list = (indices, n)`)
+        idx, n = list
+        n == 0 && return nothing
+        return foreach_particle(_listed_pairs_body!, backend, n * length(blocks), (idx, n, N, first(blocks), block_offset, body, args))
+    end
     return foreach_particle(_block_pairs_body!, backend, N * length(blocks), (N, first(blocks), block_offset, body, args))
+end
+
+"""
+    foreach_listed(body, backend, indices, n, args::Tuple)
+
+Runs `body(i, args...)` for the particles `i = indices[k]`, `k in 1:n`, in one launch of `n` work-items: a pass that
+only some particles do (the ghosts of one boundary tag), without the launch over all `N` particles in which most
+work-items return at once and a warp with one listed particle costs as much as a full one. `indices` lives on the
+backend's storage (a host `Vector` for the CPU backends). `foreach_block(…; list = (indices, n))` is the launch over
+the (listed particle, block) pairs.
+"""
+function foreach_listed(body::F, backend::ExecutionBackend, indices, n::Int, args::Tuple) where {F}
+    n == 0 && return nothing
+    return foreach_particle(_listed_body!, backend, n, (indices, body, args))
+end
+@inline function _listed_body!(k, indices, body, args)
+    @inbounds i = indices[k]
+    body(i, args...)
+    return nothing
+end
+# Work-item `q` of a launch over the (listed particle, block) pairs: listed particle `k = (q − 1) % n + 1` of the `c`-th
+# block of the launch (the views of the blocks have `N` entries, as in `_block_pairs_body!`)
+@inline function _listed_pairs_body!(q, indices, n, N, b0, off, body, args)
+    k = (q - 1) % n + 1
+    c = (q - 1) ÷ n + 1
+    b = b0 + c - 1
+    @inbounds i = indices[k]
+    body(i, map(x -> _block_arg(x, b, c, N, off), args)...)
+    return nothing
 end
 
 "A block-major array argument of `foreach_block`: the body gets the view of the block."

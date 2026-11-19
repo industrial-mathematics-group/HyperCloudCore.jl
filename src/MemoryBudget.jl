@@ -59,6 +59,8 @@ function _prepare_budget!(ts::BlockTimeStepper, pg)
     for (tag, bc) in pg.geometry.bc_map
         _is_block_wall(bc, ts.pde) && _wall_params!(ts, bc, tag, ts.pde)
         _ghost_budget!(ts, bc)
+        # (the ghost list of a tag with ghost fits: at most one entry per particle, see `_tag_list!`)
+        (bc isa MirrorBC || bc isa ExtrapolationBC) && _tag_list!(ts, pg, tag)
         # (an operator that takes the wall-point states fills the second scratch: made here so that it is priced)
         bc isa MirrorBC && uses_wall_state(bc.op) && ensure_capacity!(ts.ghost_scratch_w, 1)
     end
@@ -86,7 +88,8 @@ function particle_buffers(ts::BlockTimeStepper, moving::Bool)
             (isempty(ts.wall_params) ? () : (_Blocked(ts.ghost_scratch, nb), values(ts.wall_params)...))...,
             (length(parent(ts.ghost_scratch_w)) > 0 || ts.ghost_scratch_w.fixed ? (_Blocked(ts.ghost_scratch_w, nb),) : ())...,
             (ts.grad_scratch === nothing ? () : (_Blocked(ts.grad_scratch, nc),))...,
-            Iterators.flatten(_scratch_buffers(g) for g in values(ts.ghost_geom))...)
+            Iterators.flatten(_scratch_buffers(g) for g in values(ts.ghost_geom))...,
+            (ent[2] for ent in values(ts.ghost_lists))...)
 end
 slot_buffers(ts::BlockTimeStepper) = map(g -> _Blocked(g, _launch_width(ts, length(ts.blocks))), slot_buffers(ts.inner))
 particle_buffers(bs::BlockState, ::Bool) = (_Blocked(bs.data, bs.nb), _Blocked(bs.cfl, bs.nb))
