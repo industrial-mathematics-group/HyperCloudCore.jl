@@ -348,10 +348,14 @@ end
 # PRE-GATHER PASS: CALCULATE AND STORE GRADIENTS
 # =========================================================================
 
-function update_content!(
-    muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER}, i::Int, f_i::State{M, T}, nb_slice::OrdinalRange{Int, Int},
+@inline update_content!(muscl::MUSCL{D, M, T}, i::Int, f_i::State{M, T}, nb_slice::OrdinalRange{Int, Int}, pg::ParticleGrid{D, M, T},
+                        U::AbstractVector{State{M, T}}, ib::InteractionBuffer{D, M, T}) where {D, M, T} =
+    _update_content!(muscl, Val(:all), i, f_i, nb_slice, pg, U, ib)
+# The pre-pass of particle `i` on the path `P` (see `_muscl_divergence`): a particle of the other pass of a split is skipped
+@inline function _update_content!(
+    muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER}, ::Val{P}, i::Int, f_i::State{M, T}, nb_slice::OrdinalRange{Int, Int},
     pg::ParticleGrid{D, M, T}, U::AbstractVector{State{M, T}}, ib::InteractionBuffer{D, M, T}
-) where {D, M, T, B_LEN, MAX_ORDER}
+) where {D, M, T, B_LEN, MAX_ORDER, P}
     df = neighbour_differences(U, pg, f_i)
     num_nb = length(nb_slice)
     p_order = pg.core.particle_orders[i]
@@ -369,6 +373,8 @@ function update_content!(
 
     wg = muscl.grad_weights
     cached = p_order == MAX_ORDER && p_order > 1 && is_current(wg, pg) && wg.ok[i]
+    P === :common && !cached && return nothing
+    P === :rare && cached && return nothing
     if cached && _uses_extrema(muscl.limiter)
         # the cached fit and the extrema of the bounding limiters in one pass over the neighbours' states
         raw_grad, u_max, u_min = apply_weights_extrema(wg, i, nb_slice, dist_all, w_all, U, pg.neighbor.indices, f_i)
@@ -394,20 +400,28 @@ end
 # FLUX PASS: RECONSTRUCT INTERFACES AND COMPUTE DIVERGENCE
 # =========================================================================
 
-function (muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER})(
+@inline (muscl::MUSCL{D, M, T})(eq::HyperbolicPDE, i::Int, f_i::State{M, T}, nb_slice::OrdinalRange{Int, Int}, pg::ParticleGrid{D, M, T},
+                                 U::AbstractVector{State{M, T}}, ib::InteractionBuffer{D, M, T}, strategy::MOODStrategy) where {D, M, T} =
+    _muscl_divergence(muscl, Val(:all), eq, i, f_i, nb_slice, pg, U, ib, strategy)
+
+# The divergence of particle `i` on the path `P`: `:all`, or a split pass (see `_CommonPath`): `:common`, the particles
+# whose fit is the cached full-order one (the other branches are not compiled), `:rare`, the others; a particle of the other
+# pass gets `nothing` (the caller skips it)
+@inline function _muscl_divergence(muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}, ::Val{P},
     eq::HyperbolicPDE, i::Int, f_i::State{M, T}, nb_slice::OrdinalRange{Int, Int},
     pg::ParticleGrid{D, M, T}, U::AbstractVector{State{M, T}}, ib::InteractionBuffer{D, M, T}, strategy::MOODStrategy
-) where {D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}
+) where {D, M, T, B_LEN, MAX_ORDER, DIV_ORDER, P}
 
     if isempty(nb_slice)
-        return zero(State{M, T})
+        return P === :common ? nothing : zero(State{M, T})          # (the rare pass, which compiles the full code, takes it)
     end
 
     eff_order_i = pg.core.particle_orders[i]
     div_idx = _divergence_index(Val(DIV_ORDER), Val(D), eff_order_i, length(nb_slice))
     wd      = muscl.div_weights
-    # the cache holds every particle's fit at full order, of the degree its stencil carries (`_FullOrderDivDegree`)
-    cached  = is_current(wd, pg) && wd.ok[i] && div_idx == _divergence_index(Val(DIV_ORDER), Val(D), MAX_ORDER, length(nb_slice))
+    cached  = _muscl_cached(muscl, i, nb_slice, pg)
+    P === :common && !cached && return nothing
+    P === :rare && cached && return nothing
 
     # Without the cached fit the aligned flux needs the weights of the dynamic fit in every slot, so it takes the
     # per-slot path also when the scheme is buffered (same fit as `compute_dynamic_divergence`). A frame with the
@@ -431,6 +445,56 @@ function (muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER})(
 
     return T(2.0) * div
 end
+
+# =========================================================================
+# THE RARE PATHS OUT OF THE HOT KERNELS
+#
+# A GPU allocates a kernel's registers for its heaviest path. The flux and pre-pass kernels of MUSCL carry the dynamic fits
+# (a moment matrix assembled and factorised per particle) for the particles without a cached fit (a starved stencil, an order
+# MOOD lowered), which are few or none, and that code set the register count, and with it the occupancy, of every particle
+# (255 registers and spills for the flux pass of a block width of 8). On a device the passes run twice instead: over the
+# particles with the cached fit with a kernel that has only that path (`_CommonPath`), then over the others with the full
+# code (`_RarePath`: its warps without such a particle return at once). Every particle computes what it computed before.
+# =========================================================================
+"`interp` on the particles with the cached fit only (a split pass, see above); the others are skipped."
+struct _CommonPath{I} <: DivergenceInterpolator
+    interp::I
+end
+"`interp` on the particles without the cached fit only (the second pass of a split, see `_CommonPath`)."
+struct _RarePath{I} <: DivergenceInterpolator
+    interp::I
+end
+const _PathOf = Union{_CommonPath, _RarePath}
+# Whether the flux pass of particle `i` uses the cached full-order fit (the cache holds every particle's fit at full order,
+# of the degree its stencil carries, `_FullOrderDivDegree`)
+@inline function _muscl_cached(muscl::MUSCL{D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}, i::Int, nb_slice, pg) where {D, M, T, B_LEN, MAX_ORDER, DIV_ORDER}
+    isempty(nb_slice) && return false
+    wd = muscl.div_weights
+    @inbounds return is_current(wd, pg) && wd.ok[i] &&
+        _divergence_index(Val(DIV_ORDER), Val(D), pg.core.particle_orders[i], length(nb_slice)) ==
+        _divergence_index(Val(DIV_ORDER), Val(D), MAX_ORDER, length(nb_slice))
+end
+# Whether the flux pass of particle `i` belongs to this pass (decided before the pass writes anything for it)
+@inline _in_pass(::Any, i, nb_slice, pg) = true
+@inline _in_pass(p::_CommonPath, i, nb_slice, pg) = _muscl_cached(p.interp, i, nb_slice, pg)
+@inline _in_pass(p::_RarePath, i, nb_slice, pg) = !_muscl_cached(p.interp, i, nb_slice, pg)
+_path(::_CommonPath) = Val(:common)
+_path(::_RarePath) = Val(:rare)
+_with_interp(::_CommonPath, x) = _CommonPath(x)
+_with_interp(::_RarePath, x) = _RarePath(x)
+Adapt.adapt_structure(to, p::_PathOf) = _with_interp(p, adapt(to, p.interp))
+@inline (p::_PathOf)(eq::HyperbolicPDE, i::Int, f_i, nb_slice, pg, U, ib, strategy) =
+    _muscl_divergence(p.interp, _path(p), eq, i, f_i, nb_slice, pg, U, ib, strategy)
+@inline update_content!(p::_PathOf, i::Int, f_i, nb_slice, pg, U, ib) = _update_content!(p.interp, _path(p), i, f_i, nb_slice, pg, U, ib)
+@inline _conservative_ale(p::_PathOf) = _conservative_ale(p.interp)
+@inline _moving_frame(p::_PathOf, mover, eq, w, K_V, V) = _moving_frame(p.interp, mover, eq, w, K_V, V)
+# the scheme with its slot's gradient cache in a launch over blocks (`_slot_view` of the scheme, `BlockStepper.jl`)
+@inline _slot_view(x::Tuple{<:_PathOf, <:AbstractVector}, off::Int, len::Int) = _with_interp(x[1], _slot_view((x[1].interp, x[2]), off, len))
+
+# Whether the passes of MUSCL run split (see above): on a device backend; `_SPLIT_PATHS[]` overrides it (tests)
+const _SPLIT_PATHS = Ref{Union{Nothing, Bool}}(nothing)
+_split_paths(::Any, backend) = false
+_split_paths(::MUSCL, backend) = something(_SPLIT_PATHS[], backend isa KABackend)
 
 # MUSCL adds the volume term of a `LagrangianFrame` to its pair fluxes (`ale_volume_term` in `_flux_loop`), so the
 # stepper gives it the conservative frame on Lagrangian grids (`_moving_frame`)
@@ -562,7 +626,7 @@ end
     for idx in (IMAX - 1):-1:2
         expr = :(div_idx == $idx ? _streamed_dynamic(Val($(idx - 1)), muscl, eq, i, f_i, nb_slice, pg, U, ib, strategy, eff_order_i) : $expr)
     end
-    return expr
+    return Expr(:block, Expr(:meta, :inline), expr)
 end
 
 @inline _streamed_dynamic(::Val{q}, muscl::MUSCL{D, M, T}, args...) where {q, D, M, T} =

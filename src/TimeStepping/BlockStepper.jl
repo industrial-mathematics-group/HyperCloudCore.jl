@@ -994,15 +994,21 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
     full && foreach_block(_boundary_rhs_body!, backend, N, 1:nb,
         (PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i], moving, zero(State{W, T}), zero(Space{D, T}));
         list = _tag_list!(ts, pg, -1))
+    # (on a device the passes of MUSCL run split: the particles with the cached fit, then the others, see `_CommonPath`)
+    paths = _split_paths(interp, backend) ? (_CommonPath(interp), _RarePath(interp)) : (interp,)
     for blocks in _launch_chunks(ts, nb)
-        foreach_block(_rhs_gather!, backend, N, blocks,
-            (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
-             inner.work.changed, true); block_offset = off)
-        foreach_block(_rhs_flux!, backend, N, blocks,
-            (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
-             inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
-             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off,
-            list = interior)
+        foreach(paths) do ip
+            foreach_block(_rhs_gather!, backend, N, blocks,
+                (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((ip, ts.grad_scratch), N), pg,
+                 inner.work.changed, true); block_offset = off)
+        end
+        foreach(paths) do ip
+            foreach_block(_rhs_flux!, backend, N, blocks,
+                (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
+                 inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((ip, ts.grad_scratch), N), inner.mood.strategy,
+                 mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off,
+                list = interior)
+        end
     end
     return nothing
 end
