@@ -167,12 +167,13 @@ end
     c, i = @index(Global, NTuple)
     body(i, c, args...)
 end
-# Which of the two layouts the device launches use (an experiment switch; `true`: slots along the warp)
+# Which of the two layouts the device launches use (an experiment switch; `true`: slots along the warp); a launch can ask
+# for the slots along the warp itself (`slots_fastest`)
 const _SLOTS_FASTEST = Ref(false)
 # (the grid's second dimension holds the slots: CUDA allows 65535 there; more slots run the linear launch)
 const _MAX_PAIR_SLOTS = 65535
 
-function foreach_pairs(body::F, backend::ExecutionBackend, N::Int, nc::Int, args::Tuple) where {F}
+function foreach_pairs(body::F, backend::ExecutionBackend, N::Int, nc::Int, args::Tuple; slots_fastest::Bool = false) where {F}
     (N == 0 || nc == 0) && return nothing
     return foreach_particle(_pairs_linear_body!, backend, N * nc, (N, body, args))
 end
@@ -180,13 +181,13 @@ end
     body((q - 1) % N + 1, (q - 1) ÷ N + 1, args...)
     return nothing
 end
-function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple) where {F}
+function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple; slots_fastest::Bool = false) where {F}
     (N == 0 || nc == 0) && return nothing
     nc > _MAX_PAIR_SLOTS && return foreach_particle(_pairs_linear_body!, b, N * nc, (N, body, args))
     kargs = kernel_view(args)
     check_resident(b.backend, kargs)
     key = (b.backend, b.workgroupsize, typeof(body), typeof(kargs), :pairs)
-    if _SLOTS_FASTEST[] && nc > 1
+    if (slots_fastest || _SLOTS_FASTEST[]) && nc > 1
         wx = min(nc, 32)
         wy = max(1, b.workgroupsize ÷ wx)
         if _needs_tuned_workgroup(key)
@@ -278,13 +279,13 @@ block `b + block_offset`.
 work-items.
 """
 function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0,
-                       list = nothing) where {F}
+                       list = nothing, slots_fastest::Bool = false) where {F}
     (N == 0 || isempty(blocks)) && return nothing
     if list !== nothing                               # only the listed particles (`list = (indices, n)`)
         idx, n = list
-        return foreach_pairs(_listed_pairs_body!, backend, n, length(blocks), (idx, N, first(blocks), block_offset, body, args))
+        return foreach_pairs(_listed_pairs_body!, backend, n, length(blocks), (idx, N, first(blocks), block_offset, body, args); slots_fastest)
     end
-    return foreach_pairs(_block_pairs_body!, backend, N, length(blocks), (N, first(blocks), block_offset, body, args))
+    return foreach_pairs(_block_pairs_body!, backend, N, length(blocks), (N, first(blocks), block_offset, body, args); slots_fastest)
 end
 
 """
