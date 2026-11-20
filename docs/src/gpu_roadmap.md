@@ -260,11 +260,57 @@ scheme option `streamed` (`:Scheme_streamed => true`; per-slot divergence weight
 Where an orifice step goes after these changes (V100): the scheme's pre-pass (gradients and limiter) 39 % and the flux
 pass 40 %, the walls 10 % (they were a third of the step, launched over all particles), the mixture collision (reduction,
 implicit step) 10 %, the predictor 0.7 % (6 % before: its stage tuples were in local memory). The flux and pre-pass
-kernels sit at the register limit (255 registers, several KB of local memory per work-item): the next step is smaller
-per-work-item state in those two kernels. The block-major layout of `SVector` states is not what limits the light
+kernels sat at the register limit (255 registers, several KB of local memory per work-item); the next section
+removes the local memory. The block-major layout of `SVector` states is not what limits the light
 passes: the predictor moves about 0.7–1 GB per call in 1.0 ms on the V100, at the memory bandwidth, although a
 work-item loads a whole 64-byte state (the caches absorb the strided loads); it was slow because of its stage tuples in
 local memory. The
 memory of a block state is dominated by the per-slot flux buffer of the default (buffered) divergence: the streamed
 divergence needs 0.6 instead of 3.1 GB for the wave and 2.8 instead of 4.6 GB for the orifice.
+
+### The pre-pass and flux kernels
+
+The two kernels that do the work of a block step had a stack frame of several KB per work-item. Three things put
+them there. The causes were found by compiling the kernels for `sm_70` without a GPU (GPUCompiler and ptxas `-v`)
+and reading the stack frames and the allocas of the LLVM module.
+
+- **Calls that were not inlined.** The VK/BJ limiter and the `ntuple` closures of the fits passed their gradients
+  through the stack. With them inlined, the pre-pass frame of the orifice (W = 8) went from 3320 to 2176 bytes and
+  the flux frame from 4528 to 2904 bytes.
+- **The rare path set the size of the common one.** A GPU sizes a kernel's registers and stack for its heaviest path.
+  The dynamic fits of the few particles without a cached fit made every particle pay for them. On a KA backend MUSCL
+  now runs both passes twice (`_CommonPath`, `_RarePath`): first over the particles with the cached full-order fit,
+  with a kernel that has only that path, then over the others. Every particle computes what it computed before.
+  The common pre-pass dropped to 162 registers and no stack.
+- **Run-time indices into the equation.** The node speeds of a discrete-velocity block came from a run-time index
+  into the node tables of the equation, a kernel argument. That copied the whole equation (about 1 KB for the
+  orifice mixture) to local memory in every work-item. A block equation now gives such constants through
+  [`block_data`](@ref): the stepper tabulates them once, and the flux pass reads them from that table. The common
+  flux kernel has 8 bytes of stack left, and its time fell from 152 to 42 ms per orifice step.
+
+The streamed pre-pass also runs with the blocks of one particle along the warp (`foreach_block(…; slots_fastest)`):
+
+- The particle's neighbour list, distances, weights and fit become one broadcast load per warp.
+- The lanes of a warp loop over the same neighbours.
+- The pre-pass time drops from 185 to 135 ms per step.
+
+The flux pass is slower that way, because its lanes no longer share their block speeds. A buffered pre-pass is
+slower too, because its per-slot writes lose coalescing. Both keep the particles along the warp.
+
+V100-SXM3, seconds per step (median of three runs, the same environment apart from the two packages). "before" is
+the version of the previous section.
+
+| case | before, buffered | after | before, streamed | after |
+|---|---|---|---|---|
+| orifice, W = 8, 4 483 particles | 0.631 | 0.500 | 0.531 | 0.311 |
+| orifice, W = 8, 9 949 particles | 1.187 | 0.898 | 0.961 | 0.506 |
+| periodic BGK wave, W = 8 | 0.0659 | 0.0539 | 0.0513 | 0.0320 |
+| 1-D BGK Sod, W = 8 | 0.0078 | 0.0059 | | |
+| 2-D Euler (standard stepper) | 0.1058 | 0.0902 | | |
+
+The pre-pass is now the largest kernel of an orifice step, at about 43 %. The flux pass is about 14 %; the collision
+(reduction and implicit step) and the walls take about 20 % each. Both hot kernels still need up to 255 registers at
+W = 8 in Float64. A work-item holds the states, gradients, reconstructions and fluxes of a pair, more than 127
+doubles, so the occupancy is low. Smaller per-work-item state (fewer components per work-item, or Float32) is what
+remains.
 
