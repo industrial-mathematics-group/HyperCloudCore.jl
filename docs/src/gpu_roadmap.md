@@ -260,9 +260,11 @@ scheme option `streamed` (`:Scheme_streamed => true`; per-slot divergence weight
 Where an orifice step goes after these changes (V100): the scheme's pre-pass (gradients and limiter) 39 % and the flux
 pass 40 %, the walls 10 % (they were a third of the step, launched over all particles), the mixture collision (reduction,
 implicit step) 10 %, the predictor 0.7 % (6 % before: its stage tuples were in local memory). The flux and pre-pass
-kernels sit at the register limit (255 registers, several KB of local memory per work-item), the light passes are
-limited by the block-major layout of `SVector` states (a work-item loads a 64-byte state, a warp's loads are strided):
-the next steps would be a component-major state layout and smaller per-work-item state in the two big kernels. The
+kernels sit at the register limit (255 registers, several KB of local memory per work-item): the next step is smaller
+per-work-item state in those two kernels. The block-major layout of `SVector` states is not what limits the light
+passes: the predictor moves about 0.7–1 GB per call in 1.0 ms on the V100, at the memory bandwidth, although a
+work-item loads a whole 64-byte state (the caches absorb the strided loads); it was slow because of its stage tuples in
+local memory. The
 memory of a block state is dominated by the per-slot flux buffer of the default (buffered) divergence: the streamed
 divergence needs 0.6 instead of 3.1 GB for the wave and 2.8 instead of 4.6 GB for the orifice.
 
