@@ -419,7 +419,9 @@ end
     eff_order_i = pg.core.particle_orders[i]
     div_idx = _divergence_index(Val(DIV_ORDER), Val(D), eff_order_i, length(nb_slice))
     wd      = muscl.div_weights
-    cached  = _muscl_cached(muscl, i, nb_slice, pg)
+    # the cache holds every particle's fit at full order, of the degree its stencil carries (`_FullOrderDivDegree`); the
+    # same test as `_muscl_cached`, written out (the call cost the CPU path 3–6 % of an Euler step)
+    cached  = is_current(wd, pg) && wd.ok[i] && div_idx == _divergence_index(Val(DIV_ORDER), Val(D), MAX_ORDER, length(nb_slice))
     P === :common && !cached && return nothing
     P === :rare && cached && return nothing
 
