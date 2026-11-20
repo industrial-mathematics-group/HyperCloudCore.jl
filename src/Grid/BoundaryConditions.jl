@@ -524,8 +524,13 @@ end
 Per-ghost geometry of the ghost fits of a block-major state, computed once per boundary tag and application
 (`_ghost_geometry_body!`) and reused by every block (`_ghost_apply_body!`): the donor (`0`: none), the degree whose
 moment matrix factorised (`-1`: none, the donor's value is used), the basis scale, the target point and the upper
-Cholesky factor of the moment matrix, padded to `B` rows (the basis length of the largest degree plus one).
-`Growable` buffers of a storage array type (`_ghost_scratch(Val(B), T, Val(D), storage)`), on the block stepper.
+Cholesky factor of the moment matrix, padded to `B` rows (the basis length of the largest degree plus one), and the fit
+as weights of the stencil's states: the fit is linear in the data, so its value at the target is `Σ_t wt[t] U_t` and at
+the wall point `Σ_t wt_w[t] U_t` over the donor and its interior neighbours (`S = max_nb + 1` entries per particle, at
+`(i − 1) S`). Every block's fit is then a weighted sum instead of the moment sums, the weight function and the
+triangular solves anew (the same fit up to round-off). `Growable` buffers of a storage array type
+(`_ghost_scratch(Val(B), T, Val(D), storage)`), on the block stepper; the weights are not part of the memory budget
+(`S` entries per particle: they grow on demand).
 """
 struct GhostFitScratch{B, L, T, D, GI <: AbstractVector{Int}, GT <: AbstractVector{T}, GX <: AbstractVector{Space{D, T}},
                        GF <: AbstractVector{SMatrix{B, B, T, L}}}
@@ -534,14 +539,17 @@ struct GhostFitScratch{B, L, T, D, GI <: AbstractVector{Int}, GT <: AbstractVect
     scale::GT
     target::GX
     factor::GF
+    wt::GT
+    wt_w::GT
 end
-_ghost_scratch(::Val{B}, ::Type{T}, ::Val{D}, donor, degree, scale, target, factor) where {B, T, D} =
-    GhostFitScratch{B, B * B, T, D, typeof(donor), typeof(scale), typeof(target), typeof(factor)}(donor, degree, scale, target, factor)
+_ghost_scratch(::Val{B}, ::Type{T}, ::Val{D}, donor, degree, scale, target, factor, wt, wt_w) where {B, T, D} =
+    GhostFitScratch{B, B * B, T, D, typeof(donor), typeof(scale), typeof(target), typeof(factor)}(donor, degree, scale, target, factor, wt, wt_w)
 _ghost_scratch(::Val{B}, ::Type{T}, ::Val{D}, ::Type{AT}) where {B, T, D, AT <: AbstractArray} =
     _ghost_scratch(Val(B), T, Val(D), Growable{Int}(AT), Growable{Int}(AT), Growable{T}(AT), Growable{Space{D, T}}(AT),
-                   Growable{SMatrix{B, B, T, B * B}}(AT))
+                   Growable{SMatrix{B, B, T, B * B}}(AT), Growable{T}(AT), Growable{T}(AT))
 Adapt.adapt_structure(to, g::GhostFitScratch{B, L, T, D}) where {B, L, T, D} =
-    _ghost_scratch(Val(B), T, Val(D), adapt(to, g.donor), adapt(to, g.degree), adapt(to, g.scale), adapt(to, g.target), adapt(to, g.factor))
+    _ghost_scratch(Val(B), T, Val(D), adapt(to, g.donor), adapt(to, g.degree), adapt(to, g.scale), adapt(to, g.target), adapt(to, g.factor),
+                   adapt(to, g.wt), adapt(to, g.wt_w))
 _scratch_buffers(g::GhostFitScratch) = (g.donor, g.degree, g.scale, g.target, g.factor)
 function _ensure_scratch!(g::GhostFitScratch, N::Int)
     foreach(b -> ensure_capacity!(b, N), _scratch_buffers(g))
@@ -553,29 +561,35 @@ _ghost_scratch_rows(::Val{D}, ::Val{q}) where {D, q} = _val_of(basis_length(Val(
 _val_of(::Val{B}) where {B} = B
 
 # The ghost fits of the blocks `blocks` of the block-major state `buf` into `out`, in two launches: the geometry of
-# every ghost of `tag` into `gs` (the donor, the degree, the factor), then the fit per (ghost, block) with the block
-# equation `BlockOf(eq, b)`. The same arithmetic as `_launch_ghost_fit!` per block (the moment matrix and its factor
-# do not depend on the block, the right-hand side does), computed once instead of once per block.
+# every ghost of `tag` into `gs` (the donor, the degree, the factor and the fit's weights of the stencil's states), then
+# the fit per (ghost, block) as the weighted sum of the block's states, with the block equation `BlockOf(eq, b)`. The fit
+# of `_launch_ghost_fit!` per block up to round-off (nothing of it but the states depends on the block).
 function _launch_ghost_fit_blocks!(pg::ParticleGrid{D, M, T}, buf, out, tag::Int, eq, t, valQ::Val, op, mirror::Val, bounded::Val,
-                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0, out_w = nothing) where {D, M, T}
+                                   blocks::UnitRange{Int}, gs::GhostFitScratch; block_offset::Int = 0, out_w = nothing,
+                                   list = nothing) where {D, M, T}
     valQ = _ghost_degree(valQ, Val(D))
     nb   = pg.neighbor
     N    = pg.meta.N
     invL = one(T) / minimum(pg.meta.dx)
     gm = (has_moving_pieces(pg.geometry) ? tag_motion(pg.geometry, tag, pg.meta.boundary_time, t) :
                                            GhostMotion(Val(D), T))::GhostMotion{D, T, D * D}
-    wrap = (pg.domain.L_wrap, pg.domain.invL_wrap, invL)
+    S    = pg.meta.max_nb + 1                    # (the stencil of a fit: the donor and its neighbours)
+    wrap = (pg.domain.L_wrap, pg.domain.invL_wrap, invL, S)
     c = pg.core
     backend = get_backend()
     _ensure_scratch!(gs, N)
-    foreach_particle(_ghost_geometry_body!, backend, N,
-        (gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.particle_orders, nb.ranges, nb.indices, nb.weight_func,
-         wrap, gm, tag, valQ, mirror, Val(D)))
+    ensure_capacity!(gs.wt, N * S)
+    ensure_capacity!(gs.wt_w, N * S)
+    geom_args = (gs, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances, c.particle_orders, nb.ranges, nb.indices, nb.weight_func,
+                 wrap, gm, tag, valQ, mirror, Val(D))
+    # (`list = (indices, n)`: the ghosts of the tag only, see `_tag_list!`; the same per-ghost work either way)
+    list === nothing ? foreach_particle(_ghost_geometry_body!, backend, N, geom_args) :
+                       foreach_listed(_ghost_geometry_body!, backend, list..., geom_args)
     foreach_block(_ghost_apply_body!, backend, N, blocks,
         ((PerBlock(buf), PerBlock(out), out_w === nothing ? nothing : PerBlock(out_w)), gs,
          c.positions, c.is_boundary, c.tags, c.normals,
          c.wall_distances, c.wall_curvatures,
-         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded); block_offset)   # (19 arguments)
+         nb.ranges, nb.indices, nb.weight_func, wrap, gm, tag, valQ, op, PerBlockEq(eq), mirror, bounded); block_offset, list)   # (19 arguments)
     return nothing
 end
 
@@ -584,8 +598,8 @@ end
 @inline function _ghost_geometry_body!(i, gs::GhostFitScratch{B}, pos, isb, tags, normals, wdist, orders, ranges, indices, wf,
                                        wrap, gm, tag, ::Val{Q}, ::Val{MIRROR}, ::Val{D}) where {B, Q, MIRROR, D}
     @inbounds begin
-        (isb[i] && tags[i] == tag) || return nothing
-        L, Li, invL = wrap
+        (isb[i] && (tag == 0 || tags[i] == tag)) || return nothing      # (tag 0: a group of walls, every listed ghost)
+        L, Li, invL, S = wrap
         x_i = move(gm, pos[i])
         n_i = rotate(gm, normals[i])
         φ_i = wdist[i]
@@ -598,24 +612,26 @@ end
         gs.factor[i] = F
         gs.scale[i]  = s
         gs.target[i] = x_t
+        # the fit as weights of the stencil's states, at the target and at the wall point
+        q_ok >= 0 && _fit_weights!(Val(Q), q_ok, F, x_i - φ_i * n_i, j, x_t, s, ranges[j], indices, pos, isb, L, Li, wf,
+                                   gs.wt, gs.wt_w, (i - 1) * S)
     end
     return nothing
 end
 @inline function _ghost_apply_body!(i, bufs, gs::GhostFitScratch, pos, isb, tags, normals, wdist, curvs, ranges, indices, wf,
                                     wrap, gm, tag, ::Val{Q}, op, eq, ::Val{MIRROR}, ::Val{BOUNDED}) where {Q, MIRROR, BOUNDED}
     @inbounds begin
-        (isb[i] && tags[i] == tag) || return nothing
+        (isb[i] && (tag == 0 || tags[i] == tag)) || return nothing
         j = gs.donor[i]
         j == 0 && return nothing
         buf, out, out_w = bufs
-        L, Li, invL = wrap
+        L, Li, invL, S = wrap
         q_ok = gs.degree[i]
+        off  = (i - 1) * S
         if out_w !== nothing || (MIRROR && _uses_wall_state(op))
             # the wall-point state as well: into its own scratch (`out_w`, the fit pass of a block wall), or for the
             # operator applied here
-            x_w = move(gm, pos[i]) - wdist[i] * rotate(gm, normals[i])
-            U, Uw = q_ok < 0 ? (buf[j], buf[j]) :
-                _fit_apply2(Val(Q), q_ok, gs.factor[i], x_w, j, gs.target[i], gs.scale[i], buf, ranges[j], indices, pos, isb, L, Li, wf)
+            U, Uw = q_ok < 0 ? (buf[j], buf[j]) : _weighted_fit2(gs.wt, gs.wt_w, off, j, buf, ranges[j], indices, isb)
             if BOUNDED
                 U  = _ghost_clamp(U, j, buf, ranges, indices, isb)
                 Uw = _ghost_clamp(Uw, j, buf, ranges, indices, isb)
@@ -623,8 +639,7 @@ end
             _store_wall_state!(out_w, i, Uw)
             out[i] = MIRROR ? _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm), Uw) : U
         else
-            U = q_ok < 0 ? buf[j] :
-                _fit_apply(Val(Q), q_ok, gs.factor[i], j, gs.target[i], gs.scale[i], buf, ranges[j], indices, pos, isb, L, Li, wf)
+            U = q_ok < 0 ? buf[j] : _weighted_fit(gs.wt, off, j, buf, ranges[j], indices, isb)
             BOUNDED && (U = _ghost_clamp(U, j, buf, ranges, indices, isb))
             out[i] = MIRROR ? _apply_wall_op(op, eq, U, _ghost_wall_point(i, pos, normals, wdist, curvs, gm)) : U
         end
@@ -632,6 +647,71 @@ end
     return nothing
 end
 @inline _store_wall_state!(::Nothing, i, Uw) = nothing
+
+# The stencil of a ghost fit: the donor `j`, then its interior neighbours in slot order (the order of the moment sums)
+@inline function _weighted_fit(wt, off, j, buf, rg, indices, isb)
+    @inbounds begin
+        U = wt[off + 1] * buf[j]
+        t = 1
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            t += 1
+            U += wt[off + t] * buf[m]
+        end
+        return U
+    end
+end
+@inline function _weighted_fit2(wt, wt_w, off, j, buf, rg, indices, isb)
+    @inbounds begin
+        Uj = buf[j]
+        U, Uw = wt[off + 1] * Uj, wt_w[off + 1] * Uj
+        t = 1
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            t += 1
+            Um = buf[m]
+            U  += wt[off + t] * Um
+            Uw += wt_w[off + t] * Um
+        end
+        return U, Uw
+    end
+end
+# The weights of the fit of degree `q_ok` (static dispatch over the degrees as `_fit_geometry`): the fit at the target is the constant
+# coefficient `e₁ᵀ C⁻¹ b`, at the wall point `p_wᵀ C⁻¹ b`, with `b = Σ_t w_t p_t U_tᵀ`: the weight of `U_t` is
+# `w_t (z ⋅ p_t)` with `z = C⁻¹ e₁` (resp. `C⁻¹ p_w`)
+@inline function _fit_weights!(::Val{q}, q_ok::Int, F, x_w, j, x_t, args...) where {q}
+    q_ok == q && return _weights_degree(Val(q), F, x_w, j, x_t, args...)
+    return _fit_weights!(Val(q - 1), q_ok, F, x_w, j, x_t, args...)
+end
+@inline _fit_weights!(::Val{0}, q_ok::Int, F, x_w, j, x_t, args...) = _weights_degree(Val(0), F, x_w, j, x_t, args...)
+@inline _weights_degree(::Val{q}, F, x_w, j, x_t::Space{D, T}, args...) where {q, D, T} =
+    _weights_degree_b(basis_length(Val(D), Val(q)), Val(q), F, x_w, j, x_t, args...)
+@inline _weights_degree(::Val{0}, F, x_w, j, x_t::Space{D, T}, args...) where {D, T} = _weights_degree_b(Val(0), Val(0), F, x_w, j, x_t, args...)
+@inline function _weights_degree_b(::Val{B}, ::Val{q}, F, x_w, j, x_t::Space{D, T}, s, rg, indices, pos, isb, L, Li, wf,
+                                   wt, wt_w, off) where {B, q, D, T}
+    C  = Cholesky(_top_left(F, Val(B + 1)), 'U', 0)
+    z  = C \ SVector{B + 1, T}(ntuple(r -> r == 1 ? one(T) : zero(T), Val(B + 1)))
+    zw = C \ _target_basis(Val(q), (x_w - x_t) * s)
+    @inbounds begin
+        r = _min_image(pos[j] - x_t, L, Li)
+        p = _target_basis(Val(q), r * s)
+        w = wf(sum(abs2, r))
+        wt[off + 1], wt_w[off + 1] = w * dot(z, p), w * dot(zw, p)
+        t = 1
+        for k in rg
+            m = indices[k]
+            isb[m] && continue
+            t += 1
+            r = _min_image(pos[m] - x_t, L, Li)
+            p = _target_basis(Val(q), r * s)
+            w = wf(sum(abs2, r))
+            wt[off + t], wt_w[off + t] = w * dot(z, p), w * dot(zw, p)
+        end
+    end
+    return nothing
+end
 @inline _store_wall_state!(out_w, i, Uw) = (@inbounds out_w[i] = Uw; nothing)
 
 # Static dispatch over the degrees Q, Q-1, …, 0 as `_fit_eval`: the geometry pass takes the first degree `≤ q_run`
@@ -655,35 +735,6 @@ end
     C, ok  = _cholesky_moment(N_s)
     return C.factors, s, ok
 end
-@inline function _fit_apply(::Val{q}, q_ok::Int, F, args...) where {q}
-    q_ok == q && return _apply_degree(Val(q), F, args...)
-    return _fit_apply(Val(q - 1), q_ok, F, args...)
-end
-@inline _fit_apply(::Val{0}, q_ok::Int, F, args...) = _apply_degree(Val(0), F, args...)
-@inline _apply_degree(::Val{q}, F, j, x_t::Space{D, T}, args...) where {q, D, T} =
-    _apply_degree_b(basis_length(Val(D), Val(q)), Val(q), F, j, x_t, args...)
-@inline _apply_degree(::Val{0}, F, j, x_t::Space{D, T}, args...) where {D, T} = _apply_degree_b(Val(0), Val(0), F, j, x_t, args...)
-@inline function _apply_degree_b(::Val{B}, ::Val{q}, F, j, x_t::Space{D, T}, s, buf::AbstractVector{State{M, T}}, rg, indices,
-                                 pos, isb, L, Li, wf) where {B, q, D, T, M}
-    b_s = _ghost_rhs(Val(B), Val(q), j, x_t, s, buf, rg, indices, pos, isb, L, Li, wf)
-    c_s = Cholesky(_top_left(F, Val(B + 1)), 'U', 0) \ b_s
-    return State{M, T}(ntuple(m -> c_s[1, m], Val(M)))
-end
-# The same, with the fit evaluated at the wall point `x_w` as well: `(U_target, U_w)`
-@inline function _fit_apply2(::Val{q}, q_ok::Int, F, x_w, args...) where {q}
-    q_ok == q && return _apply_degree2(Val(q), F, x_w, args...)
-    return _fit_apply2(Val(q - 1), q_ok, F, x_w, args...)
-end
-@inline _fit_apply2(::Val{0}, q_ok::Int, F, x_w, args...) = _apply_degree2(Val(0), F, x_w, args...)
-@inline _apply_degree2(::Val{q}, F, x_w, j, x_t::Space{D, T}, args...) where {q, D, T} =
-    _apply_degree_b2(basis_length(Val(D), Val(q)), Val(q), F, x_w, j, x_t, args...)
-@inline _apply_degree2(::Val{0}, F, x_w, j, x_t::Space{D, T}, args...) where {D, T} = _apply_degree_b2(Val(0), Val(0), F, x_w, j, x_t, args...)
-@inline function _apply_degree_b2(::Val{B}, ::Val{q}, F, x_w, j, x_t::Space{D, T}, s, buf::AbstractVector{State{M, T}}, rg, indices,
-                                  pos, isb, L, Li, wf) where {B, q, D, T, M}
-    b_s = _ghost_rhs(Val(B), Val(q), j, x_t, s, buf, rg, indices, pos, isb, L, Li, wf)
-    c_s = Cholesky(_top_left(F, Val(B + 1)), 'U', 0) \ b_s
-    return _fit_values(Val(q), c_s, x_w - x_t, s)
-end
 # The fitted polynomial (coefficients `c_s`, basis scaled by `s`) at the target (its constant term) and at the offset `d_w`
 @inline function _fit_values(::Val{q}, c_s::SMatrix{B1, M, T}, d_w::Space{D, T}, s) where {q, B1, M, T, D}
     return State{M, T}(ntuple(m -> c_s[1, m], Val(M))), _fit_at(Val(q), c_s, d_w * s)
@@ -698,8 +749,8 @@ end
 @inline _top_left(F::SMatrix{Bm, Bm, T}, ::Val{B}) where {Bm, T, B} =
     SMatrix{B, B, T}(ntuple(k -> (@inbounds F[(k - 1) % B + 1, (k - 1) ÷ B + 1]), Val(B * B)))
 
-# The moment matrix of the fit (`_ghost_moments` without the right-hand side) with the basis scale, and the right-hand
-# side alone for a stored scale: the same sums in the same order. Kept out of line like `_ghost_moments`.
+# The moment matrix of the fit (`_ghost_moments` without the right-hand side) with the basis scale: the same sums in the
+# same order. Kept out of line like `_ghost_moments`.
 @noinline function _ghost_moment_matrix(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, rg, indices, pos, isb, L, Li, wf, invL) where {B, q, D, T}
     N_s = zero(SMatrix{B + 1, B + 1, T, (B + 1) * (B + 1)})
     @inbounds begin
@@ -725,26 +776,6 @@ end
         return N_s, s
     end
 end
-@noinline function _ghost_rhs(::Val{B}, ::Val{q}, j, x_t::Space{D, T}, s, buf::AbstractVector{State{M, T}}, rg, indices,
-                              pos, isb, L, Li, wf) where {B, q, D, T, M}
-    b_s = zero(SMatrix{B + 1, M, T, (B + 1) * M})
-    @inbounds begin
-        r   = _min_image(pos[j] - x_t, L, Li)
-        p   = _target_basis(Val(q), r * s)
-        w   = wf(sum(abs2, r))
-        b_s += w * (p * buf[j]')
-        for k in rg
-            m = indices[k]
-            isb[m] && continue
-            r    = _min_image(pos[m] - x_t, L, Li)
-            p    = _target_basis(Val(q), r * s)
-            w    = wf(sum(abs2, r))
-            b_s += w * (p * buf[m]')
-        end
-    end
-    return b_s
-end
-
 # The wall as seen from ghost `i` (the wall point: the body's velocity there, not at the ghost), at the time of `gm`
 @inline function _ghost_wall_point(i, pos, normals, wdist, curvs, gm)
     @inbounds begin

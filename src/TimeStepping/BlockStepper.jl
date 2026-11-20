@@ -372,12 +372,12 @@ end
 
 # Kernel bodies of the block wall (see Backend.jl): the reduction over the mirrored blocks of a ghost and the application
 @inline function _block_wall_reduce_body!(g, params, op, eq, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag, Sw)
-    (is_boundary[g] && tags[g] == tag) || return nothing
+    (is_boundary[g] && (tag == 0 || tags[g] == tag)) || return nothing      # (tag 0: a group of walls, every listed ghost)
     params[g] = _wall_reduce(op, eq, S, N, nb, g, _ghost_wall_point(g, pos, normals, wdist, curvs, gm), Sw)
     return nothing
 end
 @inline function _block_wall_apply_body!(g, Y_b, S_b, params, op, eq, b, S, N, nb, pos, is_boundary, tags, normals, wdist, curvs, gm, tag)
-    (is_boundary[g] && tags[g] == tag) || return nothing
+    (is_boundary[g] && (tag == 0 || tags[g] == tag)) || return nothing
     Y_b[g] = block_wall_apply(op, eq, S_b[g], b, params[g], _ghost_wall_point(g, pos, normals, wdist, curvs, gm), S, N, nb, g)
     return nothing
 end
@@ -602,6 +602,7 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
     grad_scratch::GG                # the scheme's gradient cache for the blocks of a launch (`nothing`: none)
     ghost_geom::Dict{Int, Any}      # the per-ghost geometry of the ghost fits per basis size (a `GhostFitScratch`)
     blocks::UnitRange{Int}          # the blocks the stepper runs (all of the equation, or the range of a part)
+    ghost_lists::Dict{Any, Any}     # per boundary tag (or group of tags): its ghosts as a list of particle indices (`_tag_list!`)
 end
 
 """
@@ -640,7 +641,8 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     explicit_sts = map(st -> _on_storage(st, AT.name.wrapper), explicit_sts)
     implicit_sts = map(st -> _on_storage(st, AT.name.wrapper), implicit_sts)
     return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg)}(
-        eq, inner, explicit_sts, implicit_sts, gw, gs, gsw, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}(), blocks)
+        eq, inner, explicit_sts, implicit_sts, gw, gs, gsw, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}(), blocks,
+        Dict{Any, Any}())
 end
 
 # The blocks per launch from the keyword: `:auto` covers about 256 components per launch
@@ -670,6 +672,30 @@ function _ghost_geom!(ts::BlockTimeStepper{D, W, T}, valQ::Val) where {D, W, T}
     return get!(ts.ghost_geom, rows) do
         _ghost_scratch(Val(rows), T, Val(D), typeof(parent(ts.ghost_scratch)).name.wrapper)
     end
+end
+# The ghosts of boundary tag `tag` as a list of particle indices on the stepper's storage, `(indices, n)`: the passes of
+# the ghost fits and the walls run over them only (`foreach_listed`, `foreach_block(…; list)`). A launch over all
+# particles left most work-items idle, and a warp with one ghost of the tag cost as much as a full one: on the 2-D orifice
+# (four wall tags, a quarter of the particles ghosts) the wall passes took a third of the step on a V100. The list is
+# rebuilt from host copies of the flags and tags when the geometry changes (`geometry_version`: a neighbour search, the
+# particle set changed); the order is the particles' order, so every ghost computes exactly what it computed before.
+function _tag_list!(ts::BlockTimeStepper, pg::ParticleGrid, tag::Union{Int, Tuple})
+    N = pg.meta.N
+    v = pg.meta.geometry_version
+    ent = get(ts.ghost_lists, tag, nothing)
+    ent !== nothing && ent[1] == v && ent[4] == N && return (ent[2], ent[3])
+    isb = Array(view(parent(pg.core.is_boundary), 1:N))
+    tgs = Array(view(parent(pg.core.tags), 1:N))
+    # (tag 0: every interior particle, tag −1: every boundary particle, the flux pass (`_launch_flux!`); a tuple of tags:
+    # the ghosts of all of them, a group of walls with the same condition (`_block_apply_bcs!`))
+    sel = tag isa Tuple ? (i -> isb[i] && tgs[i] in tag) : tag == 0 ? (i -> !isb[i]) : tag == -1 ? (i -> isb[i]) : (i -> isb[i] && tgs[i] == tag)
+    idx = Int[i for i in 1:N if sel(i)]
+    g = ent === nothing ? Growable{Int}(typeof(parent(ts.ghost_scratch)).name.wrapper) : ent[2]
+    n = length(idx)
+    ensure_capacity!(g, max(n, 1))
+    n > 0 && copyto!(g, 1, idx, 1, n)
+    ts.ghost_lists[tag] = (v, g, n, N)
+    return (g, n)
 end
 # The slot stride of the interaction buffer in a launch (0: the scheme does not use it)
 _slot_stride(inner::GeneralRKTimeStepper, pg) = uses_slot_buffers(inner.divergence_interpolator) ? length(pg.neighbor.indices) : 0
@@ -776,15 +802,31 @@ end
 # application per block); the package's other conditions run in one launch over the blocks with the block's reference
 # state, any other condition block by block through its functor
 function _block_apply_bcs!(ts::BlockTimeStepper{D, W, T}, eq, pg, stage::Growable, t, N::Int, nb::Int) where {D, W, T}
+    moving = has_moving_pieces(pg.geometry)
+    done   = Int[]
     for (tag, bc) in pg.geometry.bc_map
+        tag in done && continue
         if _is_block_wall(bc, eq)
-            _block_mirror!(ts, bc, pg, stage, tag, eq, t, N, nb)
+            # the walls of the same condition object at once (the orifice's four walls are one `diffuse_wall`): one pass
+            # over all their ghosts, whose reduction is a long loop per ghost (all blocks) that a few hundred ghosts of one
+            # tag spread over a few warps only. A ghost's fit reads interior particles only and its reduction its own
+            # mirrored states, so the order of the tags does not matter: bit-identical. (Moving pieces: per tag, the motion
+            # of the ghosts is the piece's.)
+            group = moving ? (tag,) : Tuple(sort!([tg for (tg, b) in pg.geometry.bc_map if b === bc]))
+            append!(done, group)
+            _block_mirror!(ts, bc, pg, stage, length(group) == 1 ? tag : group, eq, t, N, nb)
         else
             _block_bc!(bc, ts, pg, stage, tag, eq, t, N, nb)
         end
     end
     return nothing
 end
+# A tag or a group of tags (a tuple) of the wall passes: the tag the kernel bodies check (0 for a group: every ghost of the
+# list), the tag of the wall parameters and of the ghosts' motion (a group's first, static walls only)
+@inline _body_tag(tag::Int) = tag
+@inline _body_tag(::Tuple) = 0
+@inline _first_tag(tag::Int) = tag
+@inline _first_tag(tags::Tuple) = first(tags)
 # (function barriers: `bc` comes untyped out of the map)
 function _block_bc!(::FixedDirichlet, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
     foreach_block(_dirichlet_body!, get_backend(), N, 1:nb, (PerBlock(stage), PerBlock(ts.inner.rho_n), pg.core.tags, pg.core.is_boundary, tag))
@@ -796,13 +838,13 @@ function _block_bc!(::OutflowBC, ts::BlockTimeStepper, pg, stage, tag::Int, eq, 
 end
 function _block_bc!(::ExtrapolationBC{Q}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q}
     _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), nothing, Val(false), Val(false), 1:nb, _ghost_geom!(ts, Val(Q));
-                              block_offset = _block_offset(ts))
+                              block_offset = _block_offset(ts), list = _tag_list!(ts, pg, tag))
     return nothing
 end
 function _block_bc!(bc::MirrorBC{Q, F, B}, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int) where {Q, F, B}
     # (an operator without a reduction, applied to every block's mirrored state with `BlockOf(eq, b)`)
     _launch_ghost_fit_blocks!(pg, stage, stage, tag, eq, t, Val(Q), _WallOp(bc.op), Val(true), Val(B), 1:nb, _ghost_geom!(ts, Val(Q));
-                              block_offset = _block_offset(ts))
+                              block_offset = _block_offset(ts), list = _tag_list!(ts, pg, tag))
     return nothing
 end
 function _block_bc!(bc, ts::BlockTimeStepper, pg, stage, tag::Int, eq, t, N::Int, nb::Int)
@@ -817,42 +859,43 @@ end
 # The kinetic wall of the stepper of a whole state: the mirrored fit of every block, the reduction per ghost over all
 # blocks, the application per block (a part of a split state runs the same launches with the exchanges in between,
 # see `BlockDevices.jl`)
-function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int) where {D, W, T, Q, F, B}
+function _block_mirror!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag, eq, t, N::Int, nb::Int) where {D, W, T, Q, F, B}
     _launch_wall_fit!(ts, bc, pg, stage, tag, eq, t, nb)
-    params = _wall_params!(ts, bc, tag, eq)
+    params = _wall_params!(ts, bc, _first_tag(tag), eq)
     ensure_capacity!(params, N)
-    gm = _wall_motion(pg, tag, t)
+    gm = _wall_motion(pg, _first_tag(tag), t)
     c  = pg.core
-    foreach_particle(_block_wall_reduce_body!, get_backend(), N,
+    foreach_listed(_block_wall_reduce_body!, get_backend(), _tag_list!(ts, pg, tag)...,
         (params, bc.op, eq, parent(ts.ghost_scratch), N, nb, c.positions, c.is_boundary, c.tags, c.normals, c.wall_distances,
-         c.wall_curvatures, gm, tag, _wall_scratch_w(ts, bc)))
+         c.wall_curvatures, gm, _body_tag(tag), _wall_scratch_w(ts, bc)))
     _launch_wall_apply!(ts, bc, pg, stage, tag, eq, t, N, nb, params, parent(ts.ghost_scratch))
     return nothing
 end
 # The mirrored fit of the blocks of the stepper into its scratch (block-major, the blocks of the range); for an operator
 # that takes the wall-point states, those into the second scratch
-function _launch_wall_fit!(ts::BlockTimeStepper, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag::Int, eq, t, nb::Int) where {Q, F, B}
+function _launch_wall_fit!(ts::BlockTimeStepper, bc::MirrorBC{Q, F, B}, pg, stage::Growable, tag, eq, t, nb::Int) where {Q, F, B}
     ensure_capacity!(ts.ghost_scratch, nb * pg.meta.N)
     out_w = nothing
     if uses_wall_state(bc.op)
         ensure_capacity!(ts.ghost_scratch_w, nb * pg.meta.N)
         out_w = ts.ghost_scratch_w
     end
-    _launch_ghost_fit_blocks!(pg, stage, ts.ghost_scratch, tag, eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B), 1:nb,
-                              _ghost_geom!(ts, Val(Q)); block_offset = _block_offset(ts), out_w)
+    _launch_ghost_fit_blocks!(pg, stage, ts.ghost_scratch, _body_tag(tag), eq, t, Val(Q), _WallOp(nothing), Val(true), Val(B), 1:nb,
+                              _ghost_geom!(ts, Val(Q)); block_offset = _block_offset(ts), out_w, list = _tag_list!(ts, pg, tag))
     return nothing
 end
 # The wall-point scratch an operator's reduction reads (`nothing` for one that does not take it)
 _wall_scratch_w(ts::BlockTimeStepper, bc::MirrorBC) = uses_wall_state(bc.op) ? parent(ts.ghost_scratch_w) : nothing
 # The application per (ghost, block) from the reduced parameters; `S_all` is what the operator reads the other blocks
 # of the ghost from (the scratch of a whole state, or the gathered ghost rows of a split one)
-function _launch_wall_apply!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC, pg, stage::Growable, tag::Int, eq, t, N::Int, nb::Int,
+function _launch_wall_apply!(ts::BlockTimeStepper{D, W, T}, bc::MirrorBC, pg, stage::Growable, tag, eq, t, N::Int, nb::Int,
                              params::Growable, S_all) where {D, W, T}
-    gm = _wall_motion(pg, tag, t)
+    gm = _wall_motion(pg, _first_tag(tag), t)
     c  = pg.core
     foreach_block(_block_wall_apply_body!, get_backend(), N, 1:nb,
         (PerBlock(stage), PerBlock(ts.ghost_scratch), params, bc.op, eq, PerBlockIndex(), S_all, N, num_blocks(ts.pde), c.positions,
-         c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, tag); block_offset = _block_offset(ts))
+         c.is_boundary, c.tags, c.normals, c.wall_distances, c.wall_curvatures, gm, _body_tag(tag)); block_offset = _block_offset(ts),
+        list = _tag_list!(ts, pg, tag))
     return nothing
 end
 # A moving piece: the stored ghost positions and normals belong to `boundary_time`; the wall point is taken at `t`
@@ -944,6 +987,13 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
     stride  = _slot_stride(inner, pg)
     off     = _block_offset(ts)
     prepare_geometry!(interp, pg)                           # (refreshes the geometry caches only if the grid changed)
+    # The flux pass over the interior particles only (a boundary particle's work-item returns at once, and a warp of
+    # interior particles with ghosts among them idled those lanes: a quarter of the particles of the 2-D orifice are
+    # ghosts); the boundary rows of the right-hand side are zeroed over the boundary particles (a full pass)
+    interior = _tag_list!(ts, pg, 0)
+    full && foreach_block(_boundary_rhs_body!, backend, N, 1:nb,
+        (PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i], moving, zero(State{W, T}), zero(Space{D, T}));
+        list = _tag_list!(ts, pg, -1))
     for blocks in _launch_chunks(ts, nb)
         foreach_block(_rhs_gather!, backend, N, blocks,
             (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
@@ -951,7 +1001,16 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
         foreach_block(_rhs_flux!, backend, N, blocks,
             (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
              inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
-             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off)
+             mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off,
+            list = interior)
+    end
+    return nothing
+end
+# Kernel body: the right-hand side of a boundary particle, zero (what `_rhs_flux!` writes for it on a full pass)
+@inline function _boundary_rhs_body!(p, K_E, K_X, K_V, moving, zero_state, zero_space)
+    @inbounds begin
+        K_E[p] = zero_state
+        moving && (K_X[p] = zero_space; K_V[p] = zero(eltype(K_V)))
     end
     return nothing
 end
@@ -1088,8 +1147,8 @@ function _launch_predictor!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, 
     v_target = is_final ? inner.v_cand : inner.V_stages[i]
     foreach_block(_stage_predictor!, get_backend(), N, 1:nb,
         (PerBlock(target), (x_target, v_target), U_n, (inner.x_n, inner.v_n), map(PerBlock, inner.K_E_stages), map(PerBlock, inner.K_I_stages),
-         (inner.K_X_stages, inner.K_V_stages, inner.V_stages), U_n, pg.core.is_boundary, inner.tableau, i, is_final ? s : i - 1, is_final,
-         dt, moving, false, zero(T), zero(Space{D, T})))
+         (inner.K_X_stages, inner.K_V_stages, inner.V_stages), U_n, pg.core.is_boundary,
+         _stage_coefficients(inner.tableau, i, is_final ? s : i - 1, is_final, Val(length(inner.K_E_stages))), dt, moving, false, zero(T), zero(Space{D, T})))
     return nothing
 end
 

@@ -638,7 +638,8 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         dt = 0.3 * (2 / N) / 2.0
         advance!((t, d) -> (ts_f(eq_f, pg_f, t, d); ts_b(eq_b, pg_b, bs, t, d)), 1.0, dt)         # the pulses hit both walls
         @test block_vs_full(bs, view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-13
-        @test haskey(ts_b.wall_params, 1) && haskey(ts_b.wall_params, 2)
+        # (both walls are the same condition: one pass over the ghosts of both, the parameters under the group's first tag)
+        @test haskey(ts_b.wall_params, 1) && haskey(ts_b.ghost_lists, (1, 2))
         # the reflection kept the mass of the interior (the walls return what arrives, up to the wall-flux error of the scheme)
         m0 = 8N + sum(0.5 * exp(-30 * x^2) * (1 + 0.1k) for x in (-1 + (i - 0.5) * 2 / N for i in 1:N), k in 1:8)
         m1 = sum(sum(block_view(bs, b)[i]) for b in 1:4, i in 1:pg_b.meta.N if !pg_b.core.is_boundary[i])
@@ -934,7 +935,10 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
             pg_f = standard_run(; mood = mood, bc = bcs(), limiter = limiter)
             runs = [block_run(eq2, 2; blocks_per_launch = bpl, mood = mood, bc = bcs(), limiter = limiter) for bpl in (0, 1, 3)]
             @test all(r -> states(r[1]) == states(runs[1][1]), runs)
-            @test all(r -> block_vs_full(r[1], view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-12, runs)
+            # (relative: the block ghost fits sum precomputed weights of the stencil's states, the standard ones solve the
+            # fit per ghost, the same fit up to round-off, which the one-sided extrapolation amplifies to ~7e-13 here)
+            scale = maximum(maximum(abs.(u)) for u in view(pg_f.rhos, 1:pg_f.meta.N))
+            @test all(r -> block_vs_full(r[1], view(pg_f.rhos, 1:pg_f.meta.N)) < 1e-12 * scale, runs)
             mood.criterion isa MOODu2 && @test any(mood_flags(runs[3][3])) && all(i -> all(isfinite, block_view(runs[3][1], 1)[i]), 1:runs[3][1].N[])
         end
         # the memory budget prices the scheme's scratch once per block of a launch, and the reservation holds a step

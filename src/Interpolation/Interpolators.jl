@@ -631,6 +631,25 @@ matrix (replaces the factorisation of `Interpolator{D, IO, 1}`).
     return _scaled_rows(w.inv_moment[i] * b_s, _cache_scales(w))
 end
 
+# `apply_weights` over the neighbour differences `U[j] − f_i`, with the component-wise extrema of `f_i` and the
+# neighbours' states taken in the same pass (`_local_extrema` reads the states once more): the bounding limiters of the
+# MUSCL pre-pass. The same sums and extrema in the same order.
+@inline function apply_weights_extrema(w::AbstractMLSWeights{B_LEN, IO, T}, i::Int, nb_slice::OrdinalRange{Int, Int},
+                                       distVec::AbstractVector, wVec::AbstractVector{T}, U::AbstractVector{State{M, T}},
+                                       indices, f_i::State{M, T}) where {B_LEN, IO, T, M}
+    invL = _cache_invL(w)
+    b_s = zero(SMatrix{B_LEN, M, T, B_LEN * M})
+    u_max, u_min = f_i, f_i
+    @inbounds for k in nb_slice
+        f_j   = U[indices[k]]
+        p_s   = build_basis(Val(IO), distVec[k] * invL)
+        b_s  += wVec[k] * (p_s * (f_j - f_i)')
+        u_max = max.(u_max, f_j)
+        u_min = min.(u_min, f_j)
+    end
+    return _scaled_rows(w.inv_moment[i] * b_s, _cache_scales(w)), u_max, u_min
+end
+
 # Rows of the coefficient matrix as States, scaled to physical derivatives (as in `_mls_solve`).
 @inline function _scaled_rows(c_s::SMatrix{B_LEN, M, T}, scales::SVector{B_LEN, T}) where {B_LEN, M, T}
     return SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do b

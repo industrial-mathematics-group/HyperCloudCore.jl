@@ -18,10 +18,10 @@ set_backend!(CUDABackend())                 # from CUDA.jl (likewise ROCBackend(
 | flux divergence + explicit sources | `_rhs_flux!` | `TimeStepping/TimeSteppers.jl` |
 | stage assembly, implicit solve, implicit RHS | `_stage_predictor!`, `_stage_implicit_solve!`, `_stage_implicit_rhs!` | `TimeStepping/TimeSteppers.jl` |
 | content remap onto the re-estimated volumes, cloud-quality check (moving grids) | `_content_remap!`, `_closest_neighbour!` | `TimeStepping/TimeSteppers.jl` |
-| block pipeline: every pass in one launch over the (particle, block) pairs (`foreach_block`: the stage kernels of the standard stepper on the views of the blocks; the passes with per-particle scratch over `blocks_per_launch` blocks at a time); the copies between the block state and the stage buffers are host-side | `BlockTimeStepper`, `_block_pairs_body!` | `TimeStepping/BlockStepper.jl`, `Backend.jl` |
+| block pipeline: every pass in one launch over the (particle, block) pairs (`foreach_block`, a two-dimensional launch through `foreach_pairs`: the stage kernels of the standard stepper on the views of the blocks; the passes with per-particle scratch over `blocks_per_launch` blocks at a time); passes that only some particles do run over a list of them (`foreach_listed`, `foreach_block(…; list)`: the flux pass over the interior particles, the ghost fits and walls over the ghosts of a tag or of a group of tags with the same condition); the copies between the block state and the stage buffers are host-side | `BlockTimeStepper`, `_block_pairs_body!`, `_listed_pairs_body!`, `_listed_body!`, `_boundary_rhs_body!` | `TimeStepping/BlockStepper.jl`, `Backend.jl` |
 | block pipeline: the reduction of a block source over the blocks of a particle (`block_reduce`, or the additive form `block_partial` + `finalize_reduction`), the per-block source and implicit solve, the cross-block admissibility flag and count of MOOD, the regather of a block's gradients before its `MOODu2` flag pass (the standard `_rhs_gather!`) | `_block_reduce_body!`, `_block_explicit_source!`, `_block_implicit_step!`, `_block_implicit_rhs!`, `_block_admissible_flag!`, `_block_inadmissible_body!` | `TimeStepping/BlockStepper.jl` |
 | block pipeline, a state split over devices: the partial reductions of a part (the sources, the frame velocity, the admissibility, the walls) and their finalization from the exchanged sums, the gather of the mirrored ghost rows; the exchange itself is host-side | `_block_partial_body!`, `_block_finalize_body!`, `_velocity_partial_body!`, `_admissible_partial_body!`, `_wall_partial_body!`, `_gather_rows_body!` | `TimeStepping/BlockDevices.jl` |
-| block pipeline: the frame velocity of every particle on a moving grid, the wall reduction per ghost and the wall application over the (ghost, block) pairs; the outflow condition's donor passes once per tag and the copy per block; the ghost fits of a block state with the geometry per ghost and the fit per (ghost, block); the CFL step over the pairs | `_block_velocity_body!`, `_block_wall_reduce_body!`, `_block_wall_apply_body!`, `_outflow_donor_pass!`, `_outflow_copy!`, `_ghost_geometry_body!`, `_ghost_apply_body!` | `TimeStepping/BlockStepper.jl`, `Grid/BoundaryConditions.jl` |
+| block pipeline: the frame velocity of every particle on a moving grid, the wall reduction per ghost and the wall application over the (ghost, block) pairs; the outflow condition's donor passes once per tag and the copy per block; the ghost fits of a block state with the geometry per ghost (the fit as weights of the donor stencil's states) and the fit per (ghost, block) as a weighted sum; the CFL step over the pairs | `_block_velocity_body!`, `_block_wall_reduce_body!`, `_block_wall_apply_body!`, `_outflow_donor_pass!`, `_outflow_copy!`, `_ghost_geometry_body!`, `_ghost_apply_body!` | `TimeStepping/BlockStepper.jl`, `Grid/BoundaryConditions.jl` |
 | MOOD candidate check, decrement, forcing, mask expansion | `_mood_flag!`, `_mood_drop!`, `_mood_force!`, `_expand_body!` | `TimeStepping/MOOD.jl` |
 | geometry refresh (moving grids) | `_refresh_slots!` | `TimeStepping/GridMovers.jl` |
 | inverse MLS moment matrices | `_moment_body!` | `Interpolation/Interpolators.jl` |
@@ -237,3 +237,34 @@ bandwidth-bound. The limiter and MOOD each add about a third to a Float64 step; 
 more than the limiter because `MOODu1(1e-6)` sits below Float32 round-off on a smooth profile and
 triggers spurious iterations (scale `δ` with the precision). A 3-D particle costs about six times a 2-D
 one: three times the neighbours (about 65 against 20) and twice the basis length.
+
+### Block pipeline on NVIDIA GPUs
+
+2026-11-20, HyperCloud's runners (`run_bgk_simulation` with `:PDE_block_width`), seconds per step from the runner's
+`Runtime` (the time loop: CFL estimate, steps, snapshots) of a second run, CUDA through KernelAbstractions, Float64.
+The orifice is the He–Ar mixture of HyperCloud (two species, 2 × 30² velocities = 3600 components, ARS222, MUSCL2 with
+the Venkatakrishnan limiter, four diffuse walls and an outflow, `R = 3.5 Δx`); the wave a periodic one-species BGK
+(16² velocities, `R = 2.5 Δx`). "before" is 0.9.7, "after" the version that runs the walls over the ghosts of each
+group of tags, the flux pass over the interior particles, the ghost fits from precomputed weights, the limiter's
+extrema in the pass of the cached fit and the stage predictor without run-time stage indices; "streamed" adds the
+scheme option `streamed` (`:Scheme_streamed => true`; per-slot divergence weights, no per-slot flux buffer).
+
+| case | particles × components | V100-SXM3 before | after | streamed | A30 before | after | streamed |
+|---|---|---|---|---|---|---|---|
+| orifice, W = 8 | 4 483 × 3600 | 1.051 | 0.630 | 0.530 | 0.865 | 0.588 | 0.480 |
+| orifice, W = 8 | 9 949 × 3600 | 1.958 | 1.185 | | 1.640 | 1.129 | |
+| periodic BGK wave, W = 8 | 16 384 × 256 | 0.0817 | 0.0660 | 0.0516 | 0.0672 | 0.0615 | 0.0462 |
+| 1-D BGK Sod, W = 8 | 4 001 × 128 | 0.0090 | 0.0080 | | 0.0100 | 0.0087 | |
+| 2-D Euler (standard stepper) | 1 002 001 × 4 | 0.117 | 0.106 | | 0.112 | 0.102 | |
+
+Where an orifice step goes after these changes (V100): the scheme's pre-pass (gradients and limiter) 39 % and the flux
+pass 40 %, the walls 10 % (they were a third of the step, launched over all particles), the mixture collision (reduction,
+implicit step) 10 %, the predictor 0.7 % (6 % before: its stage tuples were in local memory). The flux and pre-pass
+kernels sit at the register limit (255 registers, several KB of local memory per work-item): the next step is smaller
+per-work-item state in those two kernels. The block-major layout of `SVector` states is not what limits the light
+passes: the predictor moves about 0.7–1 GB per call in 1.0 ms on the V100, at the memory bandwidth, although a
+work-item loads a whole 64-byte state (the caches absorb the strided loads); it was slow because of its stage tuples in
+local memory. The
+memory of a block state is dominated by the per-slot flux buffer of the default (buffered) divergence: the streamed
+divergence needs 0.6 instead of 3.1 GB for the wave and 2.8 instead of 4.6 GB for the orifice.
+

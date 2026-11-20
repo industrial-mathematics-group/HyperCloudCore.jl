@@ -146,6 +146,52 @@ function foreach_particle(body::F, b::KABackend, N::Int, args::Tuple) where {F}
     return nothing
 end
 
+# =========================================================================
+# LAUNCHES OVER (PARTICLE, SLOT) PAIRS
+#
+# `foreach_pairs(body, backend, N, nc, args)` runs `body(i, c, args...)` for `i in 1:N`, `c in 1:nc`. On a device it is a
+# two-dimensional launch: every work-item gets its particle and its slot from the launch itself. The launch over
+# `N · nc` linear work-items (what `foreach_block` did) computed `(q − 1) % N` and `(q − 1) ÷ N` in every work-item, a
+# 64-bit integer division that GPUs emulate in software (no divide instruction). Measured on a V100 the saving is small
+# (0–1 % of a block step: the light passes were slow for another reason, their stage tuples in local memory), but the
+# launch is no more complex. The CPU backends run the linear loop (a division is cheap there).
+# =========================================================================
+@kernel function _pairs_kernel(body, args)
+    i, c = @index(Global, NTuple)
+    body(i, c, args...)
+end
+# (the grid's second dimension holds the slots: CUDA allows 65535 there; more slots run the linear launch)
+const _MAX_PAIR_SLOTS = 65535
+
+function foreach_pairs(body::F, backend::ExecutionBackend, N::Int, nc::Int, args::Tuple) where {F}
+    (N == 0 || nc == 0) && return nothing
+    return foreach_particle(_pairs_linear_body!, backend, N * nc, (N, body, args))
+end
+@inline function _pairs_linear_body!(q, N, body, args)
+    body((q - 1) % N + 1, (q - 1) ÷ N + 1, args...)
+    return nothing
+end
+function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple) where {F}
+    (N == 0 || nc == 0) && return nothing
+    nc > _MAX_PAIR_SLOTS && return foreach_particle(_pairs_linear_body!, b, N * nc, (N, body, args))
+    kargs = kernel_view(args)
+    check_resident(b.backend, kargs)
+    key = (b.backend, b.workgroupsize, typeof(body), typeof(kargs), :pairs)
+    if _needs_tuned_workgroup(key)
+        _pairs_kernel(b.backend)(body, kargs; ndrange = (N, nc))
+    else
+        try
+            _pairs_kernel(b.backend, (b.workgroupsize, 1))(body, kargs; ndrange = (N, nc))
+        catch err
+            _is_workgroup_size_error(err) || rethrow()
+            _remember_tuned_workgroup!(key)                 # (as in `foreach_particle`)
+            _pairs_kernel(b.backend)(body, kargs; ndrange = (N, nc))
+        end
+    end
+    KA.synchronize(b.backend)
+    return nothing
+end
+
 # Kernels (backend, configured size, body and argument types) whose limit is below the configured work-group size
 const _TUNED_WORKGROUP = Set{Any}()
 const _TUNED_WORKGROUP_LOCK = ReentrantLock()
@@ -186,8 +232,9 @@ end
 Runs the kernel body `body(i, args_b...)` for every particle `i in 1:N` and every block `b in blocks` in **one
 launch** of `N · length(blocks)` work-items: the passes of the block pipeline over a block-major state, instead
 of one launch of `N` work-items per block (which never fills a GPU and pays the launch latency once per block).
-Work-item `q` is particle `i = (q − 1) % N + 1` of the `c`-th block of the launch, `b = first(blocks) + c − 1`:
-consecutive work-items are consecutive particles of one block, the order of the block-major layout. The
+The work-items are the pairs (particle `i`, `c`-th block of the launch), `b = first(blocks) + c − 1` (`foreach_pairs`:
+a two-dimensional launch on a device): consecutive work-items are consecutive particles of one block, the order of the
+block-major layout. The
 arguments are those of the per-particle launch, with the per-block ones marked:
 
 - `PerBlock``(a)`: a block-major array (`nb N` elements, block `b` at `(b − 1) N + 1 … b N`); the body
@@ -203,10 +250,45 @@ arguments are those of the per-particle launch, with the per-block ones marked:
 `block_offset`: the arrays hold the blocks `blocks` of a block range starting at `block_offset + 1` (a part of a
 state split over devices): the views are those of the local block `b`, the equation and the index get the global
 block `b + block_offset`.
+
+`list = (indices, n)`: only the particles `indices[1:n]` (see `foreach_listed`), `n · length(blocks)`
+work-items.
 """
-function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0) where {F}
+function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0,
+                       list = nothing) where {F}
     (N == 0 || isempty(blocks)) && return nothing
-    return foreach_particle(_block_pairs_body!, backend, N * length(blocks), (N, first(blocks), block_offset, body, args))
+    if list !== nothing                               # only the listed particles (`list = (indices, n)`)
+        idx, n = list
+        return foreach_pairs(_listed_pairs_body!, backend, n, length(blocks), (idx, N, first(blocks), block_offset, body, args))
+    end
+    return foreach_pairs(_block_pairs_body!, backend, N, length(blocks), (N, first(blocks), block_offset, body, args))
+end
+
+"""
+    foreach_listed(body, backend, indices, n, args::Tuple)
+
+Runs `body(i, args...)` for the particles `i = indices[k]`, `k in 1:n`, in one launch of `n` work-items: a pass that
+only some particles do (the ghosts of one boundary tag), without the launch over all `N` particles in which most
+work-items return at once and a warp with one listed particle costs as much as a full one. `indices` lives on the
+backend's storage (a host `Vector` for the CPU backends). `foreach_block(…; list = (indices, n))` is the launch over
+the (listed particle, block) pairs.
+"""
+function foreach_listed(body::F, backend::ExecutionBackend, indices, n::Int, args::Tuple) where {F}
+    n == 0 && return nothing
+    return foreach_particle(_listed_body!, backend, n, (indices, body, args))
+end
+@inline function _listed_body!(k, indices, body, args)
+    @inbounds i = indices[k]
+    body(i, args...)
+    return nothing
+end
+# The pair (listed particle `k`, `c`-th block of the launch) of a launch over the listed particles and the blocks (the
+# views of the blocks have `N` entries, as in `_block_pairs_body!`)
+@inline function _listed_pairs_body!(k, c, indices, N, b0, off, body, args)
+    b = b0 + c - 1
+    @inbounds i = indices[k]
+    body(i, map(x -> _block_arg(x, b, c, N, off), args)...)
+    return nothing
 end
 
 "A block-major array argument of `foreach_block`: the body gets the view of the block."
@@ -243,10 +325,8 @@ Adapt.adapt_structure(to, x::PerSlotEntry) = PerSlotEntry(adapt(to, x.a))
 @inline _block_arg(x::PerSlotEntry, b, c, N, off) = @inbounds x.a[c]
 @inline _slot_view(x, off::Int, len::Int) = x
 
-# Kernel body (see above): work-item `q` of a launch over the pairs (`b` the local block, `b + off` the global one)
-@inline function _block_pairs_body!(q, N, b0, off, body, args)
-    i = (q - 1) % N + 1
-    c = (q - 1) ÷ N + 1
+# Kernel body (see above): the pair (particle `i`, `c`-th block of the launch), `b` the local block, `b + off` the global one
+@inline function _block_pairs_body!(i, c, N, b0, off, body, args)
     b = b0 + c - 1
     body(i, map(x -> _block_arg(x, b, c, N, off), args)...)
     return nothing
