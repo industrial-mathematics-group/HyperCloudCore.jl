@@ -152,9 +152,9 @@ end
 # `foreach_pairs(body, backend, N, nc, args)` runs `body(i, c, args...)` for `i in 1:N`, `c in 1:nc`. On a device it is a
 # two-dimensional launch: every work-item gets its particle and its slot from the launch itself. The launch over
 # `N · nc` linear work-items (what `foreach_block` did) computed `(q − 1) % N` and `(q − 1) ÷ N` in every work-item, a
-# 64-bit integer division that GPUs emulate in software (no divide instruction): in the light passes of the block
-# pipeline (the stage predictor, the implicit step, a few flops per component) it cost more than the work. The CPU
-# backends run the linear loop (a division is cheap there).
+# 64-bit integer division that GPUs emulate in software (no divide instruction). Measured on a V100 the saving is small
+# (0–1 % of a block step: the light passes were slow for another reason, their stage tuples in local memory), but the
+# launch is no more complex. The CPU backends run the linear loop (a division is cheap there).
 # =========================================================================
 @kernel function _pairs_kernel(body, args)
     i, c = @index(Global, NTuple)
