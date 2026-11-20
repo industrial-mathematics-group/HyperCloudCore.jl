@@ -295,10 +295,12 @@ end
 struct PerBlock{A}
     a::A
 end
-"An equation argument of `foreach_block`: the body gets `BlockOf(eq, b)`."
-struct PerBlockEq{EQ}
+"An equation argument of `foreach_block`: the body gets `BlockOf(eq, b)`, or `BlockOf(eq, b, table[b])` with a table of the blocks' constants."
+struct PerBlockEq{EQ, B}
     eq::EQ
+    table::B
 end
+PerBlockEq(eq) = PerBlockEq(eq, nothing)
 "The block index as an argument of `foreach_block`."
 struct PerBlockIndex end
 "Scratch of one launch slot of `foreach_block`: the body gets `x` shifted by `(c − 1) stride`."
@@ -311,7 +313,7 @@ struct PerSlotEntry{A}
     a::A
 end
 Adapt.adapt_structure(to, x::PerBlock) = PerBlock(adapt(to, x.a))
-Adapt.adapt_structure(to, x::PerBlockEq) = PerBlockEq(adapt(to, x.eq))
+Adapt.adapt_structure(to, x::PerBlockEq) = PerBlockEq(adapt(to, x.eq), adapt(to, x.table))
 Adapt.adapt_structure(to, x::PerSlot) = PerSlot(adapt(to, x.x), x.stride)
 Adapt.adapt_structure(to, x::PerSlotEntry) = PerSlotEntry(adapt(to, x.a))
 

@@ -1,5 +1,5 @@
 export BlockState, BlockTimeStepper, BlockOf, num_blocks, block_flux, block_max_eigenvalue, block_admissible, block_view, set_block_states!,
-       block_velocity, block_is_admissible, block_nc_jump
+       block_velocity, block_is_admissible, block_nc_jump, block_data
 export AbstractBlockSource, AbstractExplicitBlockSource, AbstractImplicitBlockSource, BlockSourceTerm
 export reduction_type, block_reduce, block_source, block_implicit_solve
 export reduction_partial_type, block_partial, finalize_reduction
@@ -44,6 +44,20 @@ Largest absolute wave speed of block `b` along axis `d` (see [`num_blocks`](@ref
 `max_eigenvalue(eq, U, d)`.
 """
 @inline block_max_eigenvalue(eq::HyperbolicPDE, U::State, d::Int, b::Int) = max_eigenvalue(eq, U, d)
+
+"""
+    block_data(eq::HyperbolicPDE, b::Int) -> bits value or nothing
+
+Constants of block `b` that its flux needs (e.g. the node velocities of a block of a discrete-velocity model). The
+[`BlockTimeStepper`](@ref) tabulates them once for every block (an array on its storage); the flux pass gets them as
+`BlockOf(eq, b, data)` and calls `block_flux(eq, U, b, data)`, so the kernel reads them from that table instead of
+computing them from the equation. On a GPU a run-time index into tables inside the equation copied the whole equation (a
+kernel argument) to local memory in every thread. The default `nothing` tabulates nothing; the other passes get
+`BlockOf(eq, b)` (`data === nothing`), so an equation that uses the data must also work without it.
+"""
+block_data(eq::HyperbolicPDE, b::Int) = nothing
+# The flux of a block with its tabulated constants (see `block_data`); the default ignores them
+@inline block_flux(eq::HyperbolicPDE, U::State, b::Int, data) = block_flux(eq, U, b)
 
 """
     block_max_eigenvalue(eq::HyperbolicPDE{D, W, T}, U::State{W, T}, d::Int, b::Int, shift::Real) -> T
@@ -188,12 +202,14 @@ Block `b` of a block equation as an ordinary PDE of `W` components: `flux` is `b
 `max_eigenvalue` is `block_max_eigenvalue(eq, ·, d, b)`, so the schemes and numerical fluxes run on the block
 unchanged. The block index is a field (a run-time value): one compiled kernel serves every block.
 """
-struct BlockOf{D, W, T, EQ <: HyperbolicPDE{D, W, T}} <: HyperbolicPDE{D, W, T}
+struct BlockOf{D, W, T, EQ <: HyperbolicPDE{D, W, T}, C} <: HyperbolicPDE{D, W, T}
     eq::EQ
     b::Int
+    data::C                         # the block's constants (`block_data`), tabulated by the stepper; `nothing`: not given
 end
+BlockOf(eq::HyperbolicPDE, b::Int) = BlockOf(eq, b, nothing)
 
-@inline flux(w::BlockOf, U::State) = block_flux(w.eq, U, w.b)
+@inline flux(w::BlockOf, U::State) = block_flux(w.eq, U, w.b, w.data)
 @inline max_eigenvalue(w::BlockOf, U::State, d::Int) = block_max_eigenvalue(w.eq, U, d, w.b)
 @inline max_eigenvalue(w::BlockOf, U::State, d::Int, shift::Real) = block_max_eigenvalue(w.eq, U, d, w.b, shift)
 # (a missing forward silently fell back on the generic defaults: an admissibility or a non-conservative jump of the
@@ -385,7 +401,8 @@ end
 # =========================================================================
 # LAUNCHES OVER THE PAIRS (see `foreach_block`, Backend.jl): the block equation and the scratch of a launch slot
 # =========================================================================
-@inline _block_arg(x::PerBlockEq, b, c, N, off) = BlockOf(x.eq, b + off)
+@inline _block_arg(x::PerBlockEq{<:Any, Nothing}, b, c, N, off) = BlockOf(x.eq, b + off)
+@inline _block_arg(x::PerBlockEq, b, c, N, off) = BlockOf(x.eq, b + off, (@inbounds x.table[b + off]))
 # `foreach_block` once per pass of a split, with the pass in place of the scheme of the launch slot
 # `args[K] = PerSlot((interp, scratch), stride)` (see `_foreach_particle_paths`)
 function _foreach_block_paths(body::F, backend, N::Int, blocks::UnitRange{Int}, args::Tuple, ::Val{K}; kw...) where {F, K}
@@ -596,7 +613,7 @@ sources (a separately compiled flux pass).
 """
 struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTimeStepper{D, W, T},
                         EST <: Tuple{Vararg{BlockSourceTerm}}, IST <: Tuple{Vararg{BlockSourceTerm}},
-                        GW <: Growable{Space{D, T}}, GS <: Growable{State{W, T}}, GI <: Growable{Int}, GG} <: TimeStepper
+                        GW <: Growable{Space{D, T}}, GS <: Growable{State{W, T}}, GI <: Growable{Int}, GG, BT} <: TimeStepper
     pde::EQ
     inner::TS
     explicit_sources::EST
@@ -612,6 +629,7 @@ struct BlockTimeStepper{D, W, T, EQ <: HyperbolicPDE{D, W, T}, TS <: GeneralRKTi
     ghost_geom::Dict{Int, Any}      # the per-ghost geometry of the ghost fits per basis size (a `GhostFitScratch`)
     blocks::UnitRange{Int}          # the blocks the stepper runs (all of the equation, or the range of a part)
     ghost_lists::Dict{Any, Any}     # per boundary tag (or group of tags): its ghosts as a list of particle indices (`_tag_list!`)
+    block_table::BT                 # `block_data` of every block on the stepper's storage (`nothing`: the equation has none)
 end
 
 """
@@ -649,9 +667,20 @@ function BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, inner::GeneralRKTimeSteppe
     # `storage = Array` for a device stepper failed at the first launch: a host array as a kernel argument)
     explicit_sts = map(st -> _on_storage(st, AT.name.wrapper), explicit_sts)
     implicit_sts = map(st -> _on_storage(st, AT.name.wrapper), implicit_sts)
-    return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg)}(
+    bt = _block_table(eq, AT.name.wrapper)
+    return BlockTimeStepper{D, W, T, typeof(eq), typeof(inner), typeof(explicit_sts), typeof(implicit_sts), typeof(gw), typeof(gs), typeof(gi), typeof(gg), typeof(bt)}(
         eq, inner, explicit_sts, implicit_sts, gw, gs, gsw, Dict{Int, Any}(), blocks_per_launch, gi, gr, gg, Dict{Int, Any}(), blocks,
-        Dict{Any, Any}())
+        Dict{Any, Any}(), bt)
+end
+
+# `block_data` of every block of the equation as an array on the storage `AT` (indexed by the global block index), or
+# `nothing` when the equation has none
+function _block_table(eq::HyperbolicPDE, ::Type{AT}) where {AT}
+    data = [block_data(eq, b) for b in 1:num_blocks(eq)]
+    eltype(data) === Nothing && return nothing
+    isbitstype(eltype(data)) ||
+        throw(ArgumentError("block_data($(nameof(typeof(eq))), b) must give a bits value of one type for every block (or nothing), got $(eltype(data))"))
+    return adapt(AT, data)
 end
 
 # The blocks per launch from the keyword: `:auto` covers about 256 components per launch
@@ -1010,7 +1039,7 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
                 inner.work.changed, true)
         split ? _foreach_block_paths(_rhs_gather!, backend, N, blocks, args, Val(5); block_offset = off) :
                 foreach_block(_rhs_gather!, backend, N, blocks, args; block_offset = off)
-        args = (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
+        args = (PerBlockEq(eq, ts.block_table), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
                 inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
                 mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T}))
         split ? _foreach_block_paths(_rhs_flux!, backend, N, blocks, args, Val(10); block_offset = off, list = interior) :
