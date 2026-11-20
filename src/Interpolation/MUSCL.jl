@@ -487,7 +487,7 @@ Adapt.adapt_structure(to, p::_PathOf) = _with_interp(p, adapt(to, p.interp))
     _muscl_divergence(p.interp, _path(p), eq, i, f_i, nb_slice, pg, U, ib, strategy)
 @inline update_content!(p::_PathOf, i::Int, f_i, nb_slice, pg, U, ib) = _update_content!(p.interp, _path(p), i, f_i, nb_slice, pg, U, ib)
 @inline _conservative_ale(p::_PathOf) = _conservative_ale(p.interp)
-@inline _moving_frame(p::_PathOf, mover, eq, w, K_V, V) = _moving_frame(p.interp, mover, eq, w, K_V, V)
+# (`_moving_frame` asks the scheme only for `_conservative_ale`: a method for the passes was ambiguous with the Lagrangian movers')
 # the scheme with its slot's gradient cache in a launch over blocks (`_slot_view` of the scheme, `BlockStepper.jl`)
 @inline _slot_view(x::Tuple{<:_PathOf, <:AbstractVector}, off::Int, len::Int) = _with_interp(x[1], _slot_view((x[1].interp, x[2]), off, len))
 
