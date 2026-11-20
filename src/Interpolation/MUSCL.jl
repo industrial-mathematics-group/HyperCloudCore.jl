@@ -495,6 +495,17 @@ Adapt.adapt_structure(to, p::_PathOf) = _with_interp(p, adapt(to, p.interp))
 const _SPLIT_PATHS = Ref{Union{Nothing, Bool}}(nothing)
 _split_paths(::Any, backend) = false
 _split_paths(::MUSCL, backend) = something(_SPLIT_PATHS[], backend isa KABackend)
+# `foreach_particle(body, backend, N, args)` once per pass of a split, with the pass in place of the scheme `args[K]`
+# (the callers launch directly without a split: no closures and no extra call, which allocated in every step on a CPU)
+function _foreach_particle_paths(body::F, backend, N::Int, args::Tuple, ::Val{K}) where {F, K}
+    foreach_particle(body, backend, N, _replace_at(args, Val(K), _CommonPath(args[K])))
+    foreach_particle(body, backend, N, _replace_at(args, Val(K), _RarePath(args[K])))
+    return nothing
+end
+# `args` with `args[K] = x`
+@generated function _replace_at(args::Tuple, ::Val{K}, x) where {K}
+    return Expr(:tuple, (j == K ? :x : :(args[$j]) for j in 1:length(args.parameters))...)
+end
 
 # MUSCL adds the volume term of a `LagrangianFrame` to its pair fluxes (`ale_volume_term` in `_flux_loop`), so the
 # stepper gives it the conservative frame on Lagrangian grids (`_moving_frame`)

@@ -401,16 +401,12 @@ function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K
     prepare_geometry!(interp, pg)   # refreshes geometry caches only if the grid changed
 
     # (on a device the passes of MUSCL run split: the particles with the cached fit, then the others, see `_CommonPath`)
-    paths = _split_paths(interp, backend) ? (_CommonPath(interp), _RarePath(interp)) : (interp,)
-    foreach(paths) do ip
-        foreach_particle(_rhs_gather!, backend, N,
-            (Y, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, ip, pg, ts.work.changed, gather))
-    end
-    foreach(paths) do ip
-        foreach_particle(_rhs_flux!, backend, N,
-            (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, ip, ts.mood.strategy, mover, pg,
-             ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T})))   # (20 arguments)
-    end
+    split = _split_paths(interp, backend)
+    args = (Y, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, pg, ts.work.changed, gather)
+    split ? _foreach_particle_paths(_rhs_gather!, backend, N, args, Val(5)) : foreach_particle(_rhs_gather!, backend, N, args)
+    args = (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, mover, pg,
+            ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T}))   # (20 arguments)
+    split ? _foreach_particle_paths(_rhs_flux!, backend, N, args, Val(10)) : foreach_particle(_rhs_flux!, backend, N, args)
     return nothing
 end
 

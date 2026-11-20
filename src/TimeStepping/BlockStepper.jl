@@ -386,6 +386,15 @@ end
 # LAUNCHES OVER THE PAIRS (see `foreach_block`, Backend.jl): the block equation and the scratch of a launch slot
 # =========================================================================
 @inline _block_arg(x::PerBlockEq, b, c, N, off) = BlockOf(x.eq, b + off)
+# `foreach_block` once per pass of a split, with the pass in place of the scheme of the launch slot
+# `args[K] = PerSlot((interp, scratch), stride)` (see `_foreach_particle_paths`)
+function _foreach_block_paths(body::F, backend, N::Int, blocks::UnitRange{Int}, args::Tuple, ::Val{K}; kw...) where {F, K}
+    slot = args[K]
+    interp, scratch = slot.x
+    foreach_block(body, backend, N, blocks, _replace_at(args, Val(K), PerSlot((_CommonPath(interp), scratch), slot.stride)); kw...)
+    foreach_block(body, backend, N, blocks, _replace_at(args, Val(K), PerSlot((_RarePath(interp), scratch), slot.stride)); kw...)
+    return nothing
+end
 # The interaction buffer of a launch slot: the slots `off + 1 … off + len` (the neighbour slots of the grid, once per block
 # of the launch; `len == 0` when the scheme does not use them)
 @inline _slot_view(ib::InteractionBuffer{D, M, T}, off::Int, len::Int) where {D, M, T} =
@@ -995,20 +1004,17 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
         (PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i], moving, zero(State{W, T}), zero(Space{D, T}));
         list = _tag_list!(ts, pg, -1))
     # (on a device the passes of MUSCL run split: the particles with the cached fit, then the others, see `_CommonPath`)
-    paths = _split_paths(interp, backend) ? (_CommonPath(interp), _RarePath(interp)) : (interp,)
+    split = _split_paths(interp, backend)
     for blocks in _launch_chunks(ts, nb)
-        foreach(paths) do ip
-            foreach_block(_rhs_gather!, backend, N, blocks,
-                (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((ip, ts.grad_scratch), N), pg,
-                 inner.work.changed, true); block_offset = off)
-        end
-        foreach(paths) do ip
-            foreach_block(_rhs_flux!, backend, N, blocks,
-                (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
-                 inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((ip, ts.grad_scratch), N), inner.mood.strategy,
-                 mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T})); block_offset = off,
-                list = interior)
-        end
+        args = (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
+                inner.work.changed, true)
+        split ? _foreach_block_paths(_rhs_gather!, backend, N, blocks, args, Val(5); block_offset = off) :
+                foreach_block(_rhs_gather!, backend, N, blocks, args; block_offset = off)
+        args = (PerBlockEq(eq), PerBlock(inner.Y_stages[i]), PerBlock(inner.K_E_stages[i]), inner.K_X_stages[i], inner.K_V_stages[i],
+                inner.V_stages[i], isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), inner.mood.strategy,
+                mover, pg, inner.explicit_sources, inner.work.dirty, full, moving, t_i, zero(State{W, T}), zero(Space{D, T}))
+        split ? _foreach_block_paths(_rhs_flux!, backend, N, blocks, args, Val(10); block_offset = off, list = interior) :
+                foreach_block(_rhs_flux!, backend, N, blocks, args; block_offset = off, list = interior)
     end
     return nothing
 end
