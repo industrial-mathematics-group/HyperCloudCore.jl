@@ -844,6 +844,30 @@ end
         end
     end
 
+    @testset "Split passes of MUSCL (as on devices) reproduce the single pass: static, Lagrangian, scaled Lagrangian" begin
+        # `_SPLIT_PATHS[] = true` runs the pre-pass and the flux pass twice on the CPU, over the particles with the cached
+        # fit and over the others (MOOD lowers orders: both passes have particles), as a KA backend does
+        eqs = Burgers()
+        u0(x) = 0.5 + 0.5 * sin(π * x)
+        function split_run(mover, split)
+            HyperCloudCore._SPLIT_PATHS[] = split
+            try
+                pg = set_ic!(make_pg_1d(80; mover = mover, range = 3.5), u0)
+                interp = MUSCL(Float64, 1, 1, 3, VenkatakrishnanLimiter(:hard), RusanovFlux())
+                ts = GeneralRKTimeStepper(eqs, interp, MOOD(EPD1(), MOODu1(1e-6)), RK2_SSP_Tableau(Float64))
+                for k in 0:39; ts(eqs, pg, k * 0.01, 0.01); end                      # through the shock (t = 0.4)
+                return copy(view(pg.rhos, 1:pg.meta.N)), copy(view(pg.core.positions, 1:pg.meta.N)), any(mood_flags(ts))
+            finally
+                HyperCloudCore._SPLIT_PATHS[] = nothing
+            end
+        end
+        for mover in (NoGridMover(), LagrangianMover(), ScaledLagrangianMover(0.5))
+            r1, x1, _ = split_run(mover, false)
+            r2, x2, flagged = split_run(mover, true)
+            @test r1 == r2 && x1 == x2                                                  # bit for bit
+        end
+    end
+
     @testset "Lagrangian Burgers: the conservative frame keeps the mass through a shock" begin
         # A cloud moving with w = 0.2 u crosses the shock of 0.5 + 0.5 sin(πx) (shock speed 0.5; particles compress by
         # (0.5 − 0.2 u_R) / (0.5 − 0.2 u_L) ≈ 3). With the particle's frozen velocity (ALEFrame, −div F + w_i·∇u) a

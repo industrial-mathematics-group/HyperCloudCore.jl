@@ -77,6 +77,7 @@ end
 @inline function _update_phi(strategy, phi::State{M, T}, delta_recon::State{M, T}, f_i::State{M, T},
                              u_max::State{M, T}, u_min::State{M, T}) where {M, T}
     return State{M, T}(ntuple(Val(M)) do m
+        @inline
         recon_m = delta_recon[m]
         bound   = recon_m > zero(T) ? u_max[m] : u_min[m]
         tol_m   = 16 * eps(T) * max(abs(f_i[m]), abs(bound))
@@ -117,7 +118,7 @@ Applies the specified slope limiter strategy to the raw gradient of a target par
 - Returns a limited gradient vector where specific polynomial basis terms are scaled by the bounding coefficient `phi`.
 - Runs inside the MUSCL pre-gather kernel: all per-equation scratch is static (`SVector`), nothing is allocated.
 """
-function _limit_slopes(
+@inline function _limit_slopes(
     strategy::Union{BarthJespersenLimiter{Mode}, VenkatakrishnanLimiter{Mode}},
     raw_grad::SVector{B_LEN, State{M, T}},
     nb_slice::OrdinalRange{Int, Int},
@@ -141,6 +142,7 @@ end
                                      u_min::State{M, T}, distVec, ::Val{D}, ::Val{DEGREE}) where {B_LEN, M, T, D, DEGREE, Mode}
     phi_i = _bounding_phi(strategy, raw_grad, nb_slice, f_i, u_max, u_min, distVec, Val(DEGREE))
     return SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do k
+        @inline
         if Mode === :hard || k <= D
             raw_grad[k] .* phi_i
         else
@@ -202,6 +204,7 @@ function _limit_slopes(
     slope_R = iszero(dist_R) ? zero(State{M, T}) : (val_R - f_i) / dist_R
 
     phi_scale = State{M, T}(ntuple(Val(M)) do m
+        @inline
         sL = slope_L[m]
         sR = slope_R[m]
         orig_slope = raw_grad[1][m]
@@ -216,6 +219,7 @@ function _limit_slopes(
     end)
     
     limited_grad = SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do k
+        @inline
         if Mode === :hard || k <= 1 
             raw_grad[k] .* phi_scale
         else

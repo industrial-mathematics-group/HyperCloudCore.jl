@@ -23,6 +23,10 @@ bit for bit.
 
 [`BlockOf`](@ref)`(eq, b)` is block `b` as an ordinary PDE: `flux` and `max_eigenvalue` forward to the block
 functions with the block index as a run-time field, so a single compiled kernel serves every block.
+Constants a block's flux needs (the node velocities of a discrete-velocity block) can be given by
+[`block_data`](@ref)`(eq, b)`: the stepper tabulates them once, and the flux pass gets `BlockOf(eq, b, data)` and
+calls `block_flux(eq, U, b, data)` with them read from the table. On a GPU, computing them in the kernel with a
+run-time index into tables inside the equation copied the whole equation to local memory in every thread.
 
 ## The block state and the stepper
 
@@ -207,6 +211,7 @@ block_admissible
 block_velocity
 block_is_admissible
 block_nc_jump
+block_data
 block_fluid_velocity
 wall_reduction_type
 block_wall_reduce

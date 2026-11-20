@@ -160,10 +160,20 @@ end
     i, c = @index(Global, NTuple)
     body(i, c, args...)
 end
+# The slots along the fast dimension: the work-items of a warp are consecutive slots (blocks) of the same particle, so the
+# particle's data (its neighbour list, distances, weights, fit) is one broadcast load per warp instead of one load per
+# work-item, and the lanes of a warp loop over the same neighbours (with the particles along the warp they diverged)
+@kernel function _pairs_kernel_slots(body, args)
+    c, i = @index(Global, NTuple)
+    body(i, c, args...)
+end
+# (a launch asks for it, `slots_fastest = true`: measured on a V100 it is faster for the pre-pass of a streamed scheme
+# (orifice 185 -> 135 ms per step), slower for the flux pass (the warp's lanes no longer share their speeds) and for a
+# pre-pass that writes per-slot buffers (the writes are no longer coalesced))
 # (the grid's second dimension holds the slots: CUDA allows 65535 there; more slots run the linear launch)
 const _MAX_PAIR_SLOTS = 65535
 
-function foreach_pairs(body::F, backend::ExecutionBackend, N::Int, nc::Int, args::Tuple) where {F}
+function foreach_pairs(body::F, backend::ExecutionBackend, N::Int, nc::Int, args::Tuple; slots_fastest::Bool = false) where {F}
     (N == 0 || nc == 0) && return nothing
     return foreach_particle(_pairs_linear_body!, backend, N * nc, (N, body, args))
 end
@@ -171,13 +181,28 @@ end
     body((q - 1) % N + 1, (q - 1) ÷ N + 1, args...)
     return nothing
 end
-function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple) where {F}
+function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple; slots_fastest::Bool = false) where {F}
     (N == 0 || nc == 0) && return nothing
     nc > _MAX_PAIR_SLOTS && return foreach_particle(_pairs_linear_body!, b, N * nc, (N, body, args))
     kargs = kernel_view(args)
     check_resident(b.backend, kargs)
     key = (b.backend, b.workgroupsize, typeof(body), typeof(kargs), :pairs)
-    if _needs_tuned_workgroup(key)
+    wx = min(nc, 32)
+    wy = max(1, b.workgroupsize ÷ wx)
+    # (the particles then run along the grid's second dimension, 65535 groups on CUDA: more particles take the other layout)
+    if slots_fastest && nc > 1 && cld(N, wy) <= _MAX_PAIR_SLOTS
+        if _needs_tuned_workgroup(key)
+            _pairs_kernel_slots(b.backend)(body, kargs; ndrange = (nc, N))
+        else
+            try
+                _pairs_kernel_slots(b.backend, (wx, wy))(body, kargs; ndrange = (nc, N))
+            catch err
+                _is_workgroup_size_error(err) || rethrow()
+                _remember_tuned_workgroup!(key)
+                _pairs_kernel_slots(b.backend)(body, kargs; ndrange = (nc, N))
+            end
+        end
+    elseif _needs_tuned_workgroup(key)
         _pairs_kernel(b.backend)(body, kargs; ndrange = (N, nc))
     else
         try
@@ -253,15 +278,18 @@ block `b + block_offset`.
 
 `list = (indices, n)`: only the particles `indices[1:n]` (see `foreach_listed`), `n · length(blocks)`
 work-items.
+
+`slots_fastest = true`: on a device the blocks of one particle are consecutive work-items instead (the particle's
+neighbour data is a broadcast load per warp; see `foreach_pairs`); the results do not depend on the layout.
 """
 function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0,
-                       list = nothing) where {F}
+                       list = nothing, slots_fastest::Bool = false) where {F}
     (N == 0 || isempty(blocks)) && return nothing
     if list !== nothing                               # only the listed particles (`list = (indices, n)`)
         idx, n = list
-        return foreach_pairs(_listed_pairs_body!, backend, n, length(blocks), (idx, N, first(blocks), block_offset, body, args))
+        return foreach_pairs(_listed_pairs_body!, backend, n, length(blocks), (idx, N, first(blocks), block_offset, body, args); slots_fastest)
     end
-    return foreach_pairs(_block_pairs_body!, backend, N, length(blocks), (N, first(blocks), block_offset, body, args))
+    return foreach_pairs(_block_pairs_body!, backend, N, length(blocks), (N, first(blocks), block_offset, body, args); slots_fastest)
 end
 
 """
@@ -295,10 +323,12 @@ end
 struct PerBlock{A}
     a::A
 end
-"An equation argument of `foreach_block`: the body gets `BlockOf(eq, b)`."
-struct PerBlockEq{EQ}
+"An equation argument of `foreach_block`: the body gets `BlockOf(eq, b)`, or `BlockOf(eq, b, table[b])` with a table of the blocks' constants."
+struct PerBlockEq{EQ, B}
     eq::EQ
+    table::B
 end
+PerBlockEq(eq) = PerBlockEq(eq, nothing)
 "The block index as an argument of `foreach_block`."
 struct PerBlockIndex end
 "Scratch of one launch slot of `foreach_block`: the body gets `x` shifted by `(c − 1) stride`."
@@ -311,7 +341,7 @@ struct PerSlotEntry{A}
     a::A
 end
 Adapt.adapt_structure(to, x::PerBlock) = PerBlock(adapt(to, x.a))
-Adapt.adapt_structure(to, x::PerBlockEq) = PerBlockEq(adapt(to, x.eq))
+Adapt.adapt_structure(to, x::PerBlockEq) = PerBlockEq(adapt(to, x.eq), adapt(to, x.table))
 Adapt.adapt_structure(to, x::PerSlot) = PerSlot(adapt(to, x.x), x.stride)
 Adapt.adapt_structure(to, x::PerSlotEntry) = PerSlotEntry(adapt(to, x.a))
 

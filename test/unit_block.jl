@@ -121,6 +121,20 @@ end
 
 
 
+# The discrete transport with its block speeds as the blocks' constants (`block_data`): the flux pass reads them from the
+# stepper's table (`block_flux` with the data), the other passes compute them (`block_flux` without)
+struct TabulatedTransport{D, W, T, EQ <: DiscreteTransport{D, W, T}} <: HyperbolicPDE{D, W, T}
+    eq::EQ
+end
+TabulatedTransport(eq::DiscreteTransport{D, W, T}) where {D, W, T} = TabulatedTransport{D, W, T, typeof(eq)}(eq)
+HyperCloudCore.num_blocks(g::TabulatedTransport) = HyperCloudCore.num_blocks(g.eq)
+HyperCloudCore.block_data(g::TabulatedTransport{D, W, T}, b::Int) where {D, W, T} =
+    SVector{W, Space{D, T}}(ntuple(k -> g.eq.speeds[(b - 1) * W + k], Val(W)))
+@inline HyperCloudCore.block_flux(g::TabulatedTransport, U::State, b::Int) = HyperCloudCore.block_flux(g.eq, U, b)
+@inline HyperCloudCore.block_flux(g::TabulatedTransport{D, W, T}, U::State{W, T}, b::Int, v::SVector{W, Space{D, T}}) where {D, W, T} =
+    Flux{D, W, T}(ntuple(d -> State{W, T}(ntuple(k -> (@inbounds v[k][d]) * U[k], Val(W))), Val(D)))
+@inline HyperCloudCore.block_max_eigenvalue(g::TabulatedTransport, U::State, d::Int, b::Int) = HyperCloudCore.block_max_eigenvalue(g.eq, U, d, b)
+
 # A block equation with a cross-block admissibility: the mean over all components must stay above 1.5 (and the standard
 # form of it), for the PAD of MOOD on blocks
 struct GuardedTransport{D, W, T, EQ <: DiscreteTransport{D, W, T}} <: HyperbolicPDE{D, W, T}
@@ -424,6 +438,47 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         err = sum(abs(block_view(bs, b)[i][k] - ic(x - transport_speed(eq_b, 2(b - 1) + k) * t, 2(b - 1) + k))
                   for b in 1:2, (i, x) in enumerate(view(pg_b.core.positions, 1:pg_b.meta.N)), k in 1:2) / (4 * pg_b.meta.N)
         @test err < 0.05                     # (a coarse 16² grid and a limiter clipping the extrema: the convergence check is the 1-D one)
+    end
+
+    @testset "Tabulated block constants (block_data): the flux pass reads the stepper's table" begin
+        speeds = [(1.0, 0.5), (-0.5, 1.0), (0.3, -0.7), (-1.0, -0.25)]
+        eq_p = DiscreteTransport(Val(2), speeds)
+        eq_t = TabulatedTransport(eq_p)
+        @test block_data(eq_p, 1) === nothing
+        U = State{2, Float64}(1.5, -0.5)
+        @test flux(BlockOf(eq_t, 2, block_data(eq_t, 2)), U) == flux(BlockOf(eq_t, 2), U) == HyperCloudCore.block_flux(eq_p, U, 2)
+        @test HyperCloudCore._block_arg(HyperCloudCore.PerBlockEq(eq_t, [block_data(eq_t, b) for b in 1:2]), 1, 1, 10, 1).data == block_data(eq_t, 2)
+        ic(x, k) = 1 + 0.2 * sin(2π * (x[1] + 0.5 * x[2]) + 0.3k)
+        function run(eq, backend; streamed = false)
+            set_backend!(backend)
+            try
+                pg = block_pg_2d(16, 2)
+                bs = BlockState(eq, pg)
+                set_block_states!((x, b) -> State{2, Float64}(ic(x, 2b - 1), ic(x, 2b)), bs, pg)
+                interp = MUSCL(Float64, 2, 2, 2, VenkatakrishnanLimiter(:hard), RusanovFlux(); streamed)
+                ts = BlockTimeStepper(eq, interp, RK2_SSP_Tableau(Float64))
+                advance!((t, d) -> ts(eq, pg, bs, t, d), 0.05, 0.3 / 16 / 2)
+                return ts, bs
+            finally
+                set_backend!(PolyesterBackend())
+            end
+        end
+        ts_p, bs_p = run(eq_p, PolyesterBackend())
+        ts_t, bs_t = run(eq_t, PolyesterBackend())
+        @test ts_p.block_table === nothing
+        @test ts_t.block_table == [block_data(eq_t, b) for b in 1:2]
+        n = bs_p.nb * bs_p.N[]
+        @test parent(bs_t.data)[1:n] == parent(bs_p.data)[1:n]                # bit for bit
+        # the KernelAbstractions CPU backend: the table as a kernel argument, the split passes of MUSCL
+        _, bs_k = run(eq_t, KABackend(HyperCloudCore.KA.CPU()))
+        @test maximum(maximum(abs.(parent(bs_k.data)[j] - parent(bs_p.data)[j])) for j in 1:n) < 1e-12
+        # streamed: the pre-pass with the blocks of a particle along the warp (`slots_fastest`), the same numbers either way
+        _, bs_ps = run(eq_t, PolyesterBackend(); streamed = true)
+        _, bs_ks = run(eq_t, KABackend(HyperCloudCore.KA.CPU()); streamed = true)
+        HyperCloudCore._SLOTS_GATHER[] = false
+        _, bs_kp = try run(eq_t, KABackend(HyperCloudCore.KA.CPU()); streamed = true) finally HyperCloudCore._SLOTS_GATHER[] = true end
+        @test maximum(maximum(abs.(parent(bs_ks.data)[j] - parent(bs_ps.data)[j])) for j in 1:n) < 1e-12
+        @test parent(bs_ks.data)[1:n] == parent(bs_kp.data)[1:n]                # the layout changes nothing
     end
 
     @testset "Boundary conditions per block (inflow Dirichlet, outflow) and the KernelAbstractions CPU backend" begin

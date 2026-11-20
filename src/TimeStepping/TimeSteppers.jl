@@ -400,11 +400,13 @@ function compute_explicit_rhs!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, K_E, K
 
     prepare_geometry!(interp, pg)   # refreshes geometry caches only if the grid changed
 
-    foreach_particle(_rhs_gather!, backend, N,
-        (Y, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, pg, ts.work.changed, gather))
-    foreach_particle(_rhs_flux!, backend, N,
-        (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, mover, pg,
-         ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T})))   # (20 arguments)
+    # (on a device the passes of MUSCL run split: the particles with the cached fit, then the others, see `_CommonPath`)
+    split = _split_paths(interp, backend)
+    args = (Y, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, pg, ts.work.changed, gather)
+    split ? _foreach_particle_paths(_rhs_gather!, backend, N, args, Val(5)) : foreach_particle(_rhs_gather!, backend, N, args)
+    args = (eq, Y, K_E, K_X, K_V, V_k, pg.core.is_boundary, pg.neighbor.ranges, ts.int_buffer, interp, ts.mood.strategy, mover, pg,
+            ts.explicit_sources, ts.work.dirty, full, moving, t, zero(State{M, T}), zero(Space{D, T}))   # (20 arguments)
+    split ? _foreach_particle_paths(_rhs_flux!, backend, N, args, Val(10)) : foreach_particle(_rhs_flux!, backend, N, args)
     return nothing
 end
 
@@ -433,6 +435,7 @@ end
     end
     (full || flux_mask[p]) || return nothing
     fi = Y[p]; nb = nb_slices[p]
+    _in_pass(interp, p, nb, pg) || return nothing   # (a split pass: the particle is the other pass's, see `_CommonPath`)
     if moving
         w      = grid_velocity(mover, eq, p, fi, pg, t)
         K_X[p] = w
@@ -441,6 +444,7 @@ end
     else
         div_F  = interp(eq, p, fi, nb, pg, Y, ib, strategy)
     end
+    div_F === nothing && return nothing             # (cannot happen after `_in_pass`; keeps the type of `div_F` a state)
     K_E[p] = -div_F + evaluate_sources(sources, fi, p, pg, t)
     return nothing
 end
