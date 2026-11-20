@@ -7,7 +7,7 @@ authors:
     orcid: https://orcid.org/0009-0000-1223-4611
 title: "HyperCloudCore.jl: High-performance, physics-agnostic meshless solver backend for hyperbolic PDEs"
 version: 0.9.8
-date-released: 2026-11-19
+date-released: 2026-11-20
 url: "https://github.com/industrial-mathematics-group/HyperCloudCore.jl"
 identifiers:
   - type: doi
