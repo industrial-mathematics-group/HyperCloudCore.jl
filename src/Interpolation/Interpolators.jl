@@ -374,6 +374,7 @@ end
 # component): the divergence of every equation.
 @inline function _divergence_from_rows(R::SMatrix{D, DM, T}, invL::T, ::Val{D}, ::Val{M}) where {D, DM, T, M}
     return State{M, T}(ntuple(Val(M)) do m
+        @inline
         acc = zero(T)
         for d in 1:D
             acc += R[d, (d - 1) * M + m]
@@ -431,7 +432,8 @@ end
     scales = build_scale_factors(Val(D), Val(IO), invL)
     
     return SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do k
-        row_val = State{M, T}(ntuple(m -> c_s[k, m], Val(M)))
+        @inline
+        row_val = State{M, T}(ntuple(@inline(m -> c_s[k, m]), Val(M)))
         row_val * scales[k]
     end)
 end
@@ -474,7 +476,8 @@ end
     scales = build_scale_factors(Val(D), Val(IO), invL)
     
     return SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do k
-        row_val = State{M, T}(ntuple(m -> c_s[k, m], Val(M)))
+        @inline
+        row_val = State{M, T}(ntuple(@inline(m -> c_s[k, m]), Val(M)))
         row_val * scales[k]
     end)
 end
@@ -653,7 +656,8 @@ end
 # Rows of the coefficient matrix as States, scaled to physical derivatives (as in `_mls_solve`).
 @inline function _scaled_rows(c_s::SMatrix{B_LEN, M, T}, scales::SVector{B_LEN, T}) where {B_LEN, M, T}
     return SVector{B_LEN, State{M, T}}(ntuple(Val(B_LEN)) do b
-        State{M, T}(ntuple(m -> c_s[b, m], Val(M))) * scales[b]
+        @inline
+        State{M, T}(ntuple(@inline(m -> c_s[b, m]), Val(M))) * scales[b]
     end)
 end
 
