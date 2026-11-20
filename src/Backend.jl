@@ -160,6 +160,15 @@ end
     i, c = @index(Global, NTuple)
     body(i, c, args...)
 end
+# The slots along the fast dimension: the work-items of a warp are consecutive slots (blocks) of the same particle, so the
+# particle's data (its neighbour list, distances, weights, fit) is one broadcast load per warp instead of one load per
+# work-item, and the lanes of a warp loop over the same neighbours (with the particles along the warp they diverged)
+@kernel function _pairs_kernel_slots(body, args)
+    c, i = @index(Global, NTuple)
+    body(i, c, args...)
+end
+# Which of the two layouts the device launches use (an experiment switch; `true`: slots along the warp)
+const _SLOTS_FASTEST = Ref(false)
 # (the grid's second dimension holds the slots: CUDA allows 65535 there; more slots run the linear launch)
 const _MAX_PAIR_SLOTS = 65535
 
@@ -177,7 +186,21 @@ function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple) wher
     kargs = kernel_view(args)
     check_resident(b.backend, kargs)
     key = (b.backend, b.workgroupsize, typeof(body), typeof(kargs), :pairs)
-    if _needs_tuned_workgroup(key)
+    if _SLOTS_FASTEST[] && nc > 1
+        wx = min(nc, 32)
+        wy = max(1, b.workgroupsize ÷ wx)
+        if _needs_tuned_workgroup(key)
+            _pairs_kernel_slots(b.backend)(body, kargs; ndrange = (nc, N))
+        else
+            try
+                _pairs_kernel_slots(b.backend, (wx, wy))(body, kargs; ndrange = (nc, N))
+            catch err
+                _is_workgroup_size_error(err) || rethrow()
+                _remember_tuned_workgroup!(key)
+                _pairs_kernel_slots(b.backend)(body, kargs; ndrange = (nc, N))
+            end
+        end
+    elseif _needs_tuned_workgroup(key)
         _pairs_kernel(b.backend)(body, kargs; ndrange = (N, nc))
     else
         try
