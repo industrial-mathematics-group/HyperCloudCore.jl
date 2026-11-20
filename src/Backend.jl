@@ -167,9 +167,9 @@ end
     c, i = @index(Global, NTuple)
     body(i, c, args...)
 end
-# Which of the two layouts the device launches use (an experiment switch; `true`: slots along the warp); a launch can ask
-# for the slots along the warp itself (`slots_fastest`)
-const _SLOTS_FASTEST = Ref(false)
+# (a launch asks for it, `slots_fastest = true`: measured on a V100 it is faster for the pre-pass of a streamed scheme
+# (orifice 185 -> 135 ms per step), slower for the flux pass (the warp's lanes no longer share their speeds) and for a
+# pre-pass that writes per-slot buffers (the writes are no longer coalesced))
 # (the grid's second dimension holds the slots: CUDA allows 65535 there; more slots run the linear launch)
 const _MAX_PAIR_SLOTS = 65535
 
@@ -187,9 +187,10 @@ function foreach_pairs(body::F, b::KABackend, N::Int, nc::Int, args::Tuple; slot
     kargs = kernel_view(args)
     check_resident(b.backend, kargs)
     key = (b.backend, b.workgroupsize, typeof(body), typeof(kargs), :pairs)
-    if (slots_fastest || _SLOTS_FASTEST[]) && nc > 1
-        wx = min(nc, 32)
-        wy = max(1, b.workgroupsize ÷ wx)
+    wx = min(nc, 32)
+    wy = max(1, b.workgroupsize ÷ wx)
+    # (the particles then run along the grid's second dimension, 65535 groups on CUDA: more particles take the other layout)
+    if slots_fastest && nc > 1 && cld(N, wy) <= _MAX_PAIR_SLOTS
         if _needs_tuned_workgroup(key)
             _pairs_kernel_slots(b.backend)(body, kargs; ndrange = (nc, N))
         else
@@ -277,6 +278,9 @@ block `b + block_offset`.
 
 `list = (indices, n)`: only the particles `indices[1:n]` (see `foreach_listed`), `n · length(blocks)`
 work-items.
+
+`slots_fastest = true`: on a device the blocks of one particle are consecutive work-items instead (the particle's
+neighbour data is a broadcast load per warp; see `foreach_pairs`); the results do not depend on the layout.
 """
 function foreach_block(body::F, backend::ExecutionBackend, N::Int, blocks::UnitRange{Int}, args::Tuple; block_offset::Int = 0,
                        list = nothing, slots_fastest::Bool = false) where {F}

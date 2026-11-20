@@ -735,7 +735,8 @@ function _tag_list!(ts::BlockTimeStepper, pg::ParticleGrid, tag::Union{Int, Tupl
     ts.ghost_lists[tag] = (v, g, n, N)
     return (g, n)
 end
-const _SLOTS_GATHER = Ref(false)
+# The slot-fastest layout for the pre-pass of a streamed scheme (`_launch_flux!`; a switch for tests and benchmarks)
+const _SLOTS_GATHER = Ref(true)
 # The slot stride of the interaction buffer in a launch (0: the scheme does not use it)
 _slot_stride(inner::GeneralRKTimeStepper, pg) = uses_slot_buffers(inner.divergence_interpolator) ? length(pg.neighbor.indices) : 0
 BlockTimeStepper(eq::HyperbolicPDE{D, W, T}, div_interp::DivergenceInterpolator, sources::Tuple{Vararg{BlockSourceTerm}},
@@ -1038,7 +1039,7 @@ function _launch_flux!(ts::BlockTimeStepper{D, W, T}, eq, pg, i::Int, t_i, full:
     for blocks in _launch_chunks(ts, nb)
         args = (PerBlock(inner.Y_stages[i]), isb, pg.neighbor.ranges, PerSlot(inner.int_buffer, stride), PerSlot((interp, ts.grad_scratch), N), pg,
                 inner.work.changed, true)
-        # (`_SLOTS_GATHER`: the pre-pass of a scheme without per-slot buffers with the slots along the warp, an experiment)
+        # (the pre-pass of a scheme without per-slot buffers with the blocks of a particle along the warp, see `foreach_pairs`)
         sf = _SLOTS_GATHER[] && stride == 0
         split ? _foreach_block_paths(_rhs_gather!, backend, N, blocks, args, Val(5); block_offset = off, slots_fastest = sf) :
                 foreach_block(_rhs_gather!, backend, N, blocks, args; block_offset = off, slots_fastest = sf)

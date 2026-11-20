@@ -449,13 +449,13 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         @test flux(BlockOf(eq_t, 2, block_data(eq_t, 2)), U) == flux(BlockOf(eq_t, 2), U) == HyperCloudCore.block_flux(eq_p, U, 2)
         @test HyperCloudCore._block_arg(HyperCloudCore.PerBlockEq(eq_t, [block_data(eq_t, b) for b in 1:2]), 1, 1, 10, 1).data == block_data(eq_t, 2)
         ic(x, k) = 1 + 0.2 * sin(2π * (x[1] + 0.5 * x[2]) + 0.3k)
-        function run(eq, backend)
+        function run(eq, backend; streamed = false)
             set_backend!(backend)
             try
                 pg = block_pg_2d(16, 2)
                 bs = BlockState(eq, pg)
                 set_block_states!((x, b) -> State{2, Float64}(ic(x, 2b - 1), ic(x, 2b)), bs, pg)
-                interp = MUSCL(Float64, 2, 2, 2, VenkatakrishnanLimiter(:hard), RusanovFlux())
+                interp = MUSCL(Float64, 2, 2, 2, VenkatakrishnanLimiter(:hard), RusanovFlux(); streamed)
                 ts = BlockTimeStepper(eq, interp, RK2_SSP_Tableau(Float64))
                 advance!((t, d) -> ts(eq, pg, bs, t, d), 0.05, 0.3 / 16 / 2)
                 return ts, bs
@@ -472,6 +472,13 @@ HyperCloudCore.foreach_particle(body, ::CountingBackend, N::Int, args::Tuple) = 
         # the KernelAbstractions CPU backend: the table as a kernel argument, the split passes of MUSCL
         _, bs_k = run(eq_t, KABackend(HyperCloudCore.KA.CPU()))
         @test maximum(maximum(abs.(parent(bs_k.data)[j] - parent(bs_p.data)[j])) for j in 1:n) < 1e-12
+        # streamed: the pre-pass with the blocks of a particle along the warp (`slots_fastest`), the same numbers either way
+        _, bs_ps = run(eq_t, PolyesterBackend(); streamed = true)
+        _, bs_ks = run(eq_t, KABackend(HyperCloudCore.KA.CPU()); streamed = true)
+        HyperCloudCore._SLOTS_GATHER[] = false
+        _, bs_kp = try run(eq_t, KABackend(HyperCloudCore.KA.CPU()); streamed = true) finally HyperCloudCore._SLOTS_GATHER[] = true end
+        @test maximum(maximum(abs.(parent(bs_ks.data)[j] - parent(bs_ps.data)[j])) for j in 1:n) < 1e-12
+        @test parent(bs_ks.data)[1:n] == parent(bs_kp.data)[1:n]                # the layout changes nothing
     end
 
     @testset "Boundary conditions per block (inflow Dirichlet, outflow) and the KernelAbstractions CPU backend" begin
