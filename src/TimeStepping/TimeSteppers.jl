@@ -470,7 +470,8 @@ function form_candidate!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt::
     # stage can be formed for any state array)
     foreach_particle(_stage_predictor!, backend, N,
         (target, (x_target, v_target), ts.rho_n, (ts.x_n, ts.v_n), ts.K_E_stages, ts.K_I_stages, (ts.K_X_stages, ts.K_V_stages, ts.V_stages),
-         ts.rho_n, pg.core.is_boundary, bt, i, n_prev, is_final, dt, moving, _content_form(ts, pg), zero(T), zero(Space{D, T})))
+         ts.rho_n, pg.core.is_boundary, _stage_coefficients(bt, i, n_prev, is_final, Val(length(ts.K_E_stages))), dt, moving, _content_form(ts, pg), zero(T),
+         zero(Space{D, T})))
 
     if !is_final
         pre_solve_updates!(ts.implicit_sources, parent(target), pg, t_i)
@@ -494,8 +495,17 @@ end
 # stage state is (V_n U_n + Δt Σ a_j V_j K_j) / V_i with the stage volumes V_j of the earlier stages and V_i of this one,
 # so that Σ V U is conserved exactly up to the pair defect of the fluxes (the point-value form, U with the volume term
 # −U div w and V evolved beside it, left a product-rule error of the two RK sequences at steep fronts).
-@inline function _stage_predictor!(p, target, xv_target, U_n, xv_n, K_E, K_I, K_XVV, rhos, is_boundary, bt, i, n_prev,
-                                   is_final, dt, moving, content, zero_T, zero_space)
+# The coefficients of stage `i` (the final combination for `is_final`) of the explicit and the implicit part, one per
+# stage, zero beyond the `n_prev` stages that enter: built on the host, so that the kernel indexes neither the tableau
+# nor the tuples of stage arrays with a run-time stage number (a run-time index into a tuple keeps it in local memory: the
+# predictor had a 1.7 KB stack per work-item and ran an order of magnitude below the memory bandwidth on a GPU)
+function _stage_coefficients(bt::IMEXButcherTableau{T}, i::Int, n_prev::Int, is_final::Bool, ::Val{S}) where {T, S}
+    return (ntuple(j -> j <= n_prev ? (is_final ? bt.b_t[j] : bt.a_t[i, j]) : zero(T), Val(S)),
+            ntuple(j -> j <= n_prev ? (is_final ? bt.b[j] : bt.a[i, j]) : zero(T), Val(S)))
+end
+
+@inline function _stage_predictor!(p, target, xv_target, U_n, xv_n, K_E, K_I, K_XVV, rhos, is_boundary, coef, dt, moving, content,
+                                   zero_T, zero_space)
     x_target, v_target = xv_target          # positions and volumes move together (packed: 20 arguments at most)
     x_n, v_n = xv_n
     K_X, K_V, V_st = K_XVV
@@ -507,20 +517,27 @@ end
     X = moving ? x_n[p] : zero_space
     V = moving ? v_n[p] : zero_T
     Y = content ? V * U_n[p] : U_n[p]       # the content, or the point value
-    for j in 1:n_prev
-        a_t = is_final ? bt.b_t[j] : bt.a_t[i, j]
-        a   = is_final ? bt.b[j]   : bt.a[i, j]
-        Vj  = content ? (@inbounds V_st[j][p]) : one(zero_T)
-        if a_t != zero_T
-            Y += (dt * a_t * Vj) * K_E[j][p]
-            moving && (X += (dt * a_t) * K_X[j][p]; V += (dt * a_t) * K_V[j][p])
-        end
-        a != zero_T && (Y += (dt * a * Vj) * K_I[j][p])
-    end
+    Y, X, V = _stage_sum(Y, X, V, p, coef[1], coef[2], K_E, K_I, K_X, K_V, V_st, dt, moving, content, zero_T)
     target[p] = content ? Y / V : Y
     moving && (x_target[p] = X; v_target[p] = V)
     return nothing
 end
+# The stage terms of `_stage_predictor!`, stage by stage through the tuples (static positions: `first`/`tail`), in the
+# order of the stages; a zero coefficient adds nothing
+@inline _stage_sum(Y, X, V, p, ::Tuple{}, ::Tuple{}, K_E, K_I, K_X, K_V, V_st, dt, moving, content, zero_T) = (Y, X, V)
+@inline function _stage_sum(Y, X, V, p, ats::Tuple, as::Tuple, K_E, K_I, K_X, K_V, V_st, dt, moving, content, zero_T)
+    a_t, a = first(ats), first(as)
+    Vj = content ? (@inbounds first(V_st)[p]) : one(zero_T)
+    if a_t != zero_T
+        Y += (dt * a_t * Vj) * (@inbounds first(K_E)[p])
+        moving && (X += (dt * a_t) * (@inbounds first(K_X)[p]); V += (dt * a_t) * (@inbounds first(K_V)[p]))
+    end
+    a != zero_T && (Y += (dt * a * Vj) * (@inbounds first(K_I)[p]))
+    return _stage_sum(Y, X, V, p, Base.tail(ats), Base.tail(as), _tail(K_E), _tail(K_I), _tail(K_X), _tail(K_V), _tail(V_st), dt,
+                      moving, content, zero_T)
+end
+@inline _tail(t::Tuple) = Base.tail(t)
+@inline _tail(::Tuple{}) = ()
 
 # The stepper runs in content form on a moving interior cloud whose frame tracks the volume rate (the Lagrangian movers
 # with the MUSCL scheme); the volumes are remapped at the end of the step as well (`_content_remap!`)

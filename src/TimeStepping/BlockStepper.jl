@@ -1147,8 +1147,8 @@ function _launch_predictor!(ts::BlockTimeStepper{D, W, T}, pg, N::Int, nb::Int, 
     v_target = is_final ? inner.v_cand : inner.V_stages[i]
     foreach_block(_stage_predictor!, get_backend(), N, 1:nb,
         (PerBlock(target), (x_target, v_target), U_n, (inner.x_n, inner.v_n), map(PerBlock, inner.K_E_stages), map(PerBlock, inner.K_I_stages),
-         (inner.K_X_stages, inner.K_V_stages, inner.V_stages), U_n, pg.core.is_boundary, inner.tableau, i, is_final ? s : i - 1, is_final,
-         dt, moving, false, zero(T), zero(Space{D, T})))
+         (inner.K_X_stages, inner.K_V_stages, inner.V_stages), U_n, pg.core.is_boundary,
+         _stage_coefficients(inner.tableau, i, is_final ? s : i - 1, is_final, Val(length(inner.K_E_stages))), dt, moving, false, zero(T), zero(Space{D, T})))
     return nothing
 end
 
