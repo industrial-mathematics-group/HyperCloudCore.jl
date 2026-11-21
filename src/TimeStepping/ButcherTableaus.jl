@@ -18,7 +18,8 @@ For an explicit tableau with a positive SSP coefficient ([`ssp_coefficient`](@re
 `RK2_Ralston` (`C = 1/2`), `RK3_SSP`, `RK4_SSP`) the time stepper checks the forward Euler substeps of the
 canonical Shu–Osher form, of which every stage is a convex combination; that is rigorous for any SSP method.
 For the others (`RK4_Classical` and every IMEX tableau, also those with an SSP explicit part: `ssp_coefficient` is
-0 for any tableau with an implicit part) it checks the stage candidates, which has no theoretical backing.
+0 for any tableau with an implicit part) it checks the stage candidates against the state of the step start, which
+has no theoretical backing.
 """
 struct IMEXButcherTableau{T, MA <: AbstractMatrix{T}, VA <: AbstractVector{T}}
     a::MA

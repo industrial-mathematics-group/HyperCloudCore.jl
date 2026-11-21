@@ -1112,6 +1112,7 @@ function _launch_flag_pass!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub::Bool
     backend = get_backend()
     isb     = pg.core.is_boundary
     Y_prev  = inner.Y_stages[i - 1]
+    ref     = cand_sub ? Y_prev : inner.rho_n         # the reference of the checks (`_mood_reference`)
     cand    = _block_candidate(ts, i, cand_sub)
     off     = _block_offset(ts)
     # MOODu2 reads the scheme's gradient cache (its curvature test), which holds another block's gradients: the block's
@@ -1125,8 +1126,8 @@ function _launch_flag_pass!(ts::BlockTimeStepper, eq, pg, i::Int, cand_sub::Bool
         # (the scheme with the slot's gradient cache only when the pass reads it: the launch over all blocks at once would
         # otherwise view the scratch beyond its `blocks_per_launch` slots, which a bounds-checked run refuses)
         foreach_block(_mood_flag!, backend, N, blocks,
-            (inner.mood, regather ? PerSlot((interp, ts.grad_scratch), N) : interp, pg, PerBlock(Y_prev), PerBlock(cand), pg.neighbor.ranges, isb,
-             parent(work.dirty), parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, Y_prev, blocks, N)); block_offset = off)
+            (inner.mood, regather ? PerSlot((interp, ts.grad_scratch), N) : interp, pg, PerBlock(ref), PerBlock(cand), pg.neighbor.ranges, isb,
+             parent(work.dirty), parent(work.triggered), full, PerBlockEq(eq), _block_global_ranges!(ts, crit, ref, blocks, N)); block_offset = off)
     end
     return nothing
 end
