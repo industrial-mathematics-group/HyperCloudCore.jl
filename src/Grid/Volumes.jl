@@ -162,6 +162,7 @@ function _collect_near!(pg::ParticleGrid{D, M, T}, y::Space{D, T}, R_sq::T,
     is_per = pg.domain.is_periodic
     dims   = bins.coarse_dims
     r      = sqrt(R_sq)
+    all(isfinite, y) || return 0                      # (a blown-up position has no neighbours; its bin range would throw)
 
     ranges = ntuple(Val(D)) do d
         lo = floor(Int, (y[d] - r - bins.mins[d]) / bins.coarse_size[d]) + 1

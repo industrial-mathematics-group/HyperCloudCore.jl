@@ -121,13 +121,14 @@ not `NoGridMover`, particle positions are integrated as additional stage variabl
 Orders start at the interpolator's maximum consistency order. For each stage `i`:
 1. Form the stage state `Y_i` (explicit predictor, implicit diagonal solve, `K_I[i]`, BCs) and,
    when moving, the stage positions `X_i`.
-2. For `i > 1`, run the **stage-wise MOOD fixed point** against `Y_{i-1}` at geometry `X_{i-1}`:
+2. For `i > 1`, run the **stage-wise MOOD fixed point** at geometry `X_{i-1}` (the reference: `Y_{i-1}` for the
+   substeps of an SSP tableau, else `Uⁿ`, see below):
    flagged particles drop an order, only the affected part of `K_E[i-1]` (set `C ⊕ _order_reach`)
    is recomputed, `Y_i` is re-formed, until nothing is flagged.
 3. Switch the grid geometry to `X_i`, then compute `K_E[i]` (and `K_X[i] = w`) for all interior
    particles.
-The final combination is checked the same way against `Y_s`; the final positions are written back
-and a full neighbour search is run.
+The final combination is checked the same way; the final positions are written back and a full
+neighbour search is run.
 
 What MOOD checks at checkpoint `i`: for an explicit SSP tableau (SSP coefficient `C > 0`, see
 `ssp_coefficient`) the forward Euler substep `W_{i-1} = Y_{i-1} + (Δt/C) K_E[i-1]` of the canonical
@@ -135,8 +136,14 @@ Shu–Osher form, in which every stage and the final update are convex combinati
 substeps. A checked (DMP, PAD) substep of every stage therefore makes every stage and the result a
 convex combination of checked states, for any SSP method; checking `Y_i` instead only does so when
 every substep enters a single stage (Euler, SSP-RK2, SSP-RK3), not for SSPRK(5,4), whose final update
-reuses the substeps of stages 2 and 4. For other tableaus (`C = 0`, IMEX) the candidate `Y_i` itself
-is checked (no theoretical backing). `mood_substeps = false` restores that everywhere.
+reuses the substeps of stages 2 and 4; the reference of a substep check is `Y_{i-1}`, the state the
+substep starts from. For other tableaus (`C = 0`, IMEX) the candidate `Y_i` itself is checked (no
+theoretical backing), against the state of the step start `Uⁿ`: the stage times of such a tableau need
+not increase (ARS(2,3,3): `c = (0, γ, 1 − γ)`), and against `Y_{i-1}` the third stage, at `0.21 Δt`, was
+checked against the bounds of the second, at `0.79 Δt`, which flagged a large part of a Lagrangian cloud
+in every step (the particle adaptivity then found no particle outside the excluded bands). The
+curvature test of `MOODu2` uses the scheme's cached gradients, those of `Y_{i-1}`. `mood_substeps =
+false` checks the stage candidates everywhere.
 
 # Keyword options
 - `reset_orders_per_stage = false`: restore the maximum order before each stage's full RHS pass.
@@ -596,12 +603,13 @@ function mood_checkpoint!(ts::GeneralRKTimeStepper{D, M, T}, eq, pg, i::Int, dt:
     Y_prev = ts.Y_stages[i - 1]
     t_prev = time + ts.tableau.c_t[i - 1] * dt
     reach  = _order_reach(interp, ts.mood.strategy)
+    ref    = _mood_reference(ts, Y_prev)
 
     full = true
     while true
         target, _ = form_candidate!(ts, eq, pg, i, dt, time)
         cand = _checks_substeps(ts) ? form_substep!(ts, pg, i, dt) : target
-        if !detect_and_drop!(ts.mood, work, interp, pg, Y_prev, cand, full; eq = eq)
+        if !detect_and_drop!(ts.mood, work, interp, pg, ref, cand, full; eq = eq)
             # Accepted. Flagged particles at order 1 were un-flagged by the decrement: count those still inadmissible.
             ts.mood.criterion isa NoMOOD || (work.inadmissible[] += _count_inadmissible(eq, pg, cand, parent(work.scratch)))
             return nothing
@@ -629,6 +637,9 @@ end
 
 # MOOD checks the Euler substeps (an SSP tableau, a criterion that flags anything)
 @inline _checks_substeps(ts::GeneralRKTimeStepper) = ts.substep_ratio > zero(ts.substep_ratio) && !(ts.mood.criterion isa NoMOOD)
+# The reference of a MOOD check (the bounds of the DMP, the ranges of the plateau test): the state an Euler substep starts
+# from, `Y_{i-1}`, or else the state of the step start `Uⁿ` (see the stepper's docstring)
+@inline _mood_reference(ts::GeneralRKTimeStepper, Y_prev) = _checks_substeps(ts) ? Y_prev : ts.rho_n
 
 """
     form_substep!(ts, pg, i, dt) -> rho_sub

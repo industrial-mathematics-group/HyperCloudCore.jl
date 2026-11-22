@@ -84,21 +84,28 @@ end
 Converts 1D, 2D, or 3D physical coordinates into a flattened, 1D array index corresponding to a specific spatial coarse bin.
 """
 @inline function get_flat_bin_index(pos::Space{1, T}, mins::Space{1, T}, bin_size::Space{1, T}, dims::NTuple{1, Int}) where {T}
-    idx = floor(Int, (pos[1] - mins[1]) / bin_size[1]) + 1
-    return clamp(idx, 1, dims[1])
+    return _bin_coordinate(pos[1], mins[1], bin_size[1], dims[1])
 end
 
 @inline function get_flat_bin_index(pos::Space{2, T}, mins::Space{2, T}, bin_size::Space{2, T}, dims::NTuple{2, Int}) where {T}
-    idx_x = floor(Int, (pos[1] - mins[1]) / bin_size[1]) + 1
-    idx_y = floor(Int, (pos[2] - mins[2]) / bin_size[2]) + 1
-    return clamp(idx_x, 1, dims[1]) + (clamp(idx_y, 1, dims[2]) - 1) * dims[1]
+    return _bin_coordinate(pos[1], mins[1], bin_size[1], dims[1]) + (_bin_coordinate(pos[2], mins[2], bin_size[2], dims[2]) - 1) * dims[1]
 end
 
 @inline function get_flat_bin_index(pos::Space{D, T}, mins::Space{D, T}, bin_size::Space{D, T}, dims::NTuple{D, Int}) where {D, T}
     cartesian = ntuple(Val(D)) do d
-        clamp(floor(Int, (pos[d] - mins[d]) / bin_size[d]) + 1, 1, dims[d])
+        _bin_coordinate(pos[d], mins[d], bin_size[d], dims[d])
     end
     return LinearIndices(dims)[cartesian...]
+end
+
+# The bin of a coordinate along one axis, clamped to `1:n`. The ratio is clamped as a float before the conversion: a
+# non-finite position (a blown-up Lagrangian run) lands in the first bin instead of throwing `InexactError` from
+# `floor(Int, NaN)` inside a kernel (which ended the run without its data), and a huge one cannot overflow `Int`.
+# Every finite position gets the bin it got before (`clamp(floor(r) + 1, 1, n) == floor(clamp(r, 0, n - 1)) + 1`).
+@inline function _bin_coordinate(x::T, lo::T, h::T, n::Int) where {T}
+    r = (x - lo) / h
+    r = ifelse(isnan(r), zero(T), clamp(r, zero(T), T(n - 1)))
+    return floor(Int, r) + 1
 end
 
 # =========================================================================

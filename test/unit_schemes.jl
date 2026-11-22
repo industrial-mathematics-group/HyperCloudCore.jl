@@ -253,7 +253,7 @@ end
             @test length(RECORDED) == s                                  # one check per checkpoint 2 … s+1
             for i in 2:(s + 1)
                 Yp, cand = RECORDED[i - 1]
-                @test Yp ≈ ts.Y_stages[i - 1][7][1]
+                @test Yp ≈ (substeps ? ts.Y_stages[i - 1][7][1] : u_n)    # (the reference: the substep's start, else Uⁿ)
                 if substeps
                     @test cand ≈ Yp + dt / C * ts.K_E_stages[i - 1][7][1]
                 else
@@ -270,6 +270,13 @@ end
                             :ExplicitSources => (), :ImplicitSources => ())
     @test build_timestepper(ctx).substep_ratio ≈ 1 atol = 1e-9
     @test build_timestepper(ctx; time_conf = Dict{Symbol, Any}(:mood_substeps => false)).substep_ratio == 0
+    # The reference of a check: the state an Euler substep starts from (SSP), else the step start Uⁿ (the stages of
+    # ARS(2,3,3) are at 0, 0.79 Δt, 0.21 Δt: its third stage was checked against the bounds of the later second one)
+    interp3 = MUSCL(Float64, 1, 1, 3, NoLimiter(), RusanovFlux())
+    for (tab, substeps) in ((RK3_SSP_Tableau(Float64), true), (IMEX_ARS233_Tableau(Float64), false), (RK4_Classical_Tableau(Float64), false))
+        ts = GeneralRKTimeStepper(eq, interp3, MOOD(EPD1(), MOODu1(1e-6)), tab)
+        @test HyperCloudCore._mood_reference(ts, ts.Y_stages[1]) === (substeps ? ts.Y_stages[1] : ts.rho_n)
+    end
 end
 
 @testset "Implicit stage: RHS from the solve" begin

@@ -335,6 +335,27 @@ end
         end
     end
 
+    @testset "Cell-list bins of non-finite and far positions (a blown-up Lagrangian run)" begin
+        gb = HyperCloudCore.get_flat_bin_index
+        mins, h = Space{2, Float64}(-1.0, 0.0), Space{2, Float64}(0.25, 0.5)
+        dims = (8, 3)
+        old(p) = clamp(floor(Int, (p[1] - mins[1]) / h[1]) + 1, 1, dims[1]) + (clamp(floor(Int, (p[2] - mins[2]) / h[2]) + 1, 1, dims[2]) - 1) * dims[1]
+        rng = MersenneTwister(3)
+        pts = [Space{2, Float64}(4 * rand(rng) - 2.5, 3 * rand(rng) - 1) for _ in 1:2000]
+        @test all(p -> gb(p, mins, h, dims) == old(p), pts)                          # the bins of finite positions as before
+        for p in (Space{2, Float64}(NaN, 0.3), Space{2, Float64}(0.1, Inf), Space{2, Float64}(-Inf, NaN), Space{2, Float64}(1e300, -1e300))
+            @test 1 <= gb(p, mins, h, dims) <= prod(dims)                              # (threw InexactError from floor(Int, NaN))
+        end
+        @test 1 <= gb(Space{3, Float64}(NaN, 2.0, -1e300), Space{3, Float64}(0, 0, 0), Space{3, Float64}(1, 1, 1), (2, 3, 4)) <= 24
+        pg = ParticleGrid(get_rectangular_domain(Float64, (0.0,), (1.0,); is_periodic = true), (0.05,),
+                          ExponentialWeightFunction(1.0, 0.125), 1)
+        pg.neighbor(pg)
+        @test HyperCloudCore._collect_near!(pg, Space{1, Float64}(NaN), 0.01, Int[], Space{1, Float64}[]) == 0
+        pg.core.positions[3] = Space{1, Float64}(NaN)                                  # a search with a non-finite particle runs
+        pg.neighbor(pg)
+        @test pg.meta.N == 20
+    end
+
     @testset "Small periodic domains do not duplicate neighbours" begin
         geom = get_rectangular_domain(Float64, (0.0,), (1.0,); is_periodic = true)
         for R in (0.45, 0.6)                                   # two and one coarse bins along the axis
