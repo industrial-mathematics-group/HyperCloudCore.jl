@@ -899,7 +899,7 @@ end
         dm200, pg200 = burgers_run(200, 1.2)
         @test abs(dm100) < 5e-3 && abs(dm200) < 4e-3                   # measured 3.4e-3 / 3.5e-3 (frozen frame: 1.0e-2 / 8.8e-3); w = 0.2 u: the
                                                                        # frame's flux 0.3 u² is not zero, its central part keeps the pair defect
-        @test all(i -> 0.0 <= pg200.rhos[i][1] <= 1.1, 1:pg200.meta.N)                     # (the content remap is not monotone: up to 1.015 here)
+        @test all(i -> 0.0 <= pg200.rhos[i][1] <= 1.1, 1:pg200.meta.N)
         # the exact LagrangianFrame flux and volume term
         fr = LagrangianFrame(eqb, 0.2)
         u = State{1, Float64}(0.8)
@@ -911,9 +911,10 @@ end
 
     @testset "Lagrangian isothermal Euler: the mass is conserved to round-off (content form)" begin
         # For w = u the mass flux ρ(u − w) of the Lagrangian frame vanishes, the dissipation of every pair is antisymmetric,
-        # and the stages carry the content V ρ: Σ V ρ on a periodic cloud is exact up to round-off, with the volumes
-        # re-estimated every step. With w = u/2 the frame's mass flux ρu/2 is not zero and its central part keeps the
-        # collocation scheme's pair defect (small on this smooth wave, not zero).
+        # and the stages carry the content V ρ: Σ V ρ on a periodic cloud is exact up to round-off, with the scheme's own
+        # volumes (integrated from V div w; the estimator is not run after the step, see the volumes check below). With
+        # w = u/2 the frame's mass flux ρu/2 is not zero and its central part keeps the collocation scheme's pair defect
+        # (small on this smooth wave, not zero).
         eqi = IsothermalEuler(1.0)
         ρ0(x) = 1 + 0.2 * sin(2π * x); u0i(x) = 0.2 * sin(2π * x)
         function iso_run(mover, N, tend)
@@ -932,6 +933,14 @@ end
         dm_lag, pgl = iso_run(LagrangianMover(), 100, 0.5)
         @test abs(dm_lag) < 1e-12
         @test all(i -> pgl.rhos[i][1] > 0, 1:pgl.meta.N)
+        # the volumes are the scheme's: Σ V drifts from |Ω| = 2 by the discretisation error of div w only, and they are
+        # not the estimate (which would differ per particle by the jitter of the cloud); a collapsing stage volume is floored
+        V_scheme = copy(view(pgl.core.volumes, 1:pgl.meta.N))
+        @test abs(sum(V_scheme) - 2.0) < 2e-3
+        update_volumes!(pgl, MLSVolumes(2))
+        @test maximum(abs.(view(pgl.core.volumes, 1:pgl.meta.N) .- V_scheme)) > 1e-7
+        @test HyperCloudCore._floor_volume(0.01, 1.0) == 0.1 && HyperCloudCore._floor_volume(0.5, 1.0) == 0.5 &&
+              HyperCloudCore._floor_volume(0.01f0, 1.0f0) === 0.1f0
         dm_half, _ = iso_run(ScaledLagrangianMover(0.5), 100, 0.5)
         @test abs(dm_half) < 5e-3                                        # the pair defect of the central part (measured 1.3e-3)
     end

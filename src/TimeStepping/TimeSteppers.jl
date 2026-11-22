@@ -150,7 +150,8 @@ false` checks the stage candidates everywhere.
 - `full_search_per_stage = false`: rebuild the neighbour topology at every stage position
   (default: freeze topology, refresh distances/weights only).
 - `volume_estimator = ShepardVolumes()`: how `pg.core.volumes` is recomputed after each step of a
-  moving grid (`nothing` leaves the volumes untouched).
+  moving grid (`nothing` leaves the volumes untouched). Not run in the content form of the Lagrangian movers
+  with MUSCL, whose volumes are the scheme's own (see the fields).
 - `storage = Array`: array type of the stage buffers, e.g. `ROCArray` for a stepper that advances a
   grid built with `device_grid` (the interpolator needs the same `storage`).
 - `mood_substeps = true`: check the forward Euler substeps of an SSP tableau (see above) instead of
@@ -162,9 +163,10 @@ false` checks the stage candidates everywhere.
   stage candidates are checked; `rho_sub` is then never sized).
 - `x_n`, `x_cand`, `X_stages`, `K_X_stages`: positions and grid velocities (sized only when moving).
 - `v_n`, `v_cand`, `V_stages`, `K_V_stages`: the particle volumes the scheme's own volume rate implies (`V div w`,
-  written by the Lagrangian frame; sized only when moving). At the end of a step the content `V U` is remapped onto
-  the re-estimated volumes (`_content_remap!`), which makes the Lagrangian mass conservation exact up to the time
-  discretisation and the flux pair defect.
+  written by the Lagrangian frame; sized only when moving). In the content form (a Lagrangian mover with MUSCL) the
+  stages carry the content `V U` with these volumes, and `v_cand` becomes `pg.core.volumes` at the end of the step:
+  `Σ V U` is conserved to round-off up to the flux pair defect, and `Σ V` drifts from `|Ω|` by the discretisation
+  error of `div w` (a stage volume below a tenth of the step's start, a collapsing pair, is floored).
 - `int_buffer`, `work`: neighbour gather buffer and MOOD scratch.
 All of them are `Growable` buffers, sized by `update_size!` at the start of every step.
 
@@ -525,10 +527,11 @@ end
         moving && (x_target[p] = x_n[p]; v_target[p] = v_n[p])
         return nothing
     end
-    X = moving ? x_n[p] : zero_space
-    V = moving ? v_n[p] : zero_T
-    Y = content ? V * U_n[p] : U_n[p]       # the content, or the point value
-    Y, X, V = _stage_sum(Y, X, V, p, coef[1], coef[2], K_E, K_I, K_X, K_V, V_st, dt, moving, content, zero_T)
+    X  = moving ? x_n[p] : zero_space
+    V0 = moving ? v_n[p] : zero_T
+    Y  = content ? V0 * U_n[p] : U_n[p]     # the content, or the point value
+    Y, X, V = _stage_sum(Y, X, V0, p, coef[1], coef[2], K_E, K_I, K_X, K_V, V_st, dt, moving, content, zero_T)
+    content && (V = _floor_volume(V, V0))
     target[p] = content ? Y / V : Y
     moving && (x_target[p] = X; v_target[p] = V)
     return nothing
@@ -549,21 +552,15 @@ end
 end
 @inline _tail(t::Tuple) = Base.tail(t)
 @inline _tail(::Tuple{}) = ()
+# A stage volume below a tenth of the step's start is a collapsing pair (Δt div w < −0.9 is far beyond any resolved
+# compression under the CFL condition): floored, so that the content stays a finite point value (the point-value form's
+# U (1 − Δt div w) is bounded too); the cloud-quality warning reports such clouds
+@inline _floor_volume(V, V0) = max(V, oftype(V, 0.1) * V0)
 
 # The stepper runs in content form on a moving interior cloud whose frame tracks the volume rate (the Lagrangian movers
-# with the MUSCL scheme); the volumes are remapped at the end of the step as well (`_content_remap!`)
+# with the MUSCL scheme); its volumes become the grid's at the end of the step
 @inline _content_form(ts::GeneralRKTimeStepper, pg::ParticleGrid) =
     !(pg.mover isa NoGridMover) && _conservative_ale(ts.divergence_interpolator) && _lagrangian_type(pg.mover)
-
-# Kernel body (see Backend.jl): the content `V U` of an interior particle, carried with the volumes the scheme's own
-# volume rate implies (`v_ev`), is put onto the re-estimated volume `V`
-@inline function _content_remap!(p, rhos, v_ev, V, is_boundary)
-    @inbounds begin
-        (is_boundary[p] || !(V[p] > 0)) && return nothing
-        rhos[p] = rhos[p] * (v_ev[p] / V[p])
-    end
-    return nothing
-end
 
 # Implicit stage with a diagonal entry: the solve U_out - dt a_ii S(U_out) = U_in and its right-hand side
 # S(U_out) = (U_out - U_in) / (dt a_ii), which spares the second evaluation of the source (for the BGK
@@ -664,7 +661,7 @@ end
         dU = with_KI ? K[p] + KI[p] : K[p]
         if content
             K_V, V = KVV
-            W[p] = (V[p] * Y[p] + h * V[p] * dU) / (V[p] + h * K_V[p])
+            W[p] = (V[p] * Y[p] + h * V[p] * dU) / _floor_volume(V[p] + h * K_V[p], V[p])
         else
             W[p] = Y[p] + h * dU
         end
@@ -736,17 +733,20 @@ function (ts::GeneralRKTimeStepper{D, M, T})(eq::HyperbolicPDE, pg::ParticleGrid
         if !(pg.mover isa NoGridMover)
             _check_cloud_quality(pg, time + dt)
             # Volumes are re-estimated when the interior moves (a static cloud with moving pieces keeps the volumes the
-            # remaps of `sweep_boundaries!` maintain). With the Lagrangian frame the content V U is then remapped onto
-            # the re-estimated volumes from the volumes the scheme's own volume rate implies (`v_cand`): the mass
-            # equation's right-hand side sums to exactly −Σ U K_V against those (its only pair term, the dissipation,
-            # is antisymmetric), so Σ V U is conserved up to the time discretisation of V U and the pair defect of the
-            # momentum and energy fluxes. Without an estimator the implied volumes are the volumes.
-            remap = _content_form(ts, pg)
-            if ts.volume_estimator === nothing
-                remap && copyto!(pg.core.volumes, 1, parent(ts.v_cand), 1, N)
-            else
+            # remaps of `sweep_boundaries!` maintain). In the content form the volumes are the scheme's own (`v_cand`,
+            # integrated from its volume rate V div w beside the content): the mass equation's right-hand side sums to
+            # exactly −Σ U K_V against those (its only pair term, the dissipation, is antisymmetric), so Σ V U is
+            # conserved to round-off, and U = (V U) / V evolves like the point value of the point-value form. The
+            # estimator is not run: putting the content onto its volumes every step (as 0.9.6 to 0.9.8 did) fed the
+            # estimate's per-particle noise (3-5 % median against the trapezoid cell on a jittered 1-D cloud, worse
+            # where the cloud is compressed below the lattice spacing) into the density, which cost 80 % of accuracy
+            # on the Lagrangian BGK Sod (VK, N = 800) and collapsed the cloud at the shock with small stencils. Σ V
+            # then drifts from |Ω| by the discretisation error of div w (a measure of the cloud's quality; the
+            # adaptivity's events re-estimate the volumes they touch).
+            if _content_form(ts, pg)
+                copyto!(pg.core.volumes, 1, parent(ts.v_cand), 1, N)
+            elseif ts.volume_estimator !== nothing
                 update_volumes!(pg, ts.volume_estimator)
-                remap && foreach_particle(_content_remap!, get_backend(), N, (U, ts.v_cand, pg.core.volumes, pg.core.is_boundary))
             end
         end
         has_moving_pieces(pg.geometry) && sweep_boundaries!(pg, time, time + dt, max_order)

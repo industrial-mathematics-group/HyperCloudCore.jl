@@ -17,7 +17,7 @@ holds:
 |:------|:----|
 | `rhos`, the block state (`blocks`, block-major, all blocks) | the solution |
 | `positions` in memory order, `N`, `N_interior`, `N_ghost` | movers, adaptivity and the sweep of moving pieces change the particle set and its order |
-| `volumes` | re-estimated, remapped (content form, adaptivity, sweeps): not recomputable from the positions alone |
+| `volumes` | re-estimated or integrated (the scheme's own volumes of the content form), remapped (adaptivity, sweeps): not recomputable from the positions alone |
 | `is_boundary`, `tags`, `normals`, `wall_distances`, `wall_curvatures` | change with the particle set (inserted, removed and swept particles, ghosts of moving pieces) |
 | `particle_orders` | the orders of the last step (a step resets them at its start; kept so the restored grid is the grid at the end of the step) |
 | `boundary_time`, `sweep_time` | the time the moving pieces' ghosts and the swept region belong to (`_sync_boundaries!` compares them with the step's time) |
