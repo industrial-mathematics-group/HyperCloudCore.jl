@@ -13,7 +13,7 @@ julia -t 8 --project=test test/runtests.jl                        # same suite, 
 julia --project=test -e 'using Pkg; Pkg.instantiate()'            # once, for the line above
 julia --project=docs -e 'using Pkg; Pkg.instantiate()'            # docs env, once
 julia --project=docs docs/make.jl                                 # build docs into docs/build
-pipx run --spec aisignoff==1.0.0rc8 aisignoff report --html docs/src/assets/aisignoff.html --with-source  # optional, before make.jl: the AI Signoff Report page (CI does it)
+pipx run --spec aisignoff==0.20.1 aisignoff report --html docs/src/assets/aisignoff.html --with-source  # optional, before make.jl: the AI Signoff Report page (CI does it)
 HYPERCLOUD_BACKEND=amdgpu julia --project=test/gpu test/runtests.jl   # device tests (AMD GPU only)
 julia -t 8 --project benchmark/step.jl                            # step throughput, see BENCH_* in the file
 ```
@@ -82,3 +82,11 @@ backend-specific code elsewhere. Kernel bodies must work on every backend:
   accuracy check: state the observed order or error before and after in the PR.
 - Commit subjects follow the repo style: `Area: what changed`
   (e.g. `MOOD: drop orders per particle`, `Docs: zero-sum divergence weights`).
+
+<!-- aisignoff:begin -->
+## AI signoff
+
+This repository declares AI use with [aisignoff](https://industrial-mathematics-group.github.io/aisignoff/).
+Before you commit or open a pull request, run `aisignoff guide --role dev` and follow it.
+If you are reviewing a change instead, run `aisignoff guide --role review`: a reviewer only reviews and changes nothing.
+<!-- aisignoff:end -->
