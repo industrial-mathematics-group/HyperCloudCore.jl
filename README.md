@@ -12,6 +12,7 @@
 [![AI generation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/industrial-mathematics-group/HyperCloudCore.jl/badges/aisignoff-generation.json)](https://industrial-mathematics-group.github.io/HyperCloudCore.jl/dev/aisignoff/)
 [![Human review](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/industrial-mathematics-group/HyperCloudCore.jl/badges/aisignoff-human-review.json)](https://industrial-mathematics-group.github.io/HyperCloudCore.jl/dev/aisignoff/)
 [![AI review](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/industrial-mathematics-group/HyperCloudCore.jl/badges/aisignoff-ai-review.json)](https://industrial-mathematics-group.github.io/HyperCloudCore.jl/dev/aisignoff/)
+[![AI review findings](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/industrial-mathematics-group/HyperCloudCore.jl/badges/aisignoff-findings.json)](https://industrial-mathematics-group.github.io/HyperCloudCore.jl/dev/aisignoff/)
 
 </div>
 
