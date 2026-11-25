@@ -52,7 +52,7 @@ The collocation scheme itself is not exactly conservative, with or without motio
 On Lagrangian grids particles cluster in compressions and thin out in expansions. `ParticleAdaptivity` repairs that between steps:
 
 ```julia
-ad = ParticleAdaptivity(Float64; max_gap = 1.6, min_gap = 0.5, clearance = 0.7,
+ad = ParticleAdaptivity(Float64; max_gap = 1.6, min_gap = 0.5, clearance = 0.7,   # (the defaults in 1-D and 2-D)
                         samples_per_dx = 2, exclude_reduced_order = true,
                         max_events = typemax(Int), max_rounds = 8,
                         volume_estimator = ts.volume_estimator)   # moving grid: the stepper's estimator
@@ -65,7 +65,7 @@ report.escaped, report.held, report.seeded, report.refused    # open boundaries,
 
 Lengths are in units of $\Delta x = \min_d \Delta x_d$.
 
-- **Insertion:** a neighbour pair farther apart than `max_gap` whose midpoint has no particle within `clearance` gets a new particle at the midpoint. The clearance test is what prevents insertions on a regular lattice, where second neighbours are $2\Delta x$ apart but the midpoint is occupied.
+- **Insertion:** a neighbour pair farther apart than `max_gap` whose midpoint has no particle within `clearance` gets a new particle at the midpoint. The clearance test is what prevents insertions on a regular lattice, where second neighbours are $2\Delta x$ apart but the midpoint is occupied. The defaults depend on the dimension: `max_gap` 1.6 and `clearance` 0.7 in 1-D and 2-D, $1.6\sqrt{D/2}$ and $0.7\sqrt{D/2}$ above (1.96 and 0.86 in 3-D), because the longest diagonal of a lattice cell, $\sqrt D\,\Delta x$, must stay below `max_gap` or its midpoint (the cell centre, $\tfrac{\sqrt D}{2}\Delta x$ from the corners) within the clearance: with the 2-D values a 3-D lattice got a particle at every cell centre.
 - **Merge:** a neighbour pair closer than `min_gap` is replaced by one particle at its midpoint.
 - At most one event per particle neighbourhood and per round, and at most `max_events` per round. Event centres are kept $(R + \Delta x/2)\sqrt D + \tfrac32 R + \tfrac32 \Delta x$ apart, so that no event's quadrature sees a particle that another event of the round adds or removes: the events of a round are remapped one after the other on the old topology. Their local sets (the particles a remap writes) may overlap: every remap is exactly conservative on its own set, runs on the values the earlier ones wrote, and knows the particles the others remove, which are no part of its balance. (Up to 0.9.9 the whole local sets were kept apart, $R\,(2 + 2\sqrt D) + \Delta x$: 13 instead of 9.5 spacings in 2-D at $R = 2.5\,\Delta x$, i.e. half the events per round. With the still older spacing of $4R$ and no knowledge of the other events' removals, calls with several events lost up to $10^{-7}$ of the mass.)
 - **Rounds:** a call repeats detection, remaps, topology change and neighbour search until no pair violates the rules, at most `max_rounds` times (default 8; the volumes are re-estimated once, at the end). The spacing above allows a few events per $(9.5\,\Delta x)^2$ and round in 2-D at $R = 2.5\,\Delta x$, and a pair is only found while it is a neighbour pair: a gap between `max_gap` and $R$ that is not served in time grows beyond $R$ and is never filled. With one round per step (up to 0.9.9) the centre of a Sedov blast at $R = 2.5\,\Delta x$ lost its stencils (2 neighbours) and the run blew up at $t = 0.1$; with rounds it keeps 14 and completes.

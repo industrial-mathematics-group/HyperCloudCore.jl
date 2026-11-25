@@ -1925,6 +1925,23 @@ end
         @test all(r -> 0.5 - 1e-12 <= r[1] <= 1.5 + 1e-12, view(pg.rhos, 1:pg.meta.N))
     end
 
+    @testset "The insertion thresholds depend on the dimension: a regular 3-D lattice triggers nothing" begin
+        # the body diagonal of a cubic cell is √3 dx > 1.6 dx and its midpoint, the cell centre, is 0.87 dx from the
+        # corners: with the 2-D thresholds every cell centre of a 3-D lattice was an insertion
+        geom3 = get_rectangular_domain(Float64, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0); is_periodic = true)
+        h3    = 1 / 8
+        pg3   = ParticleGrid(geom3, (h3, h3, h3), ExponentialWeightFunction(1.0, 2.5h3), 1; randomness = (0.1h3, 0.1h3, 0.1h3),
+                             rng = MersenneTwister(2))
+        @test !HyperCloudCore._has_adapt_candidates(pg3, ParticleAdaptivity(Float64))
+        @test HyperCloudCore._has_adapt_candidates(pg3, ParticleAdaptivity(Float64; max_gap = 1.6, clearance = 0.7))
+        ad0 = ParticleAdaptivity(Float64)
+        @test HyperCloudCore._max_gap(ad0, Val(1)) == HyperCloudCore._max_gap(ad0, Val(2)) == 1.6
+        @test HyperCloudCore._clearance(ad0, Val(2)) == 0.7
+        @test HyperCloudCore._max_gap(ad0, Val(3)) ≈ 1.6 * sqrt(1.5) && HyperCloudCore._clearance(ad0, Val(3)) ≈ 0.7 * sqrt(1.5)
+        @test HyperCloudCore._max_gap(ParticleAdaptivity(Float64; max_gap = 1.8), Val(3)) == 1.8
+        @test_throws AssertionError ParticleAdaptivity(Float64; max_gap = 0.9)
+    end
+
     @testset "MLS volumes of single particles are those of the sweep over the region" begin
         # `_local_volumes` (the seeds of a cloud whose stepper keeps its volumes): the same lattice, without the
         # renormalisation of the whole cloud, on a periodic and on a bounded cloud

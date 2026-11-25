@@ -18,7 +18,7 @@ export ParticleAdaptivity, adapt_particles!, is_wall
 # exact. All of this is the particle analogue of swept-region remapping in ALE finite volumes.
 
 """
-    ParticleAdaptivity(; max_gap = 1.6, min_gap = 0.5, clearance = 0.7, samples_per_dx = 2,
+    ParticleAdaptivity(; max_gap = nothing, min_gap = 0.5, clearance = nothing, samples_per_dx = 2,
                          exclude_reduced_order = true, max_events = typemax(Int), max_rounds = 8,
                          volume_estimator = nothing)
 
@@ -27,6 +27,11 @@ Rules for keeping a moving point cloud well-spaced. Lengths are multiples of the
 - **Insertion**: a neighbour pair `(i, j)` farther apart than `max_gap·dx` whose midpoint has no
   particle within `clearance·dx` gets a new particle at the midpoint.
 - **Merge**: a neighbour pair closer than `min_gap·dx` is replaced by one particle at the midpoint.
+- `max_gap = nothing`, `clearance = nothing`: by the dimension of the grid, `1.6` and `0.7` in 1-D and 2-D, `1.6 √(D/2)`
+  and `0.7 √(D/2)` above (1.96 and 0.86 in 3-D). A regular lattice must not trigger insertions: its longest diagonal,
+  `√D dx`, has to stay below `max_gap`, or its midpoint, the cell centre at `√D/2 dx` from the corners, within the
+  clearance. With the 2-D values a 3-D lattice got a particle at every cell centre (+77 % particles in 176 steps of a
+  vortex at 24³).
 - **Open boundaries** (moving clouds): an interior particle that has left the region is removed with its content
   (the outflow), unless it crossed a wall ([`is_wall`](@ref)) of a shape-based domain, where it is put back onto
   the wall; and the insertion rule also holds between an interior particle and a ghost: the gap a cloud leaves when
@@ -61,16 +66,24 @@ struct ParticleAdaptivity{T, VE <: Union{Nothing, VolumeEstimator}}
     volume_estimator::VE
 end
 
-function ParticleAdaptivity(::Type{T} = Float64; max_gap = 1.6, min_gap = 0.5, clearance = 0.7,
+function ParticleAdaptivity(::Type{T} = Float64; max_gap = nothing, min_gap = 0.5, clearance = nothing,
                             samples_per_dx::Int = 2, exclude_reduced_order::Bool = true,
                             max_events::Int = typemax(Int), max_rounds::Int = 8,
                             volume_estimator::Union{Nothing, VolumeEstimator} = nothing) where {T}
-    @assert min_gap < 1 < max_gap "need min_gap < 1 < max_gap (in units of dx)"
+    @assert min_gap < 1 && (max_gap === nothing || max_gap > 1) "need min_gap < 1 < max_gap (in units of dx)"
+    max_gap   === nothing && (max_gap = NaN)              # (by the dimension of the grid, `_max_gap`)
+    clearance === nothing && (clearance = NaN)
     @assert max_events >= 1 "max_events must be at least 1"
     @assert max_rounds >= 1 "max_rounds must be at least 1"
     return ParticleAdaptivity{T, typeof(volume_estimator)}(T(max_gap), T(min_gap), T(clearance), samples_per_dx,
                                                          exclude_reduced_order, max_events, max_rounds, volume_estimator)
 end
+
+# The thresholds of the insertion rule on a grid of dimension `D` (the defaults depend on it, see `ParticleAdaptivity`)
+@inline _max_gap(ad::ParticleAdaptivity{T}, ::Val{D}) where {T, D} =
+    isnan(ad.max_gap) ? (D <= 2 ? T(1.6) : T(1.6) * sqrt(T(D) / 2)) : ad.max_gap
+@inline _clearance(ad::ParticleAdaptivity{T}, ::Val{D}) where {T, D} =
+    isnan(ad.clearance) ? (D <= 2 ? T(0.7) : T(0.7) * sqrt(T(D) / 2)) : ad.clearance
 
 struct _AdaptEvent{D, T}
     center::Space{D, T}
@@ -497,7 +510,7 @@ function _seed_candidates(hg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     dx      = minimum(hg.meta.dx)
     L, Li   = hg.domain.L_wrap, hg.domain.invL_wrap
     geom, t = hg.geometry, hg.meta.boundary_time
-    max_gap_sq, clear_sq = (ad.max_gap * dx)^2, (ad.clearance * dx)^2
+    max_gap_sq, clear_sq = (_max_gap(ad, Val(D)) * dx)^2, (_clearance(ad, Val(D)) * dx)^2
     dead    = Set{Int}(gone)
     @inbounds for i in cand
         (isb[i] || i in dead) && continue
@@ -670,7 +683,8 @@ function _has_adapt_candidates(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity
     geom = pg.geometry
     foreach_particle(_adapt_candidate!, _launch_backend(pg), N,
         (flag, pg.core.positions, pg.core.is_boundary, nb.ranges, nb.indices, nb.distances, dom.L_wrap, dom.invL_wrap,
-         dom.is_periodic, dom.L, dom.canvas_mins, (ad.min_gap * dx)^2, (ad.max_gap * dx)^2, (ad.clearance * dx)^2,
+         dom.is_periodic, dom.L, dom.canvas_mins, (ad.min_gap * dx)^2, (_max_gap(ad, Val(D)) * dx)^2,
+         (_clearance(ad, Val(D)) * dx)^2,
          (geom.mins, geom.maxs)))
     return any(view(flag, 1:N))
 end
@@ -796,7 +810,7 @@ function _detect_events(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ma
     # round adds particles of its own at: no event puts a particle within the clearance of one (`near_seed` below)
     @inbounds for i in dead; touched[i] = true; end
 
-    max_gap_sq, min_gap_sq, clear_sq = (ad.max_gap * dx)^2, (ad.min_gap * dx)^2, (ad.clearance * dx)^2
+    max_gap_sq, min_gap_sq, clear_sq = (_max_gap(ad, Val(D)) * dx)^2, (ad.min_gap * dx)^2, (_clearance(ad, Val(D)) * dx)^2
     spacing_sq = _event_spacing(pg)^2
     events = _AdaptEvent{D, T}[]
     geom, t_bnd = pg.geometry, pg.meta.boundary_time
