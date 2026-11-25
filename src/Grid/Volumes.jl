@@ -132,8 +132,19 @@ function interior_mass(pg::ParticleGrid{D, M, T}, U::AbstractVector{State{M, T}}
     N = pg.meta.N
     N == 0 && return zero(State{M, T})
     z = zero(State{M, T})
+    isb, V, Up = parent(pg.core.is_boundary), parent(pg.core.volumes), parent(U)
+    (isb isa Array && V isa Array && Up isa Array) && return _interior_mass_host(isb, V, Up, N, z)
     return mapreduce((b, v, u) -> b ? z : v * u, +, view(pg.core.is_boundary, 1:N), view(pg.core.volumes, 1:N),
                      view(U, 1:N); init = z)
+end
+# The same sum, in the same order, as a loop over host arrays (the reduction over three zipped views cost a tenth of a
+# particle-management call, which takes this sum three times)
+function _interior_mass_host(isb::Array{Bool}, V::Array{T}, U::Array{State{M, T}}, N::Int, z::State{M, T}) where {M, T}
+    acc = z
+    @inbounds for i in 1:N
+        acc += isb[i] ? z : V[i] * U[i]
+    end
+    return acc
 end
 
 # -------------------------------------------------------------------------
@@ -303,6 +314,55 @@ function update_volumes!(pg::ParticleGrid{D, M, T}, est::MLSVolumes{P}) where {D
 
     _renormalise_volumes!(pg)
     return nothing
+end
+
+"""
+    _local_volumes(pg, est::VolumeEstimator, ids) -> Vector or nothing
+
+The volumes `est` gives the particles `ids` of the host grid `pg`, without changing the grid, or `nothing` for an
+estimator that only evaluates the whole cloud. `MLSVolumes`: the lattice points within `R` of the particles (the
+lattice of `update_volumes!`, every point once), without the renormalisation of the whole cloud to `|Ω|`; a negative
+volume is clamped to zero.
+"""
+_local_volumes(pg::ParticleGrid, est::VolumeEstimator, ids) = nothing
+
+function _local_volumes(pg::ParticleGrid{D, M, T}, est::MLSVolumes{P}, ids::AbstractVector{Int}) where {D, M, T, P}
+    parent(pg.core.positions) isa Array || return nothing
+    N    = pg.meta.N
+    geom = pg.geometry
+    wf   = pg.neighbor.weight_func
+    R    = pg.meta.R
+    R_sq = R^2
+    invL = one(T) / minimum(pg.meta.dx)
+    hq   = minimum(pg.meta.dx) / est.samples_per_dx
+    nq   = ntuple(d -> max(1, round(Int, (geom.maxs[d] - geom.mins[d]) / hq)), Val(D))
+    h    = ntuple(d -> (geom.maxs[d] - geom.mins[d]) / nq[d], Val(D))
+    ω    = prod(h)
+    is_per = pg.domain.is_periodic
+    B_full = (P == 0 ? 0 : typeof(basis_length(Val(D), Val(P))).parameters[1]) + 1
+    idx, dvec = Int[], Space{D, T}[]
+    isb  = pg.core.is_boundary
+    pos  = pg.core.positions
+    Vs   = zeros(T, N)
+    seen = Set{NTuple{D, Int}}()
+    for i in ids
+        x  = pos[i]
+        lo = ntuple(d -> floor(Int, (x[d] - R - geom.mins[d]) / h[d]), Val(D))            # (index of the point at (I - ½) h)
+        hi = ntuple(d -> ceil(Int, (x[d] + R - geom.mins[d]) / h[d]) + 1, Val(D))
+        for J in CartesianIndices(ntuple(d -> lo[d]:hi[d], Val(D)))
+            I = ntuple(d -> is_per[d] ? mod1(J[d], nq[d]) : J[d], Val(D))
+            all(d -> 1 <= I[d] <= nq[d], 1:D) || continue
+            I in seen && continue
+            push!(seen, I)
+            y = Space{D, T}(ntuple(d -> geom.mins[d] + (I[d] - T(0.5)) * h[d], Val(D)))
+            geom.is_interior(y) || continue
+            n = _collect_near!(pg, y, R_sq, idx, dvec)
+            n = _drop_ghosts!(idx, dvec, n, isb)
+            n == 0 && continue
+            _accumulate_mls_shapes!(Vs, idx, dvec, n, wf, Val(P), Val(B_full), invL, ω)
+        end
+    end
+    return [max(Vs[i], zero(T)) for i in ids]
 end
 
 # The lattice sweep of `MLSVolumes` is a host loop (point queries on the cell list). On a device grid (a moving

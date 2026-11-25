@@ -1925,6 +1925,23 @@ end
         @test all(r -> 0.5 - 1e-12 <= r[1] <= 1.5 + 1e-12, view(pg.rhos, 1:pg.meta.N))
     end
 
+    @testset "MLS volumes of single particles are those of the sweep over the region" begin
+        # `_local_volumes` (the seeds of a cloud whose stepper keeps its volumes): the same lattice, without the
+        # renormalisation of the whole cloud, on a periodic and on a bounded cloud
+        for periodic in (true, false)
+            geomL = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); is_periodic = periodic,
+                                           bc_map = Dict{Int, AbstractBoundaryCondition}())
+            h   = 1 / 16
+            pgL = ParticleGrid(geomL, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; randomness = (0.3h, 0.3h), rng = MersenneTwister(5))
+            ids = [i for i in 1:pgL.meta.N if !pgL.core.is_boundary[i]][1:7:end]
+            Vl  = HyperCloudCore._local_volumes(pgL, MLSVolumes(2), ids)
+            update_volumes!(pgL, MLSVolumes(2))
+            ratio = Vl ./ [pgL.core.volumes[i] for i in ids]
+            @test maximum(ratio) - minimum(ratio) < 1e-12 && abs(ratio[1] - 1) < 1e-2     # (the factor of the renormalisation)
+        end
+        @test HyperCloudCore._local_volumes(make_pg_1d(20), ShepardVolumes(), [1, 2]) === nothing
+    end
+
     @testset "The cloud warning reports the closest pair of the particles that have neighbours" begin
         # a particle without neighbours used to be reported as the closest pair, at -1 / dx spacings
         pg = make_pg_1d(40; mover = LagrangianMover())
