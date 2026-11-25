@@ -35,6 +35,7 @@ set_backend!(CUDABackend())                 # from CUDA.jl (likewise ROCBackend(
 | boundary conditions from one-sided fits (`ExtrapolationBC`, `MirrorBC`: donor search, target-centred MLS fit, mirror operator) | `_ghost_fit_body!` | `Grid/BoundaryConditions.jl` |
 | ghosts of moving pieces placed at a stage time (positions and normals) | `_place_ghost!` | `Grid/MovingBoundaries.jl` |
 | adaptivity pre-check (any pair violating the spacing rules) | `_adapt_candidate!` | `Grid/Adaptivity.jl` |
+| repair of the neighbour lists after a change of the particle set (host grids, row-major slots): the counting and writing passes of the search for the particles next to the change, the renumbering of the kept lists | `_count_listed!`, `_write_listed!`, `_renumber_slots!` | `Grid/NeighborLogic.jl` |
 | adaptivity pre-check of a moving cloud: the interior particles next to the boundary (the region test of those runs on the host, on a copy of the positions) | `_near_boundary!` | `Grid/Adaptivity.jl` |
 
 With the KernelAbstractions backend these bodies are compiled as device kernels. The 0.10 `CPU()`

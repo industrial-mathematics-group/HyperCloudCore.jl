@@ -1784,8 +1784,8 @@ end
 
     @testset "Rounds: a call serves the events the spacing kept apart" begin
         # close pairs 4.2 R apart: the event spacing (4.8 R + dx) lets one round merge only some of them. One round per
-        # call (the behaviour up to 0.9.9) leaves the others for later calls; the default repeats until none is left,
-        # exactly conservative, with and without the re-estimation at the end
+        # call (the behaviour up to 0.9.9) leaves the others for later calls; enough rounds (the default is 8) repeat until
+        # none is left, exactly conservative, with and without the re-estimation at the end
         pg1, n_pairs = clustered_cloud_2d()
         rep1 = adapt_particles!(pg1, ParticleAdaptivity(Float64; exclude_reduced_order = false, max_rounds = 1), kmax)
         @test rep1.removed < 2n_pairs && rep1.inserted > 0               # (the holes the moved particles left come first)
@@ -1793,7 +1793,7 @@ end
             pg, _ = clustered_cloud_2d()
             est === nothing || update_volumes!(pg, est)
             m0  = total_mass(pg)[1]
-            rep = adapt_particles!(pg, ParticleAdaptivity(Float64; exclude_reduced_order = false, volume_estimator = est), kmax)
+            rep = adapt_particles!(pg, ParticleAdaptivity(Float64; exclude_reduced_order = false, volume_estimator = est, max_rounds = 8), kmax)
             @test rep.removed >= 2n_pairs && rep.refused == 0
             @test abs(rep.mass_residual[1]) < 1e-13 * m0 && abs(total_mass(pg)[1] - m0) < 1e-12 * m0
             @test all(r -> 0.5 - 1e-12 <= r[1] <= 1.5 + 1e-12, view(pg.rhos, 1:pg.meta.N))
@@ -1801,6 +1801,7 @@ end
             @test rep2.inserted + rep2.removed == 0                        # nothing left for a second call
         end
         @test_throws AssertionError ParticleAdaptivity(Float64; max_rounds = 0)
+        @test ParticleAdaptivity(Float64).max_rounds == 8
     end
 
     @testset "Open boundaries of a moving cloud: escaped particles, seeds, the content balance" begin
@@ -1957,6 +1958,44 @@ end
             @test maximum(ratio) - minimum(ratio) < 1e-12 && abs(ratio[1] - 1) < 1e-2     # (the factor of the renormalisation)
         end
         @test HyperCloudCore._local_volumes(make_pg_1d(20), ShepardVolumes(), [1, 2]) === nothing
+    end
+
+    @testset "Neighbour lists repaired after a change of the particle set are those of a full search" begin
+        # particles removed and added as the particle management does it (`_apply_topology!`), twice in a row (the second
+        # repair starts from the provisional slot layout of the first): every list equals the full search's, entry for entry
+        lists(g) = [(collect(g.neighbor.indices[g.neighbor.ranges[i]]), collect(g.neighbor.weights[g.neighbor.ranges[i]]),
+                     collect(g.neighbor.distances[g.neighbor.ranges[i]])) for i in 1:g.meta.N]
+        for (D, n, per) in ((1, 60, true), (2, 20, true), (2, 16, false), (3, 8, true))
+            geomR = get_rectangular_domain(Float64, ntuple(_ -> 0.0, D), ntuple(_ -> 1.0, D); is_periodic = per,
+                                           bc_map = Dict{Int, AbstractBoundaryCondition}())
+            h   = 1 / n
+            pgR = ParticleGrid(geomR, ntuple(_ -> h, D), ExponentialWeightFunction(1.0, 2.5h), 1;
+                               randomness = ntuple(_ -> 0.2h, D), rng = MersenneTwister(4))
+            rng = MersenneTwister(9)
+            for round in 1:2
+                N    = pgR.meta.N
+                int  = [i for i in 1:N if !pgR.core.is_boundary[i]]
+                gone = sort!(unique!(rand(rng, int, 4)))
+                src  = unique!(rand(rng, setdiff(int, gone), 5))
+                mask = pgR.shared.bit_buffer
+                fill!(view(mask, 1:N), false)
+                for i in gone; mask[i] = true; end
+                near = unique!([pgR.neighbor.indices[k] for i in gone for k in pgR.neighbor.ranges[i]])
+                new_index = zeros(Int, N); c = 0
+                for i in 1:N; mask[i] || (c += 1; new_index[i] = c); end
+                dirty   = [new_index[j] for j in near if new_index[j] != 0]
+                new_pos = [HyperCloudCore._wrap_point(pgR, pgR.core.positions[i] + Space{D, Float64}(ntuple(_ -> 0.37h, D))) for i in src]
+                HyperCloudCore._apply_topology!(pgR, mask, new_pos, [State{1, Float64}(1.0) for _ in new_pos], fill(h^D, length(new_pos)), 2)
+                @test pgR.meta.N == N - length(gone) + length(new_pos)
+                ref = deepcopy(pgR)
+                ref.neighbor(ref; wrap = false)
+                @test HyperCloudCore._repair_neighbours!(pgR, new_index, dirty)
+                @test lists(pgR) == lists(ref)
+                @test pgR.meta.max_nb >= maximum(length, view(pgR.neighbor.ranges, 1:pgR.meta.N))
+            end
+            pgR.neighbor(pgR; wrap = false)                # the full search afterwards restores the compact layout
+            @test first(pgR.neighbor.ranges[pgR.meta.N + 1]) - 1 == sum(length, view(pgR.neighbor.ranges, 1:pgR.meta.N))
+        end
     end
 
     @testset "The cloud warning reports the closest pair of the particles that have neighbours" begin

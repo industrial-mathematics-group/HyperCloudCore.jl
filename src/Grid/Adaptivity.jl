@@ -45,7 +45,9 @@ Rules for keeping a moving point cloud well-spaced. Lengths are multiples of the
   many times. The events of one round are kept apart (below), a few per `(9.5 dx)^2` in 2-D at `R = 2.5 dx`, and a pair
   can only be found while it is within the radius `R`: a gap between `max_gap·dx` and `R` that one round per step
   does not reach in time grows beyond `R` and is never filled (an expanding cloud with a small radius lost its
-  stencils that way). `1` is the behaviour up to 0.9.9.
+  stencils that way). `1` is the behaviour up to 0.9.9. A round is cheap (the neighbour lists are repaired next to
+  its events, not searched again), so a smaller limit saves little: on a 3-D blast 3 instead of 8 rounds took the
+  cost of a call from 0.32 to 0.26 time steps and the fewest neighbours of a particle from 37 to 7.
 - `volume_estimator`: the estimator the time stepper re-estimates the volumes with (a moving grid). After
   the topology change the volumes of the new cloud are estimated with it, and the change of `Σ V U` this
   causes is put back onto the particles the remap changed (bounded by their local extrema, like the remap's
@@ -197,6 +199,7 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     # The pre-check runs once: the candidates of a later round are those left, the neighbours of what was removed and
     # the new particles with their neighbours (`_next_candidates`).
     n_refused, n_removed, n_added = 0, 0, 0
+    repaired = false                                      # the lists of `hg` are complete, their slot layout is not
     seeds   = Set{Int}()
     changed = ad.volume_estimator === nothing ? nothing : Dict{Int, Tuple{State{M, T}, State{M, T}}}[]
     for round in 1:ad.max_rounds
@@ -274,14 +277,33 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
             for k in nbh.ranges[i]; push!(near, nbh.indices[k]); end
         end
         cand_kept = _compacted_ids(vcat(cand, near), remove_mask, N, N_kept)
+        new_index = zeros(Int, N)
+        let c = 0
+            @inbounds for i in 1:N
+                remove_mask[i] || (c += 1; new_index[i] = c)
+            end
+        end
+        dirty = unique!([new_index[j] for j in near if new_index[j] != 0])
         _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
-        hg.neighbor(hg)
+        # The lists of the particles next to the change are written again, the others kept (`_repair_neighbours!`): a
+        # full search per round was most of the cost of a call. Its slot layout is provisional: `repaired`.
+        if _repair_neighbours!(hg, new_index, dirty)
+            repaired = true
+        else
+            hg.neighbor(hg)
+            repaired = false
+        end
         cand = _next_candidates(hg, cand_kept, N_kept)
     end
     (held + dropped + n_seeds + n_removed + n_added) == 0 && return _adapt_result(State{M, T}; refused = n_refused)
 
     all_states = _states_now(st_list, hg)
-    on_host || (_upload_particles!(pg, hg); pg.neighbor(pg))
+    if on_host
+        repaired && pg.neighbor(pg)                       # one full search per call: the layout the steps rely on
+    else
+        _upload_particles!(pg, hg)
+        pg.neighbor(pg)
+    end
     if changed !== nothing && (!isempty(changed) || !isempty(seeds))
         isempty(changed) && append!(changed, (Dict{Int, Tuple{State{M, T}, State{M, T}}}() for _ in all_states))
         inflow += _reestimate_volumes!(pg, hg, ad.volume_estimator, changed; states = all_states, seeds = seeds,

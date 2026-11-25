@@ -283,6 +283,103 @@ function (nd::NeighborData{D, T})(pg::ParticleGrid{D, M, T}; wrap::Bool = true) 
 end
 
 # =========================================================================
+# LOCAL REPAIR AFTER A CHANGE OF THE PARTICLE SET
+# =========================================================================
+"""
+    _repair_neighbours!(pg, new_index, dirty) -> Bool
+
+Brings the neighbour lists up to date after the particle arrays were compacted and extended (`_apply_topology!`),
+without searching the neighbours of every particle. `new_index[i]` is the new index of the old particle `i` (0: removed;
+the compaction keeps the order), the particles from `maximum(new_index) + 1` on are new, and `dirty` are the survivors
+(new indices) that had a removed particle among their neighbours.
+
+A particle that neither lost nor gained a neighbour keeps its list: its slots stay where they are and their entries
+are renumbered (the order within a list is that of the cell list, which an order-preserving renumbering keeps, and the
+positions have not changed). The lists of the dirty particles, of the new particles and of the particles within `R` of
+a new one are counted and written again from the rebuilt cell list, with the kernels of the full search, into slots
+behind the ones in use. The lists are those a full search gives, entry for entry; the slot layout is not (the old
+slots of the rewritten lists stay unused), so a full search has to follow before anything relies on the layout (the
+particle management does one at the end of a call). The search of one round of events cost a tenth of a time step,
+for a few dozen changed particles; with up to eight rounds per call it was most of the cost of the management on
+flows whose active region is small (a 3-D blast: 77 %).
+
+Host grids in the row-major layout only; returns `false` without changing anything otherwise, or when the slot
+buffers are frozen (`reserve!`) and too small: the caller then searches in full.
+"""
+function _repair_neighbours!(pg::ParticleGrid{D, M, T}, new_index::Vector{Int}, dirty::Vector{Int}) where {D, M, T}
+    nd = pg.neighbor
+    (eltype(nd.ranges) === RowMajorSlots && parent(pg.core.positions) isa Array && parent(nd.indices) isa Array) || return false
+    N      = pg.meta.N
+    N_old  = length(new_index)
+    N_kept = maximum(new_index; init = 0)
+    backend = _launch_backend(pg)
+    pos  = pg.core.positions
+    R_sq = pg.meta.R^2
+    L, L_inv = pg.domain.L_wrap, pg.domain.invL_wrap
+    used = first(nd.ranges[N_old + 1]) - 1                # slots in use (the sentinel of the old particle set)
+
+    # The particles whose lists are written again: the cell list first (it gives the neighbours of the new particles)
+    build_global_bins!(pg)
+    bins = pg.bins
+    mark = pg.shared.bit_buffer
+    fill!(view(mark, 1:N), false)
+    for i in dirty; mark[i] = true; end
+    idx, dvec = Int[], Space{D, T}[]
+    for a in (N_kept + 1):N
+        mark[a] = true
+        n = _collect_near!(pg, pos[a], R_sq * (1 + 16 * eps(T)), idx, dvec)
+        for k in 1:n; mark[idx[k]] = true; end
+    end
+    list = findall(view(mark, 1:N))
+
+    # Their counts and slots, behind the slots in use
+    counts = nd.counts
+    foreach_particle(_count_listed!, backend, length(list),
+        (list, counts, pos, bins.bin_of, bins.cell_start, bins.cell_particles, bins.bin_neighbors, L, L_inv, R_sq))
+    need = used
+    for i in list; need += counts[i]; end
+    (need > length(nd.indices) && nd.indices.fixed) && return false
+    ensure_capacity!(nd, need)
+
+    # The survivors' slot ranges follow the compaction (ascending: a particle never moves up), their entries are renumbered
+    ranges = nd.ranges
+    if N_kept < N_old
+        @inbounds for i in 1:N_old
+            w = new_index[i]
+            (w == 0 || w == i) || (ranges[w] = ranges[i])
+        end
+        foreach_particle(_renumber_slots!, backend, N_kept, (ranges, nd.indices, new_index, mark))
+    end
+    at = used
+    offsets = nd.offsets
+    @inbounds for i in list
+        ranges[i]  = (at + 1):(at + counts[i])
+        offsets[i] = 0
+        at += counts[i]
+    end
+    ranges[N + 1] = _slot_sentinel(RowMajorSlots, need, N)
+    foreach_particle(_write_listed!, backend, length(list),
+        (list, pos, bins.bin_of, bins.cell_start, bins.cell_particles, bins.bin_neighbors, L, L_inv, R_sq,
+         ranges, offsets, nd.indices, nd.weights, nd.distances, nd.weight_func))
+    for i in list; pg.meta.max_nb = max(pg.meta.max_nb, counts[i]); end
+    pg.meta.geometry_version += 1
+    return true
+end
+
+# Kernel bodies (see Backend.jl): the passes of the full search for the listed particles, and the renumbering of the
+# entries of a kept list (the rewritten ones, `skip`, hold removed particles until they are written again)
+@inline _count_listed!(q, list, counts, args...) = _count_neighbours!(@inbounds(list[q]), counts, args...)
+@inline _write_listed!(q, list, args...) = _write_neighbours!(@inbounds(list[q]), args...)
+@inline function _renumber_slots!(i, ranges, indices, new_index, skip)
+    @inbounds if !skip[i]
+        for k in ranges[i]
+            indices[k] = new_index[indices[k]]
+        end
+    end
+    return nothing
+end
+
+# =========================================================================
 # KERNEL BODIES OF THE NEIGHBOUR SEARCH (see Backend.jl)
 # =========================================================================
 @inline function _wrap_position!(i, pos::AbstractVector{Space{D, T}}, is_per, L_vec, mins_vec) where {D, T}
