@@ -1537,8 +1537,8 @@ end
         update_volumes!(pg, ShepardVolumes())
         m0 = total_mass(pg)
         rep = adapt_particles!(pg, ad, kmax)
-        @test rep.removed == 2 && rep.inserted == 1
-        @test pg.meta.N == N0 - 1
+        @test rep.removed == 2 && rep.inserted == 2                     # (the merged particle, and in the next round of
+        @test pg.meta.N == N0                                           # the call one in the hole the moved particle left)
         @test maximum(abs.(rep.mass_residual)) < 1e-12
         @test all(r -> 0.5 - 1e-12 <= r[1] <= 1.5 + 1e-12, view(pg.rhos, 1:pg.meta.N))
     end
@@ -1622,7 +1622,7 @@ end
         content(g) = sum(i -> pg.core.volumes[i] * pg.rhos[i][1], filter(i -> ghost(i) == g, 1:pg.meta.N))
         c_in, c_gh = content(false), content(true)
         rep = adapt_particles!(pg, ad, kmax)
-        @test rep.removed == 2 && rep.inserted == 1
+        @test rep.removed == 2 && rep.inserted == 2                     # (the merge, then the hole at 0.05 in the next round)
         @test Dict(pg.core.positions[i] => (pg.rhos[i], pg.core.volumes[i]) for i in 1:pg.meta.N if ghost(i)) == g0
         @test abs(content(false) - c_in) < 1e-14 && content(true) == c_gh
         @test all(i -> ghost(i) || 1 - 1e-12 <= pg.rhos[i][1] <= 2 + 1e-12, 1:pg.meta.N)
@@ -1773,6 +1773,153 @@ end
         pg, _ = clustered_cloud_2d()
         @test length(HyperCloudCore._detect_events(pg, ParticleAdaptivity(Float64; exclude_reduced_order = false, max_events = 1), kmax)) == 1
         @test_throws AssertionError ParticleAdaptivity(Float64; max_events = 0)
+    end
+
+    @testset "Rounds: a call serves the events the spacing kept apart" begin
+        # close pairs 4.2 R apart: the event spacing (4.8 R + dx) lets one round merge only some of them. One round per
+        # call (the behaviour up to 0.9.9) leaves the others for later calls; the default repeats until none is left,
+        # exactly conservative, with and without the re-estimation at the end
+        pg1, n_pairs = clustered_cloud_2d()
+        rep1 = adapt_particles!(pg1, ParticleAdaptivity(Float64; exclude_reduced_order = false, max_rounds = 1), kmax)
+        @test rep1.removed < 2n_pairs && rep1.inserted > 0               # (the holes the moved particles left come first)
+        for est in (nothing, ShepardVolumes())
+            pg, _ = clustered_cloud_2d()
+            est === nothing || update_volumes!(pg, est)
+            m0  = total_mass(pg)[1]
+            rep = adapt_particles!(pg, ParticleAdaptivity(Float64; exclude_reduced_order = false, volume_estimator = est), kmax)
+            @test rep.removed >= 2n_pairs && rep.refused == 0
+            @test abs(rep.mass_residual[1]) < 1e-13 * m0 && abs(total_mass(pg)[1] - m0) < 1e-12 * m0
+            @test all(r -> 0.5 - 1e-12 <= r[1] <= 1.5 + 1e-12, view(pg.rhos, 1:pg.meta.N))
+            rep2 = adapt_particles!(pg, ParticleAdaptivity(Float64; exclude_reduced_order = false, volume_estimator = est), kmax)
+            @test rep2.inserted + rep2.removed == 0                        # nothing left for a second call
+        end
+        @test_throws AssertionError ParticleAdaptivity(Float64; max_rounds = 0)
+    end
+
+    @testset "Open boundaries of a moving cloud: escaped particles, seeds, the content balance" begin
+        # The unit square with Dirichlet faces in x (tags 1, 2) and walls in y (tags 3, 4), a Lagrangian cloud
+        bco  = Dict{Int, AbstractBoundaryCondition}(1 => FixedDirichlet(), 2 => FixedDirichlet(), 3 => MirrorBC(), 4 => MirrorBC())
+        geo  = get_rectangular_domain(Float64, (0.0, 0.0), (1.0, 1.0); bc_map = bco)
+        h    = 1 / 16
+        field(x) = 1 + x[1] + 0.5 * x[2]
+        function cloud(; mover = LagrangianMover())
+            pgo = ParticleGrid(geo, (h, h), ExponentialWeightFunction(1.0, 2.5h), 1; mover = mover)
+            for i in 1:pgo.meta.N; pgo.rhos[i] = State{1, Float64}(field(pgo.core.positions[i])); end
+            return pgo
+        end
+        inside(pgo) = all(i -> pgo.core.is_boundary[i] || HyperCloudCore._is_interior(geo, pgo.core.positions[i], 0.0), 1:pgo.meta.N)
+        sane(pgo)   = all(i -> pgo.core.is_boundary[i] || (isfinite(pgo.rhos[i][1]) && pgo.core.volumes[i] > 0), 1:pgo.meta.N)
+        interior(pgo) = [i for i in 1:pgo.meta.N if !pgo.core.is_boundary[i]]
+
+        # 1. One particle through the open face x = 1, one through the wall y = 1
+        pgo = cloud()
+        ix  = argmax(i -> pgo.core.positions[i][1] - abs(pgo.core.positions[i][2] - 0.5), interior(pgo))
+        iy  = argmax(i -> pgo.core.positions[i][2] - abs(pgo.core.positions[i][1] - 0.5), interior(pgo))
+        xo  = pgo.core.positions[ix]; yo = pgo.core.positions[iy]
+        pgo.core.positions[ix] = Space{2, Float64}(1 + 0.2h, xo[2])
+        pgo.core.positions[iy] = Space{2, Float64}(yo[1], 1 + 0.2h)
+        pgo.neighbor(pgo)
+        @test HyperCloudCore._escaped_particles(pgo) == sort([ix, iy])
+        lost = pgo.core.volumes[ix] * pgo.rhos[ix]
+        m0   = interior_mass(pgo); N0 = pgo.meta.N
+        rep  = adapt_particles!(pgo, ad, kmax)
+        @test rep.escaped == 1 && rep.held == 1 && rep.refused == 0
+        @test is_wall(MirrorBC()) && !is_wall(FixedDirichlet()) && !is_wall(OutflowBC())
+        @test rep.escaped_content == lost
+        @test inside(pgo) && sane(pgo)
+        @test pgo.meta.N == N0 - 1 + rep.seeded + rep.inserted - rep.removed
+        # the held particle sits on the wall, at the x it had; the balance of the call: what left, what the seeds brought
+        @test any(i -> !pgo.core.is_boundary[i] && abs(pgo.core.positions[i][2] - 1) < 1e-12 && abs(pgo.core.positions[i][1] - yo[1]) < 1e-12, 1:pgo.meta.N)
+        @test abs((interior_mass(pgo) - m0)[1] - (rep.seeded_content - rep.escaped_content + rep.mass_residual)[1]) < 1e-13
+        @test abs(rep.mass_residual[1]) < 1e-13
+        rep2 = adapt_particles!(pgo, ad, kmax)                               # nothing left to do
+        @test rep2.escaped == 0 && rep2.held == 0 && rep2.seeded == 0 && rep2.inserted == 0 && rep2.removed == 0
+        # a static cloud is not managed at its boundary (its particles do not move)
+        pgs = cloud(; mover = NoGridMover())
+        pgs.core.positions[ix] = Space{2, Float64}(1 + 0.2h, xo[2]); pgs.neighbor(pgs)
+        @test isempty(HyperCloudCore._escaped_particles(pgs))
+
+        # 2. The cloud translated by 1.3 h in x (a uniform flow through the box): a column leaves at x = 1, the gap at
+        #    x = 0 is seeded in one call, with and without an estimator; the seeds carry the mean of the pair (the
+        #    field itself here: it is linear, and the ghosts hold it)
+        for (est, own) in ((nothing, false), (ShepardVolumes(), false), (ShepardVolumes(), true), (MLSVolumes(2), true))
+            pgo = cloud()
+            est === nothing || update_volumes!(pgo, est)
+            for i in interior(pgo)
+                pgo.core.positions[i] += Space{2, Float64}(1.3h, 0.0)
+                pgo.rhos[i] = State{1, Float64}(field(pgo.core.positions[i]))
+            end
+            pgo.neighbor(pgo)
+            n_out = count(i -> pgo.core.positions[i][1] > 1, interior(pgo))
+            m0    = interior_mass(pgo); N0 = pgo.meta.N
+            rep   = adapt_particles!(pgo, ParticleAdaptivity(Float64; volume_estimator = est), kmax; own_volumes = own)
+            @test n_out >= 14 && rep.escaped == n_out && rep.held == 0
+            @test rep.seeded >= 14 && rep.inserted == 0 && rep.removed == 0  # (a column of the lattice; no remap event)
+            @test inside(pgo) && sane(pgo)
+            seeds = (N0 - n_out + 1):(N0 - n_out + rep.seeded)               # appended after the compaction
+            @test all(i -> pgo.core.positions[i][1] < 0.5h && abs(pgo.rhos[i][1] - field(pgo.core.positions[i])) < 1e-12, seeds)
+            @test abs((interior_mass(pgo) - m0)[1] - (rep.seeded_content - rep.escaped_content + rep.mass_residual)[1]) < 1e-12
+            @test abs(rep.mass_residual[1]) < 1e-12 && rep.seeded_content[1] > 0
+            rep2 = adapt_particles!(pgo, ParticleAdaptivity(Float64; volume_estimator = est), kmax; own_volumes = own)
+            @test rep2.seeded == 0 && rep2.escaped == 0                      # the gap is closed
+        end
+    end
+
+    @testset "An event that cannot be remapped is refused, not written" begin
+        # a hole next to a particle without a volume (an estimator clamps negative volumes to zero): the insertion would
+        # leave that particle with the state 0/0; the event is left out and the cloud is untouched
+        pg = set_ic!(make_pg_1d(40), ic)
+        punch_hole!(pg, 10)
+        pg.core.volumes[11] = 0.0
+        pos0, rho0, vol0 = copy(view(pg.core.positions, 1:pg.meta.N)), copy(view(pg.rhos, 1:pg.meta.N)), copy(view(pg.core.volumes, 1:pg.meta.N))
+        rep = adapt_particles!(pg, ad, kmax)
+        @test rep.refused == 1 && rep.inserted == 0 && rep.removed == 0
+        @test view(pg.core.positions, 1:pg.meta.N) == pos0 && view(pg.rhos, 1:pg.meta.N) == rho0 && view(pg.core.volumes, 1:pg.meta.N) == vol0
+        # the remap itself: `false` and nothing appended; strict (the sweep of moving boundaries) writes as before
+        ev = HyperCloudCore._detect_events(pg, ad, kmax)[1]
+        np, nr, nv = Space{1, Float64}[], State{1, Float64}[], Float64[]
+        @test HyperCloudCore._remap_event!(pg, ad, ev, np, nr, nv; strict = false) == false
+        @test isempty(np) && isempty(nr) && isempty(nv) && view(pg.rhos, 1:pg.meta.N) == rho0
+    end
+
+    @testset "Re-estimation after an event: only the changed particles take the estimator's volumes" begin
+        # volumes that are not the estimator's (the scheme's own of the content form: here 2 % larger everywhere). The
+        # call used to replace all of them and to put the content change of the whole cloud, 2 % of the mass, onto the
+        # particles around the event
+        est = ShepardVolumes()
+        pg = set_ic!(make_pg_1d(80), ic)
+        punch_hole!(pg, 10)
+        update_volumes!(pg, est)
+        N = pg.meta.N
+        for i in 1:N; pg.core.volumes[i] *= 1.02; end
+        far  = [i for i in 1:N if abs(pg.core.positions[i][1] - pg.core.positions[10][1]) > 0.5 && abs(pg.core.positions[i][1] - pg.core.positions[10][1]) < 1.5]
+        Vfar = [pg.core.volumes[i] for i in far]; Ufar = [pg.rhos[i] for i in far]
+        U0   = [pg.rhos[i][1] for i in 1:N]
+        rep  = adapt_particles!(pg, ParticleAdaptivity(Float64; volume_estimator = est), kmax; own_volumes = true)
+        @test rep.inserted == 1 && abs(rep.mass_residual[1]) < 1e-12
+        @test [pg.core.volumes[i] for i in far] == Vfar && [pg.rhos[i] for i in far] == Ufar
+        # the stepper says which case it is: the content form of the Lagrangian movers with MUSCL
+        muscl = MUSCL(Float64, 1, 1, 2, MinmodLimiter(:hard), RusanovFlux())
+        ts_m  = GeneralRKTimeStepper(make_advection_1d(), muscl, MOOD(), RK2_SSP_Tableau(Float64))
+        @test keeps_own_volumes(ts_m, make_pg_1d(20; mover = LagrangianMover())) && !keeps_own_volumes(ts_m, make_pg_1d(20))
+        @test !keeps_own_volumes(GeneralRKTimeStepper(make_advection_1d(), WENO(Float64, 1, 1, 2), MOOD(), RK2_SSP_Tableau(Float64)),
+                                 make_pg_1d(20; mover = LagrangianMover()))
+        @test maximum(abs, [pg.rhos[i][1] for i in 1:N] .- U0) < 0.03          # (the 2 % of the changed particles' own volumes)
+        @test all(r -> 0.5 - 1e-12 <= r[1] <= 1.5 + 1e-12, view(pg.rhos, 1:pg.meta.N))
+    end
+
+    @testset "The cloud warning reports the closest pair of the particles that have neighbours" begin
+        # a particle without neighbours used to be reported as the closest pair, at -1 / dx spacings
+        pg = make_pg_1d(40; mover = LagrangianMover())
+        dx = 2 / 40
+        for (k, p) in enumerate((10, 11, 13, 14))                              # the neighbours of particle 12 go elsewhere
+            pg.core.positions[p] = pg.core.positions[30] + Space{1, Float64}((0.3 + 0.05k) * dx)
+        end
+        pg.neighbor(pg)
+        @test isempty(pg.neighbor.ranges[12])
+        HyperCloudCore._WARNED_CLOUD[] = false
+        @test_logs (:warn, r"closest interior pair 0\.\d+ spacings apart, 1 interior particle") HyperCloudCore._check_cloud_quality(pg, 0.0)
+        HyperCloudCore._WARNED_CLOUD[] = false
     end
 
     @testset "Re-estimated volumes: the call is exact for the stepper's volumes ($(nameof(typeof(est))))" for est in (ShepardVolumes(), MLSVolumes(2))

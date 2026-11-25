@@ -35,6 +35,7 @@ set_backend!(CUDABackend())                 # from CUDA.jl (likewise ROCBackend(
 | boundary conditions from one-sided fits (`ExtrapolationBC`, `MirrorBC`: donor search, target-centred MLS fit, mirror operator) | `_ghost_fit_body!` | `Grid/BoundaryConditions.jl` |
 | ghosts of moving pieces placed at a stage time (positions and normals) | `_place_ghost!` | `Grid/MovingBoundaries.jl` |
 | adaptivity pre-check (any pair violating the spacing rules) | `_adapt_candidate!` | `Grid/Adaptivity.jl` |
+| adaptivity pre-check of a moving cloud: the interior particles next to the boundary (the region test of those runs on the host, on a copy of the positions) | `_near_boundary!` | `Grid/Adaptivity.jl` |
 
 With the KernelAbstractions backend these bodies are compiled as device kernels. The 0.10 `CPU()`
 backend compiles through PoCL (OpenCL on the host), so running the test suite with it validates the
@@ -151,7 +152,7 @@ no side effects.
 | part | status | plan |
 |---|---|---|
 | Morton reordering | host (`sort!`); only runs when a grid is constructed | device sort of the keys + permutation kernels, if ever needed between steps |
-| particle adaptivity (events) | host: detection, remap and compaction are serial per event | stays there; a kernel pre-check (`_adapt_candidate!`) skips the round trip when the cloud is well spaced, otherwise the grid is copied to the host, adapted, and copied back in place |
+| particle adaptivity (events, in rounds; escaped particles and boundary seeds of a moving cloud) | host: detection, remap and compaction are serial per event | stays there; a kernel pre-check (`_adapt_candidate!`) skips the round trip when the cloud is well spaced, otherwise the grid is copied to the host, adapted, and copied back in place |
 | data residency | the grid (`device_grid`), the stepper and MUSCL (`storage`) live on the device; static and moving grids step entirely there, neighbour search, MOOD, boundary conditions and the reductions included (the `bc_map` loop itself is on the host, its conditions are kernels); the builders follow `context[:Storage]` | |
 | growing a device grid | every per-particle and per-slot array of the grid is a `Growable`, so `ensure_capacity!` works on the device (adaptivity relies on it) | |
 | checkpoints (`checkpoint_state`, `restore_checkpoint!`) | host: one copy per per-particle array of the first `N` particles (and of the block state) out of the device and back; the restore's neighbour search runs on the device | stays there (once per checkpoint, not per step) |

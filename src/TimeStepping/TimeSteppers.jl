@@ -1,4 +1,4 @@
-export GeneralRKTimeStepper, GeneralIMEXTimeStepper, mood_flags, mood_inadmissible
+export GeneralRKTimeStepper, GeneralIMEXTimeStepper, mood_flags, mood_inadmissible, keeps_own_volumes
 
 """
     MOODWork(storage = Array)
@@ -562,6 +562,17 @@ end
 @inline _content_form(ts::GeneralRKTimeStepper, pg::ParticleGrid) =
     !(pg.mover isa NoGridMover) && _conservative_ale(ts.divergence_interpolator) && _lagrangian_type(pg.mover)
 
+"""
+    keeps_own_volumes(ts, pg) -> Bool
+
+Whether the time stepper `ts` keeps the volumes of the cloud `pg` between its steps (the content form of the
+Lagrangian movers with MUSCL: the volumes are integrated from the scheme's own volume rate) instead of re-estimating
+them after every step. The particle management needs to know: `adapt_particles!(pg, ad, order; own_volumes =
+keeps_own_volumes(ts, pg))`.
+"""
+keeps_own_volumes(ts::GeneralRKTimeStepper, pg::ParticleGrid) = _content_form(ts, pg)
+keeps_own_volumes(ts, pg::ParticleGrid) = false
+
 # Implicit stage with a diagonal entry: the solve U_out - dt a_ii S(U_out) = U_in and its right-hand side
 # S(U_out) = (U_out - U_in) / (dt a_ii), which spares the second evaluation of the source (for the BGK
 # model that is a second discrete Maxwellian per stage). With several implicit sources, which are applied
@@ -768,13 +779,15 @@ function _check_cloud_quality(pg::ParticleGrid{D, M, T}, t) where {D, M, T}
     buf = pg.shared.float_buffer
     foreach_particle(_closest_neighbour!, get_backend(), N,
                      (buf, pg.core.is_boundary, pg.neighbor.ranges, pg.neighbor.distances, T(Inf), T(-1)))
-    dmin   = minimum(view(buf, 1:N); init = T(Inf))
     lonely = count(==(T(-1)), view(buf, 1:N))
+    # (the closest pair among the particles that have neighbours: the marker −1 of the others was reported as the distance)
+    dmin   = mapreduce(d -> d < zero(d) ? oftype(d, Inf) : d, min, view(buf, 1:N); init = T(Inf))
     h = minimum(pg.meta.dx)
     (dmin < T(0.1) * h || lonely > 0) || return nothing
     _WARNED_CLOUD[] = true
-    @warn "moving grid at t = $t: the cloud is collapsing or stretching beyond what the stencil radius resolves (closest " *
-          "interior pair $(round(dmin / h; sigdigits = 2)) spacings apart, $lonely interior particle(s) without a neighbour). " *
+    closest = isfinite(dmin) ? "closest interior pair $(round(dmin / h; sigdigits = 2)) spacings apart" : "no interior pair within the radius"
+    @warn "moving grid at t = $t: the cloud is collapsing or stretching beyond what the stencil radius resolves ($closest, " *
+          "$lonely interior particle(s) without a neighbour). " *
           "Nearly coincident particles feel no mutual dissipation (their MLS weights vanish with the distance), cross, and " *
           "their states diverge; particles without neighbours are not updated; the volumes and the discrete mass lose their " *
           "meaning. Use particle management (ParticleAdaptivity: merging and insertion between steps) and/or a " *
