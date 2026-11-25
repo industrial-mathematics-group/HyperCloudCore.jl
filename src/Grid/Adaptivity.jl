@@ -109,6 +109,12 @@ const _ADAPT_TIMES  = Dict{Symbol, Float64}()
 _device_sync(pg::ParticleGrid) = _device_sync(get_backend(), parent(pg.rhos))
 _device_sync(b::ExecutionBackend, ::AbstractArray) = nothing
 _device_sync(b::KABackend, x::AbstractArray) = x isa Array ? nothing : (KA.synchronize(b.backend); nothing)
+# (the time since `t0` under `name`: the totals of the phases of a call, `total_*`, which hold their sections)
+function _adapt_lap!(name::Symbol, t0::UInt64)
+    t = time_ns()
+    _ADAPT_TIMING[] && (_ADAPT_TIMES[name] = get(_ADAPT_TIMES, name, 0.0) + (t - t0) / 1e9)
+    return t
+end
 macro _adapt_time(name, pg, ex)
     quote
         if _ADAPT_TIMING[]
@@ -320,11 +326,13 @@ end
 function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int,
                         escaped::Vector{Int}, has_candidates::Bool, states, own_volumes::Bool, gc0) where {D, M, T}
     on_host = hg === pg
+    t_lap = time_ns()
     st_list = states isa _LazyStates ? states : _state_list(hg, states)
     # (the flags of the pre-check, from the bit buffer of `pg`)
     cand = !has_candidates ? Int[] : on_host ? findall(view(hg.shared.bit_buffer, 1:hg.meta.N)) :
            (@_adapt_time :host_candidates pg findall(Array(view(parent(pg.shared.bit_buffer), 1:pg.meta.N))))
     on_host || (@_adapt_time :host_lists hg (_ensure_lists!(hg, cand); _ensure_lists!(hg, escaped)))
+    _ADAPT_TIMING[] && (_ADAPT_TIMES[:candidates] = get(_ADAPT_TIMES, :candidates, 0.0) + length(cand))
 
     # Particles that left the region: put back onto their wall, or removed with their content (an outflow). The
     # removal is applied with the first round below (one change of the particle set, one neighbour search); a particle
@@ -370,7 +378,9 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
     repaired = false                                      # the lists of `hg` are complete, their slot layout is not
     seeds   = Set{Int}()
     changed = ad.volume_estimator === nothing ? nothing : Dict{Int, Tuple{State{M, T}, State{M, T}}}[]
+    t_lap = _adapt_lap!(:total_before_rounds, t_lap)
     for round in 1:ad.max_rounds
+        _ADAPT_TIMING[] && (_ADAPT_TIMES[:rounds] = get(_ADAPT_TIMES, :rounds, 0.0) + 1)
         N       = hg.meta.N
         pending = round == 1 && (!isempty(gone) || !isempty(seed_pos))     # the boundary changes go with round 1
         events  = isempty(cand) ? _AdaptEvent{D, T}[] :
@@ -434,13 +444,17 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
         n_removed += n_rem_ev
         n_added   += n_add_ev
         N_kept = N - n_rem
+        # the new index of every particle after this round's compaction (0: removed), once for all the bookkeeping
+        # below (every helper built its own: five passes over the cloud per round)
+        new_index = zeros(Int, N)
+        _index_after!(new_index, remove_mask, N)
         # the particles written so far, by their indices after this round's compaction
-        seeds = _compacted_ids(collect(seeds), remove_mask, N, N_kept)
+        seeds = _compacted_ids(seeds, new_index, N_kept)
         for k in 1:n_seed_r; push!(seeds, N_kept + n_add_ev + k); end
         if changed !== nothing
-            now = [_compacted_record(r, remove_mask, N, N_kept) for r in record]
+            now = [_compacted_record(r, new_index, N_kept) for r in record]
             isempty(changed) ? append!(changed, now) :
-                (changed .= [_merge_bounds!(_compacted_bounds(changed[s], remove_mask, N), now[s]) for s in eachindex(now)])
+                (changed .= [_merge_bounds!(_compacted_bounds(changed[s], new_index), now[s]) for s in eachindex(now)])
         end
         near = Int[]                                      # the neighbours of what is removed (the old lists)
         nbh  = hg.neighbor
@@ -448,13 +462,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
             remove_mask[i] || continue
             for k in nbh.ranges[i]; push!(near, nbh.indices[k]); end
         end
-        cand_kept = _compacted_ids(vcat(cand, near), remove_mask, N, N_kept)
-        new_index = zeros(Int, N)
-        let c = 0
-            @inbounds for i in 1:N
-                remove_mask[i] || (c += 1; new_index[i] = c)
-            end
-        end
+        cand_kept = _compacted_ids(Iterators.flatten((cand, near)), new_index, N_kept)
         dirty = unique!([new_index[j] for j in near if new_index[j] != 0])
         @_adapt_time :compaction hg _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
         # The lists of the particles next to the change are written again, the others kept (`_repair_neighbours!`): a
@@ -467,6 +475,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
         end
         cand = @_adapt_time :next_candidates hg _next_candidates(hg, cand_kept, N_kept)
     end
+    t_lap = _adapt_lap!(:total_rounds, t_lap)
     (held + dropped + n_seeds + n_removed + n_added) == 0 && return _adapt_result(State{M, T}; refused = n_refused)
 
     all_states = _states_now(st_list, hg)
@@ -482,6 +491,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
                                                                    seeds = seeds, own_volumes = own_volumes)
     end
     mass_end = @_adapt_time :content pg interior_mass(pg)
+    _adapt_lap!(:total_after_rounds, t_lap)
     _ADAPT_TIMING[] && (_ADAPT_TIMES[:gc] = get(_ADAPT_TIMES, :gc, 0.0) + (Base.gc_num().total_time - gc0) / 1e9)
 
     return _adapt_result(State{M, T}; inserted = n_added, removed = n_removed,
@@ -660,12 +670,7 @@ end
 # The particles the remaps wrote, with their DMP bounds, by index of the compacted cloud (survivors keep their
 # order, new particles follow): `index => (lo, hi)`. A survivor of one event that another event removes is
 # dropped; a particle written by two events gets the union of the bounds.
-function _compacted_record(record::Vector{Tuple{Int, State{M, T}, State{M, T}}}, remove_mask, N::Int, N_kept::Int) where {M, T}
-    new_index = zeros(Int, N)
-    c = 0
-    @inbounds for i in 1:N
-        remove_mask[i] || (c += 1; new_index[i] = c)
-    end
+function _compacted_record(record::Vector{Tuple{Int, State{M, T}, State{M, T}}}, new_index::Vector{Int}, N_kept::Int) where {M, T}
     out = Dict{Int, Tuple{State{M, T}, State{M, T}}}()
     for (j, lo, hi) in record
         k = j > 0 ? new_index[j] : N_kept - j
@@ -733,12 +738,7 @@ function _seed_candidates(hg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
 end
 
 # The bounds of an earlier round (`index => (lo, hi)`) by the indices after a compaction (removed particles dropped)
-function _compacted_bounds(b::Dict{Int, Tuple{State{M, T}, State{M, T}}}, remove_mask, N::Int) where {M, T}
-    new_index = zeros(Int, N)
-    c = 0
-    @inbounds for i in 1:N
-        remove_mask[i] || (c += 1; new_index[i] = c)
-    end
+function _compacted_bounds(b::Dict{Int, Tuple{State{M, T}, State{M, T}}}, new_index::Vector{Int}) where {M, T}
     out = Dict{Int, Tuple{State{M, T}, State{M, T}}}()
     for (i, v) in b
         k = new_index[i]
@@ -760,12 +760,15 @@ function _merge_bounds!(a::Dict{Int, Tuple{State{M, T}, State{M, T}}}, b::Dict{I
 end
 
 # The compacted indices of raw record indices (`j > 0`: an old particle, `-a`: the `a`-th new one), as `_compacted_record`
-function _compacted_ids(raw::Vector{Int}, remove_mask, N::Int, N_kept::Int)
-    new_index = zeros(Int, N)
+_index_after!(new_index::Vector{Int}, remove_mask::Growable, N::Int) = _index_after!(new_index, parent(remove_mask), N)
+function _index_after!(new_index::Vector{Int}, remove_mask::AbstractVector{Bool}, N::Int)
     c = 0
     @inbounds for i in 1:N
-        remove_mask[i] || (c += 1; new_index[i] = c)
+        new_index[i] = remove_mask[i] ? 0 : (c += 1)
     end
+    return new_index
+end
+function _compacted_ids(raw, new_index::Vector{Int}, N_kept::Int)
     out = Set{Int}()
     for j in raw
         k = j > 0 ? new_index[j] : N_kept - j
