@@ -54,10 +54,11 @@ On Lagrangian grids particles cluster in compressions and thin out in expansions
 ```julia
 ad = ParticleAdaptivity(Float64; max_gap = 1.6, min_gap = 0.5, clearance = 0.7,
                         samples_per_dx = 2, exclude_reduced_order = true,
-                        max_events = typemax(Int),
+                        max_events = typemax(Int), max_rounds = 8,
                         volume_estimator = ts.volume_estimator)   # moving grid: the stepper's estimator
 report = adapt_particles!(pg, ad, _extract_order(interp))   # between time steps
 report.inserted, report.removed, report.mass_residual         # residual at round-off
+report.escaped, report.held, report.seeded, report.refused    # open boundaries, events left out (below)
 ```
 
 ### Detection
@@ -66,8 +67,19 @@ Lengths are in units of $\Delta x = \min_d \Delta x_d$.
 
 - **Insertion:** a neighbour pair farther apart than `max_gap` whose midpoint has no particle within `clearance` gets a new particle at the midpoint. The clearance test is what prevents insertions on a regular lattice, where second neighbours are $2\Delta x$ apart but the midpoint is occupied.
 - **Merge:** a neighbour pair closer than `min_gap` is replaced by one particle at its midpoint.
-- At most one event per particle neighbourhood and per call, and at most `max_events` per call. Event centres are kept $R\,(2 + 2\sqrt D) + \Delta x$ apart, so that no event's remap region (the support of its quadrature box) contains a particle that another event removes or adds: the events of one call are remapped one after the other on the old topology, and a particle removed by one event would otherwise take its share of another event's swept content with it. (With the former spacing of $4R$ the regions overlapped in 2-D and 3-D, and calls with several events lost up to $10^{-7}$ of the mass.)
+- At most one event per particle neighbourhood and per round, and at most `max_events` per round. Event centres are kept $R\,(2 + 2\sqrt D) + \Delta x$ apart, so that no event's remap region (the support of its quadrature box) contains a particle that another event removes or adds: the events of one call are remapped one after the other on the old topology, and a particle removed by one event would otherwise take its share of another event's swept content with it. (With the former spacing of $4R$ the regions overlapped in 2-D and 3-D, and calls with several events lost up to $10^{-7}$ of the mass.)
+- **Rounds:** a call repeats detection, remaps, topology change and neighbour search until no pair violates the rules, at most `max_rounds` times (default 8; the volumes are re-estimated once, at the end). The spacing above allows a few events per $(13\,\Delta x)^2$ and round in 2-D at $R = 2.5\,\Delta x$, and a pair is only found while it is a neighbour pair: a gap between `max_gap` and $R$ that is not served in time grows beyond $R$ and is never filled. With one round per step (up to 0.9.9) the centre of a Sedov blast at $R = 2.5\,\Delta x$ lost its stencils (2 neighbours) and the run blew up at $t = 0.1$; with rounds it keeps 14 and completes.
+- **Not outside the region:** no event is centred outside the region (the midpoint of a pair can lie there: it would be an interior particle without a volume, with the state 0/0), and an event that cannot be remapped is left out (`report.refused`): one next to a particle without a usable volume, or whose new particle gets no share of the region. Such events used to stop the run with "Remap produced no volume".
 - **Shock band:** with `exclude_reduced_order`, no event happens within $4R$ of a particle whose MOOD order was lowered during the last step. Interpolation of any order is unreliable across a discontinuity, and a Lagrangian grid in a shock region is better left alone (or driven towards Eulerian motion by the mover).
+
+### Open boundaries
+
+On a moving cloud (a grid mover) the call first keeps the cloud inside the region and up to its boundary:
+
+- **Escaped particles.** An interior particle that has left the region is removed with its content, the outflow (`report.escaped`, `report.escaped_content`). Up to 0.9.9 such particles stayed outside (37 % of the cloud of the 2-D Riemann problem C6 by $t = 0.3$), kept interacting with the ghosts and with each other, and got no volume from an estimator. A particle that crossed a wall is put back onto the wall instead (`report.held`): a `MirrorBC` of a shape-based domain, or any condition type that declares [`is_wall`](@ref). Only particles with a ghost among their neighbours (or with none) are tested, so the test costs one kernel on a cloud that stays inside.
+- **Seeds.** Where an interior particle and a ghost among its neighbours are farther apart than `max_gap`, with the midpoint inside the region and free within `clearance`, a new interior particle is put at the midpoint (`report.seeded`): the cloud receded from the boundary, an inflow. Its state is the mean of the pair's (the ghost's is the boundary datum), its volume the estimator's (the nominal $\prod_d \Delta x_d$ without one). A seed is not a remap event: the gap is volume that no particle holds, and its content enters the region (`report.seeded_content`). A whole row is seeded in one call.
+
+What leaves and what the seeds bring is not part of `mass_residual`: the interior content changes by `seeded_content - escaped_content + mass_residual` over the call, with the residual at round-off.
 
 ### The conservative remap
 
@@ -82,6 +94,8 @@ where $\tilde U$ is the limited (bound-clipped) linear reconstruction of the *ol
 
 Two corrections follow:
 
+A survivor's volume changes by its swept share relative to the larger of its volume and its share of the quadrature box: $V_i \leftarrow V_i + \delta V_i \min(1, V_i / \int_{\text{box}} \phi_i^{\text{old}})$, and its swept content is scaled alike. For volumes that are the partition's this is $V_i + \delta V_i$. Volumes that are not (an estimator of higher degree, the scheme's own of the content form) can be smaller than the share an event takes away; the former $\max(V_i + \delta V_i,\ 10^{-12} V_i)$ then left volumes of $10^{-12} V_i$ with a negative content, and repeated events volumes of $10^{-148}$ (Sedov). The residual step keeps both sums exact.
+
 1. **Residual.** The stored content of a removed particle, $V_r U_r$, is not exactly $\int \phi_r^{\text{old}} \tilde U$. The difference is spread over the affected particles in proportion to their new volumes, so $\sum V U$ is preserved to round-off.
 2. **Repair.** Each affected particle is clipped to the bounds of its old neighbourhood, and the clipped content is redistributed to affected particles that still have room. This enforces the discrete maximum principle while keeping the sum exact; if no room is left, the remainder is spread by volume and the bounds are violated by that remainder.
 
@@ -91,11 +105,11 @@ Then the particle arrays are compacted/extended, the neighbour lists are rebuilt
 
 ### Volumes after the call
 
-The remap's volumes $V_i + \delta V_i$ are integrals of the Shepard partition. A moving grid re-estimates the volumes after the next step with its own estimator, which defines volumes differently (per particle, the two differ by several percent near an event), and that re-estimation would change $\sum V U$ by about as much as an event moves. With `volume_estimator` set (the builders pass the stepper's estimator on moving grids), `adapt_particles!` therefore re-estimates the volumes right after the topology change and puts the resulting change of the interior $\sum V U$ back onto the particles the remap changed, with the bounded, exactly conservative redistribution of the repair above. The call is then exact for the volumes the following steps use, and the states differ from the remap's only by that small correction. Ghost particles carry no volume, so the interior content is the whole content and `total_mass` stays exact as well. (Up to version 0.7.9 the ghosts had volumes and their content change was put onto the interior particles, i.e. moved across the wall: about $10^{-3}$ of the mass per event next to a wall; in 0.8 it stayed with the ghosts.) (Keeping each particle's content $V_i U_i$ across the re-estimation would also be exact, but it puts the per-particle volume differences, up to 18 % next to a merge, into the states.)
+The remap's volumes $V_i + \delta V_i$ are integrals of the Shepard partition. A moving grid re-estimates the volumes after the next step with its own estimator, which defines volumes differently (per particle, the two differ by several percent near an event), and that re-estimation would change $\sum V U$ by about as much as an event moves. With `volume_estimator` set (the builders pass the stepper's estimator on moving grids), `adapt_particles!` therefore re-estimates the volumes right after the topology change and puts the resulting change of the interior $\sum V U$ back onto the particles the remap changed (with `own_volumes = true`, for a stepper that keeps its volumes between the steps, [`keeps_own_volumes`](@ref): only the changed particles take the estimator's volumes and only their change is balanced; replacing all volumes there, as up to 0.9.9, put the mismatch between the scheme's and the estimator's volumes of the whole cloud onto the changed particles), with the bounded, exactly conservative redistribution of the repair above. The call is then exact for the volumes the following steps use, and the states differ from the remap's only by that small correction. Ghost particles carry no volume, so the interior content is the whole content and `total_mass` stays exact as well. (Up to version 0.7.9 the ghosts had volumes and their content change was put onto the interior particles, i.e. moved across the wall: about $10^{-3}$ of the mass per event next to a wall; in 0.8 it stayed with the ghosts.) (Keeping each particle's content $V_i U_i$ across the re-estimation would also be exact, but it puts the per-particle volume differences, up to 18 % next to a merge, into the states.)
 
 ### What the remap does not do
 
-- It does not change states outside the event's $3R$–$4R$ neighbourhood, so far-field solutions are untouched (with `volume_estimator`, far-field *volumes* change by the estimator's global renormalisation, typically $O(1/N)$).
+- It does not change states outside the event's $3R$–$4R$ neighbourhood, so far-field solutions are untouched (with `volume_estimator`, far-field *volumes* change by the estimator's global renormalisation, typically $O(1/N)$; not with `own_volumes`).
 - It does not conserve across the time step itself; see above.
 - It does not move particles for mesh quality. A repulsion or smoothing term belongs in the `GridMover`, and keeps the particle set well-spaced *before* adaptivity has to act.
 

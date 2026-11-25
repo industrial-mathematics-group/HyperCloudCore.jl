@@ -507,7 +507,7 @@ function _with_block_vectors(f, bs::BlockState, pg::ParticleGrid)
 end
 
 """
-    adapt_particles!(pg, ad::ParticleAdaptivity, max_order, bs::BlockState) -> (; inserted, removed, mass_residual)
+    adapt_particles!(pg, ad::ParticleAdaptivity, max_order, bs::BlockState) -> (; inserted, removed, mass_residual, …)
 
 The particle adaptivity of the block pipeline: every block of `bs` is remapped, compacted and extended like the
 state of the standard pipeline (`adapt_particles!` with the blocks as extra state arrays), and the block state is
@@ -516,7 +516,7 @@ laid out again for the new particle count. Nothing is copied when no pair of par
 """
 function adapt_particles!(pg::ParticleGrid{D, W, T}, ad::ParticleAdaptivity{T}, max_order::Int, bs::BlockState{W, T}) where {D, W, T}
     bs.N[] == pg.meta.N || throw(ArgumentError("adapt_particles!: the block state was set for $(bs.N[]) particles, the grid has $(pg.meta.N)"))
-    (pg.meta.N > 0 && _has_adapt_candidates(pg, ad)) || return (inserted = 0, removed = 0, mass_residual = zero(State{W, T}))
+    (pg.meta.N > 0 && (!isempty(_escaped_particles(pg)) || _has_adapt_candidates(pg, ad))) || return _adapt_result(State{W, T})
     return _with_block_vectors(lazy -> adapt_particles!(pg, ad, max_order; states = lazy), bs, pg)
 end
 

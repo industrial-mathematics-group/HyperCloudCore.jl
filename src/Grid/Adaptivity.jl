@@ -1,4 +1,4 @@
-export ParticleAdaptivity, adapt_particles!
+export ParticleAdaptivity, adapt_particles!, is_wall
 
 # =========================================================================
 # PARTICLE INSERTION / MERGING WITH A CONSERVATIVE SHAPE-FUNCTION REMAP
@@ -19,23 +19,34 @@ export ParticleAdaptivity, adapt_particles!
 
 """
     ParticleAdaptivity(; max_gap = 1.6, min_gap = 0.5, clearance = 0.7, samples_per_dx = 2,
-                         exclude_reduced_order = true, max_events = typemax(Int), volume_estimator = nothing)
+                         exclude_reduced_order = true, max_events = typemax(Int), max_rounds = 8,
+                         volume_estimator = nothing)
 
 Rules for keeping a moving point cloud well-spaced. Lengths are multiples of the particle spacing
 `dx = minimum(pg.meta.dx)`.
 - **Insertion**: a neighbour pair `(i, j)` farther apart than `max_gap·dx` whose midpoint has no
   particle within `clearance·dx` gets a new particle at the midpoint.
 - **Merge**: a neighbour pair closer than `min_gap·dx` is replaced by one particle at the midpoint.
+- **Open boundaries** (moving clouds): an interior particle that has left the region is removed with its content
+  (the outflow), unless it crossed a wall ([`is_wall`](@ref)) of a shape-based domain, where it is put back onto
+  the wall; and the insertion rule also holds between an interior particle and a ghost: the gap a cloud leaves when
+  it recedes from a boundary (an inflow) is filled with seeds, whose content enters the region. No event is centred
+  outside the region.
 - `exclude_reduced_order`: skip events near particles whose MOOD order was lowered in the last step
   (the shock band), where interpolation of any order is unreliable.
 - `samples_per_dx`: resolution of the remap quadrature lattice.
-- `max_events`: at most this many events per call.
+- `max_events`: at most this many events per round.
+- `max_rounds`: a call repeats detection, remaps and neighbour search until no pair violates the rules, at most this
+  many times. The events of one round are kept apart (below), a few per `(13 dx)^D` in 2-D at `R = 2.5 dx`, and a pair
+  can only be found while it is within the radius `R`: a gap between `max_gap·dx` and `R` that one round per step
+  does not reach in time grows beyond `R` and is never filled (an expanding cloud with a small radius lost its
+  stencils that way). `1` is the behaviour up to 0.9.9.
 - `volume_estimator`: the estimator the time stepper re-estimates the volumes with (a moving grid). After
   the topology change the volumes of the new cloud are estimated with it, and the change of `Σ V U` this
   causes is put back onto the particles the remap changed (bounded by their local extrema, like the remap's
   own repair), so the call is exact for the volumes the next steps use. `nothing` keeps the remap's own
   volumes (right for a static grid, whose volumes are never re-estimated).
-- At most one event per neighbourhood and per call. Event centres are kept `R (2 + 2√D) + dx` apart (see
+- At most one event per neighbourhood and per round. Event centres are kept `R (2 + 2√D) + dx` apart (see
   `_event_spacing`), so no event's remap region contains a particle that another event removes or adds:
   the remaps are independent and the call is exactly conservative. Call once between time steps.
 """
@@ -46,17 +57,19 @@ struct ParticleAdaptivity{T, VE <: Union{Nothing, VolumeEstimator}}
     samples_per_dx::Int
     exclude_reduced_order::Bool
     max_events::Int
+    max_rounds::Int
     volume_estimator::VE
 end
 
 function ParticleAdaptivity(::Type{T} = Float64; max_gap = 1.6, min_gap = 0.5, clearance = 0.7,
                             samples_per_dx::Int = 2, exclude_reduced_order::Bool = true,
-                            max_events::Int = typemax(Int),
+                            max_events::Int = typemax(Int), max_rounds::Int = 8,
                             volume_estimator::Union{Nothing, VolumeEstimator} = nothing) where {T}
     @assert min_gap < 1 < max_gap "need min_gap < 1 < max_gap (in units of dx)"
     @assert max_events >= 1 "max_events must be at least 1"
+    @assert max_rounds >= 1 "max_rounds must be at least 1"
     return ParticleAdaptivity{T, typeof(volume_estimator)}(T(max_gap), T(min_gap), T(clearance), samples_per_dx,
-                                                         exclude_reduced_order, max_events, volume_estimator)
+                                                         exclude_reduced_order, max_events, max_rounds, volume_estimator)
 end
 
 struct _AdaptEvent{D, T}
@@ -65,21 +78,40 @@ struct _AdaptEvent{D, T}
     added::Vector{Space{D, T}}
 end
 
+# The result of a call (`adapt_particles!`)
+_adapt_result(::Type{S}; inserted = 0, removed = 0, mass_residual = zero(S), escaped = 0, held = 0, seeded = 0, refused = 0,
+              escaped_content = zero(S), seeded_content = zero(S)) where {S} =
+    (; inserted, removed, mass_residual, escaped, held, seeded, refused, escaped_content, seeded_content)
+
 # -------------------------------------------------------------------------
 # Driver
 # -------------------------------------------------------------------------
 """
-    adapt_particles!(pg, ad::ParticleAdaptivity, max_order::Int; states = ()) -> (; inserted, removed, mass_residual)
+    adapt_particles!(pg, ad::ParticleAdaptivity, max_order::Int; states = (), own_volumes = false)
+        -> (; inserted, removed, mass_residual, escaped, held, seeded, refused, escaped_content, seeded_content)
 
 Detects holes and clusters, applies the conservative remap for every event on the old topology,
-changes the particle set, and rebuilds the neighbour lists. `max_order` is the scheme's maximum
-consistency order (new particles start there, and `exclude_reduced_order` compares against it).
+changes the particle set, and rebuilds the neighbour lists, in up to `ad.max_rounds` rounds. `max_order` is the
+scheme's maximum consistency order (new particles start there, and `exclude_reduced_order` compares against it).
 Requires valid neighbour lists and volumes (`update_volumes!`). `mass_residual` is the change of the interior
-content `Σ V U` (boundary particles excluded, which carry no volume) over the call, which should be at
-round-off level. Merges and insertions involve interior
-particles only (no insertion between an interior particle and a ghost). On a grid whose buffers
-`reserve!` froze, a `CapacityError` is thrown before the grid is changed: the particle buffers and the neighbour
-slots the new particle set needs (`_slots_after_events`) are checked before the first remap.
+content `Σ V U` (boundary particles excluded, which carry no volume) by the events of the call, which should be at
+round-off level. Merges and insertions involve interior particles only, and no event is centred outside the region;
+`refused` counts the events that could not be remapped and were left out (see `_remap_event!`).
+
+On a moving cloud the call first removes the interior particles that left the region (`escaped`, with the content
+`escaped_content`; those that crossed a wall, [`is_wall`](@ref), are put back onto it: `held`) and seeds the gaps
+between the cloud and the boundary (`seeded`, bringing `seeded_content`), see [`ParticleAdaptivity`](@ref). The
+interior content changes by `seeded_content - escaped_content + mass_residual` over the call.
+
+`own_volumes`: whether the volumes of the cloud are kept by the time stepper between its steps instead of being
+re-estimated after each ([`keeps_own_volumes`](@ref): the content form of the Lagrangian movers). With
+`ad.volume_estimator` only the particles the remaps changed then take the estimator's volumes, and the correction
+that keeps `Σ V U` balances their change alone. `false` (the stepper re-estimates all volumes after every step, with
+the same estimator): all volumes are replaced, as the next step would, and the correction balances the whole change.
+
+On a grid whose buffers `reserve!` froze, a `CapacityError` is thrown before the grid is changed by the seeds or by a
+round: the particle buffers and the neighbour slots the new particle set needs (`_slots_after_events`) are checked
+before the first remap of the round (earlier rounds stay applied, each of them conservative).
 
 The event work (detection, remap, compaction) is serial and runs on the host. On a grid built with
 `device_grid` a kernel first checks whether any neighbour pair violates the spacing rules; only then
@@ -92,56 +124,196 @@ that can grow, `Vector`s or `Growable`s), remapped, compacted and extended exact
 decisions are the same for all, the remap of every array is that of the single state); host grids only.
 `mass_residual` is that of `pg.rhos`.
 """
-function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int; states = ()) where {D, M, T}
-    nothing_done = (inserted = 0, removed = 0, mass_residual = zero(State{M, T}))
+function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int; states = (),
+                          own_volumes::Bool = false) where {D, M, T}
+    nothing_done = _adapt_result(State{M, T})
     pg.meta.N == 0 && return nothing_done
     (ad.volume_estimator !== nothing && has_moving_pieces(pg.geometry)) &&
         throw(ArgumentError("adapt_particles!: a volume estimator together with moving pieces is not supported (the " *
                             "estimators integrate the region at t = 0, the pieces have moved it); use volume_estimator = nothing"))
-    _has_adapt_candidates(pg, ad) || return nothing_done
-    mass0 = interior_mass(pg)
+    escaped = _escaped_particles(pg)
+    (isempty(escaped) && !_has_adapt_candidates(pg, ad)) && return nothing_done
 
     on_host = parent(pg.rhos) isa Array
     (on_host || _host_states(states)) ||
         throw(ArgumentError("adapt_particles!: extra state arrays of a device grid must be host arrays (the events run on a host copy)"))
     hg = on_host ? pg : device_grid(Array, pg)            # the event work is serial: on a host copy of a device grid
-    N  = hg.meta.N
     st_list = states isa _LazyStates ? states : _state_list(hg, states)
 
-    events = _detect_events(hg, ad, max_order)
-    isempty(events) && return nothing_done
+    # Particles that left the region first, then the seeds in the gaps next to the boundary (the events below are
+    # detected on a cloud that is inside the region and reaches its boundary)
+    held, dropped, lost = 0, 0, zero(State{M, T})
+    if !isempty(escaped)
+        held, dropped, lost = _handle_escaped!(hg, escaped, max_order, _states_now(st_list, hg))
+    end
+    mass0    = interior_mass(hg)
+    seed_ids = _seed_boundary!(pg, hg, ad, max_order, st_list)
+    inflow   = interior_mass(hg) - mass0                  # the content the seeds brought (new volume: the gap they fill)
+
+    # Rounds of independent events: detection on the current cloud, the remaps on its topology, the topology change
+    # and the neighbour search, until no pair violates the rules (the volumes are re-estimated once, at the end)
+    n_refused, n_removed, n_added = 0, 0, 0
+    seeds   = Set{Int}(seed_ids)
+    changed = ad.volume_estimator === nothing ? nothing : Dict{Int, Tuple{State{M, T}, State{M, T}}}[]
+    for _ in 1:ad.max_rounds
+        events = _detect_events(hg, ad, max_order)
+        isempty(events) && break
+        N = hg.meta.N
+        all_states = _states_now(st_list, hg)
+        # Capacity first: the remaps below rewrite states and volumes in place, so a `CapacityError` (buffers frozen
+        # by `reserve!`) thrown by `_apply_topology!` would leave the grid in a non-conservative intermediate state
+        N_new = N + sum(ev -> length(ev.added) - length(ev.removed), events)
+        if N_new > N
+            ensure_capacity!(hg, N_new)
+            on_host || ensure_capacity!(pg, N_new)
+        end
+        # ... and the neighbour slots the search after the topology change will need (in the layout of `pg`)
+        total_nb, max_nb = _slots_after_events(hg, events)
+        ensure_capacity!(pg.neighbor, _slot_capacity(eltype(pg.neighbor.ranges), total_nb, max_nb, N_new))
+
+        remove_mask = hg.shared.bit_buffer
+        fill!(view(remove_mask, 1:N), false)
+        new_pos, new_vol = Space{D, T}[], T[]
+        new_rho = [State{M, T}[] for _ in all_states]
+        df = Vector{State{M, T}}(undef, length(hg.neighbor.indices))   # neighbour-slot scratch shared by all events
+
+        record = changed === nothing ? nothing : [Tuple{Int, State{M, T}, State{M, T}}[] for _ in all_states]
+        refused = 0
+        for ev in events
+            # (an event that cannot be remapped, e.g. next to a particle without a volume, is left out: nothing is written)
+            if _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; record = record, states = all_states, strict = false)
+                for r in ev.removed; remove_mask[r] = true; end
+            else
+                refused += 1
+            end
+        end
+        n_refused += refused
+        n_rem = count(view(remove_mask, 1:N))
+        (n_rem + length(new_pos)) == 0 && break           # (every event refused: the next round would find them again)
+        n_removed += n_rem
+        n_added   += length(new_pos)
+        # the particles written so far, by their indices after this round's compaction
+        seeds = _compacted_ids(collect(seeds), remove_mask, N, N - n_rem)
+        if changed !== nothing
+            now = [_compacted_record(r, remove_mask, N, N - n_rem) for r in record]
+            isempty(changed) ? append!(changed, now) :
+                (changed .= [_merge_bounds!(_compacted_bounds(changed[s], remove_mask, N), now[s]) for s in eachindex(now)])
+        end
+        _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
+        hg.neighbor(hg)
+    end
+    (held + dropped + length(seed_ids) + n_removed + n_added) == 0 && return _adapt_result(State{M, T}; refused = n_refused)
+
     all_states = _states_now(st_list, hg)
-    # Capacity first: the remaps below rewrite states and volumes in place, so a `CapacityError` (buffers frozen
-    # by `reserve!`) thrown by `_apply_topology!` would leave the grid in a non-conservative intermediate state
-    N_new = N + sum(ev -> length(ev.added) - length(ev.removed), events)
-    if N_new > N
-        ensure_capacity!(hg, N_new)
-        on_host || ensure_capacity!(pg, N_new)
-    end
-    # ... and the neighbour slots the search after the topology change will need (in the layout of `pg`)
-    total_nb, max_nb = _slots_after_events(hg, events)
-    ensure_capacity!(pg.neighbor, _slot_capacity(eltype(pg.neighbor.ranges), total_nb, max_nb, N_new))
-
-    remove_mask = hg.shared.bit_buffer
-    fill!(view(remove_mask, 1:N), false)
-    new_pos, new_vol = Space{D, T}[], T[]
-    new_rho = [State{M, T}[] for _ in all_states]
-    df = Vector{State{M, T}}(undef, length(hg.neighbor.indices))   # neighbour-slot scratch shared by all events
-
-    record = ad.volume_estimator === nothing ? nothing : [Tuple{Int, State{M, T}, State{M, T}}[] for _ in all_states]
-    for ev in events
-        _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; record = record, states = all_states)
-        for r in ev.removed; remove_mask[r] = true; end
+    on_host || (_upload_particles!(pg, hg); pg.neighbor(pg))
+    if changed !== nothing && (!isempty(changed) || !isempty(seeds))
+        isempty(changed) && append!(changed, (Dict{Int, Tuple{State{M, T}, State{M, T}}}() for _ in all_states))
+        inflow += _reestimate_volumes!(pg, hg, ad.volume_estimator, changed; states = all_states, seeds = seeds,
+                                       own_volumes = own_volumes)
     end
 
-    n_removed = count(view(remove_mask, 1:N))
-    changed = record === nothing ? nothing : [_compacted_record(r, remove_mask, N, N - n_removed) for r in record]
-    _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
-    on_host || _upload_particles!(pg, hg)
-    pg.neighbor(pg)
-    changed === nothing || _reestimate_volumes!(pg, hg, ad.volume_estimator, changed; states = all_states)
+    return _adapt_result(State{M, T}; inserted = n_added, removed = n_removed,
+                         mass_residual = interior_mass(pg) - mass0 - inflow, escaped = dropped, held = held,
+                         seeded = length(seeds), refused = n_refused, escaped_content = lost, seeded_content = inflow)
+end
 
-    return (inserted = length(new_pos), removed = n_removed, mass_residual = interior_mass(pg) - mass0)
+# -------------------------------------------------------------------------
+# Particles that left the region (moving clouds)
+# -------------------------------------------------------------------------
+"""
+    _escaped_particles(pg) -> Vector{Int}
+
+The interior particles of a moving cloud that lie outside the region (at `boundary_time`), with a finite position.
+Only particles next to the boundary can have crossed it since the last call: a kernel flags the interior particles
+with a ghost among their neighbours (or with no neighbour at all), and the region test runs on the host for those.
+"""
+function _escaped_particles(pg::ParticleGrid{D, M, T}) where {D, M, T}
+    out = Int[]
+    (pg.mover isa NoGridMover || pg.meta.N_ghost == 0) && return out
+    N    = pg.meta.N
+    nb   = pg.neighbor
+    flag = pg.shared.bit_buffer
+    foreach_particle(_near_boundary!, get_backend(), N, (flag, pg.core.is_boundary, nb.ranges, nb.indices))
+    any(view(flag, 1:N)) || return out
+    host = parent(pg.core.positions) isa Array
+    near = host ? flag : Array(view(parent(flag), 1:N))
+    pos  = host ? pg.core.positions : Array(view(parent(pg.core.positions), 1:N))
+    geom, t = pg.geometry, pg.meta.boundary_time
+    @inbounds for i in 1:N
+        near[i] || continue
+        x = pos[i]
+        (all(isfinite, x) && !_is_interior(geom, x, t)) && push!(out, i)   # (a NaN position is a blow-up, not an escape)
+    end
+    return out
+end
+# Kernel body (see Backend.jl)
+@inline function _near_boundary!(i, flag, isb, ranges, indices)
+    near = false
+    @inbounds if !isb[i]
+        near = isempty(ranges[i])
+        for k in ranges[i]
+            isb[indices[k]] && (near = true; break)
+        end
+    end
+    @inbounds flag[i] = near
+    return nothing
+end
+
+"""
+    is_wall(bc::AbstractBoundaryCondition) -> Bool
+
+Whether no flow crosses the boundary of the condition `bc`. The particle management of a moving cloud
+([`adapt_particles!`](@ref)) puts an interior particle that crossed such a boundary back onto it (the crossing is
+the noise of its normal velocity) and removes one that crossed any other boundary with its content (an outflow).
+`true` for [`MirrorBC`](@ref), `false` otherwise; define it for a condition type of your own that models a wall.
+"""
+is_wall(::AbstractBoundaryCondition) = false
+is_wall(::MirrorBC) = true
+
+# The tag of a point at time `t` (a domain without a shape has no time dependence)
+_point_tag(geom::GeometricDomain, pos, t) = geom.shape === nothing ? geom.get_tag(pos) : geom.get_tag(pos, t)
+
+# The wall point of a particle that crossed a wall (`is_wall`) of a shape-based domain, `nothing` for every other
+# boundary: a wall has no flow through it, so the crossing is the noise of the particle's normal velocity
+function _hold_at_wall(geom::GeometricDomain{GEO, D, T}, x::Space{D, T}, t) where {GEO, D, T}
+    geom.shape === nothing && return nothing
+    bc = get(geom.bc_map, _point_tag(geom, x, t), nothing)
+    (bc !== nothing && is_wall(bc)) || return nothing
+    n, φ = _wall_geometry(at_time(geom.shape, t), x)
+    (isfinite(φ) && all(isfinite, n)) || return nothing
+    y = x - φ * n
+    δ = 64 * eps(T) * max(one(T), maximum(abs, x))
+    for _ in 1:8                                          # (round-off can leave the wall point just outside)
+        _is_interior(geom, y, t) && return y
+        y -= δ * n
+        δ *= 4
+    end
+    return nothing
+end
+
+# Puts the escaped particles `escaped` back onto their wall or removes them (with their content, which leaves the
+# region: an outflow), and searches the neighbours again. Returns the numbers held and removed and the content removed.
+function _handle_escaped!(hg::ParticleGrid{D, M, T}, escaped::Vector{Int}, max_order::Int, states) where {D, M, T}
+    geom, t = hg.geometry, hg.meta.boundary_time
+    pos, V  = hg.core.positions, hg.core.volumes
+    N       = hg.meta.N
+    mask    = hg.shared.bit_buffer
+    fill!(view(mask, 1:N), false)
+    held, dropped, lost = 0, 0, zero(State{M, T})
+    for i in escaped
+        y = _hold_at_wall(geom, pos[i], t)
+        if y === nothing
+            mask[i] = true
+            dropped += 1
+            lost += V[i] * states[1][i]
+        else
+            pos[i] = y
+            held += 1
+        end
+    end
+    dropped > 0 && _apply_topology!(hg, mask, Space{D, T}[], [State{M, T}[] for _ in states], T[], max_order; states = states)
+    hg.neighbor(hg)
+    return held, dropped, lost
 end
 
 # The state arrays an event changes: the grid's own first, then the extra ones (the blocks of a block state)
@@ -245,7 +417,110 @@ function _compacted_record(record::Vector{Tuple{Int, State{M, T}, State{M, T}}},
 end
 
 """
-    _reestimate_volumes!(pg, hg, est, changed)
+    _seed_boundary!(pg, hg, ad, max_order, states) -> Vector{Int}
+
+New interior particles in the gaps between the cloud and the boundary: where an interior particle and a ghost among
+its neighbours are farther apart than `max_gap·dx`, with the midpoint inside the region and no particle (or earlier
+seed) within `clearance·dx` of it. A moving cloud recedes from a boundary with inflow; without the seeds the first
+interior row loses the ghosts from its stencils, and the volume estimators extrapolate into the gap.
+
+A seed is not a remap event: the gap is volume no particle of the cloud holds, and what fills it enters the region.
+Its state is the mean of the pair's (the ghost's is the boundary datum, the interior particle's the solution next to
+it), its volume the nominal `prod(dx)` until an estimator replaces it (`_reestimate_volumes!`). A whole row is
+seeded in one call (the event spacing of the conservative remaps allowed a few per boundary and call: a cloud
+receding at the flow speed opened the gap faster). Returns the indices of the seeds; the neighbours are searched
+again if there are any.
+"""
+function _seed_boundary!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int, st_list) where {D, M, T}
+    (hg.mover isa NoGridMover || hg.meta.N_ghost == 0) && return Int[]
+    N, nb   = hg.meta.N, hg.neighbor
+    pos, isb, orders = hg.core.positions, hg.core.is_boundary, hg.core.particle_orders
+    dx      = minimum(hg.meta.dx)
+    L, Li   = hg.domain.L_wrap, hg.domain.invL_wrap
+    geom, t = hg.geometry, hg.meta.boundary_time
+    max_gap_sq, clear_sq = (ad.max_gap * dx)^2, (ad.clearance * dx)^2
+    new_pos = Space{D, T}[]
+    pairs   = Tuple{Int, Int}[]
+    @inbounds for i in 1:N
+        isb[i] && continue
+        (ad.exclude_reduced_order && 0 < orders[i] < max_order) && continue
+        for k in nb.ranges[i]
+            j = nb.indices[k]
+            (isb[j] && sum(abs2, nb.distances[k]) > max_gap_sq) || continue
+            mid = _wrap_point(hg, pos[i] + nb.distances[k] / 2)
+            _is_interior(geom, mid, t) || continue
+            empty = true
+            for k2 in nb.ranges[i]
+                if sum(abs2, _wrapped_diff(pos[nb.indices[k2]], mid, L, Li)) < clear_sq
+                    empty = false; break
+                end
+            end
+            empty || continue
+            any(x -> sum(abs2, _wrapped_diff(x, mid, L, Li)) < clear_sq, new_pos) && continue
+            push!(new_pos, mid); push!(pairs, (i, j))
+            break                                         # one seed per interior particle and call
+        end
+    end
+    isempty(new_pos) && return Int[]
+    states = _states_now(st_list, hg)
+    N_new  = N + length(new_pos)
+    # (capacity before the grid is changed, as for the events)
+    ensure_capacity!(hg, N_new)
+    hg === pg || ensure_capacity!(pg, N_new)
+    total_nb, max_nb = _slots_after_events(hg, [_AdaptEvent{D, T}(x, Int[], [x]) for x in new_pos])
+    ensure_capacity!(pg.neighbor, _slot_capacity(eltype(pg.neighbor.ranges), total_nb, max_nb, N_new))
+    new_rho = [[(st[i] + st[j]) / 2 for (i, j) in pairs] for st in states]
+    mask = hg.shared.bit_buffer
+    fill!(view(mask, 1:N), false)
+    _apply_topology!(hg, mask, new_pos, new_rho, fill(prod(hg.meta.dx), length(new_pos)), max_order; states = states)
+    hg.neighbor(hg)
+    return collect((N + 1):N_new)
+end
+
+# The bounds of an earlier round (`index => (lo, hi)`) by the indices after a compaction (removed particles dropped)
+function _compacted_bounds(b::Dict{Int, Tuple{State{M, T}, State{M, T}}}, remove_mask, N::Int) where {M, T}
+    new_index = zeros(Int, N)
+    c = 0
+    @inbounds for i in 1:N
+        remove_mask[i] || (c += 1; new_index[i] = c)
+    end
+    out = Dict{Int, Tuple{State{M, T}, State{M, T}}}()
+    for (i, v) in b
+        k = new_index[i]
+        k == 0 || (out[k] = v)
+    end
+    return out
+end
+# The union of two sets of bounds (a particle written twice gets the union of its bounds)
+function _merge_bounds!(a::Dict{Int, Tuple{State{M, T}, State{M, T}}}, b::Dict{Int, Tuple{State{M, T}, State{M, T}}}) where {M, T}
+    for (k, (lo, hi)) in b
+        if haskey(a, k)
+            lo0, hi0 = a[k]
+            a[k] = (min.(lo0, lo), max.(hi0, hi))
+        else
+            a[k] = (lo, hi)
+        end
+    end
+    return a
+end
+
+# The compacted indices of raw record indices (`j > 0`: an old particle, `-a`: the `a`-th new one), as `_compacted_record`
+function _compacted_ids(raw::Vector{Int}, remove_mask, N::Int, N_kept::Int)
+    new_index = zeros(Int, N)
+    c = 0
+    @inbounds for i in 1:N
+        remove_mask[i] || (c += 1; new_index[i] = c)
+    end
+    out = Set{Int}()
+    for j in raw
+        k = j > 0 ? new_index[j] : N_kept - j
+        k == 0 || push!(out, k)
+    end
+    return out
+end
+
+"""
+    _reestimate_volumes!(pg, hg, est, changed; seeds) -> inflow
 
 Replaces the remap's volumes by those of `est` (the time stepper's estimator) and puts the change of `Σ V U` this
 causes back onto the particles the remap changed (`changed`, by index with their local bounds), with the bounded,
@@ -256,19 +531,57 @@ and an estimator's differ by several percent per particle near an event, which t
 `hg` is the host grid of the event work (`pg` itself on the host, its host copy for a device grid).
 Ghost particles carry no volume, so the interior content is the whole content (up to 0.7.9 the ghosts had volumes
 and their content change was moved onto the interior, i.e. across the wall).
+
+`own_volumes` (the stepper keeps its volumes between the steps, the scheme's own of the content form): only the
+particles the remaps changed and the seeds take the estimator's volumes, every other particle keeps its volume, and
+the correction balances the change of the changed particles. Replacing all volumes there (as up to 0.9.9) put the
+mismatch between the scheme's and the estimator's volumes of every particle of the cloud onto the changed particles.
+Otherwise all volumes are replaced, as the stepper's next re-estimation would, and the correction balances the whole
+change (an estimator renormalises all volumes when the particle set changes).
+
+The seeds (`seeds`, see `_seed_boundary!`) take their volume without a correction: the gap they fill is new volume,
+and its content enters the region. An estimate without a volume (clamped, or a particle no sample point reaches) is
+not taken. Returns the content that entered with the seeds' volumes (of the first state array).
 """
 function _reestimate_volumes!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, est::VolumeEstimator,
-                              changed::Vector{Dict{Int, Tuple{State{M, T}, State{M, T}}}}; states = _state_list(hg, ())) where {D, M, T}
+                              changed::Vector{Dict{Int, Tuple{State{M, T}, State{M, T}}}}; states = _state_list(hg, ()),
+                              seeds::Set{Int} = Set{Int}(), own_volumes::Bool = false) where {D, M, T}
     N = pg.meta.N
     on_host = hg === pg
-    m_remap = [interior_mass(hg, st) for st in states]          # (hg holds the same cloud and volumes as pg)
+    V_remap = collect(view(hg.core.volumes, 1:N))               # (hg holds the same cloud and volumes as pg)
     update_volumes!(pg, est)
     on_host || copyto!(parent(hg.core.volumes), 1, parent(pg.core.volumes), 1, N)
+    touched = Set{Int}(seeds)
+    for c in changed; union!(touched, keys(c)); end
+    Vh = hg.core.volumes
+    @inbounds for i in 1:N
+        ((!own_volumes || i in touched) && Vh[i] > 0 && isfinite(Vh[i])) || (Vh[i] = V_remap[i])
+        # A stepper that keeps the volumes uses them as they are (the pair-antisymmetric dissipation of the Lagrangian
+        # frame weights a pair with V_j / V_i), and an estimator of higher degree gives single particles next to a
+        # boundary or a hole volumes of 1e-3 of their neighbours' (MLS of degree 2, C6 at R = 2.5 dx: one such particle
+        # went to a density of −18 in the next step). The estimate is taken within a factor 8 of the remap's volume
+        # (the particle's share of the partition, the nominal volume of a seed).
+        (own_volumes && V_remap[i] > 0) && (Vh[i] = clamp(Vh[i], V_remap[i] / 8, 8 * V_remap[i]))
+    end
+    isb = hg.core.is_boundary
+    inflow = zero(State{M, T})                                  # the seeds' change of content (of the first array)
+    for i in seeds; inflow += (Vh[i] - V_remap[i]) * states[1][i]; end
     for (s, st) in enumerate(states)
-        ε = m_remap[s] - interior_mass(hg, st)
-        (isempty(changed[s]) || iszero(ε)) && continue
-        ids = collect(keys(changed[s]))
-        V   = [hg.core.volumes[i] for i in ids]
+        ids = [i for i in keys(changed[s]) if !(i in seeds)]
+        ε = zero(State{M, T})                                   # the change of content to balance: of the changed
+        if own_volumes                                          # particles, or of the whole cloud (without the seeds)
+            for i in ids; ε += (V_remap[i] - Vh[i]) * st[i]; end
+        else
+            @inbounds for i in 1:N
+                (isb[i] || i in seeds) || (ε += (V_remap[i] - Vh[i]) * st[i])
+            end
+        end
+        if isempty(ids)                                         # (seeds alone: no remapped particle to balance on)
+            s == 1 && (inflow -= ε)
+            continue
+        end
+        iszero(ε) && continue
+        V   = [Vh[i] for i in ids]
         Vs  = sum(V)
         Vs > 0 || continue
         U   = [st[i] + ε / Vs for i in ids]                     # Σ V U over the set changes by exactly ε ...
@@ -277,8 +590,11 @@ function _reestimate_volumes!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, 
             st[i] = U[k]
         end
     end
-    on_host || copyto!(parent(pg.rhos), 1, parent(hg.rhos), 1, N)
-    return nothing
+    if !on_host
+        copyto!(parent(pg.core.volumes), 1, parent(hg.core.volumes), 1, N)
+        copyto!(parent(pg.rhos), 1, parent(hg.rhos), 1, N)
+    end
+    return inflow
 end
 
 """
@@ -295,25 +611,30 @@ function _has_adapt_candidates(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity
     dom  = pg.domain
     dx   = minimum(pg.meta.dx)
     flag = pg.shared.bit_buffer
+    geom = pg.geometry
     foreach_particle(_adapt_candidate!, get_backend(), N,
         (flag, pg.core.positions, pg.core.is_boundary, nb.ranges, nb.indices, nb.distances, dom.L_wrap, dom.invL_wrap,
-         dom.is_periodic, dom.L, dom.canvas_mins, (ad.min_gap * dx)^2, (ad.max_gap * dx)^2, (ad.clearance * dx)^2))
+         dom.is_periodic, dom.L, dom.canvas_mins, (ad.min_gap * dx)^2, (ad.max_gap * dx)^2, (ad.clearance * dx)^2,
+         (geom.mins, geom.maxs)))
     return any(view(flag, 1:N))
 end
 
 # Kernel body (see Backend.jl): the pair tests of `_detect_events` without the event bookkeeping.
 @inline function _adapt_candidate!(i, flag, pos, isb, ranges, indices, dists, L, Li, is_per, Lv, mins,
-                                   min_gap_sq, max_gap_sq, clear_sq)
+                                   min_gap_sq, max_gap_sq, clear_sq, box)
     found = false
     if !isb[i]
         @inbounds for k in ranges[i]
             j = indices[k]
-            j > i || continue
+            (j > i || isb[j]) || continue
             d2 = sum(abs2, dists[k])
             if d2 < min_gap_sq
                 isb[j] || (found = true)
-            elseif d2 > max_gap_sq && !isb[j]
+            elseif d2 > max_gap_sq
                 mid   = _wrap_coords(pos[i] + dists[k] / 2, is_per, Lv, mins)
+                # (towards a ghost only with the midpoint inside the region's box: the band of ghosts has such pairs
+                # at every boundary; the region test itself is the host's, in `_detect_events`)
+                (isb[j] && !_in_box(mid, box[1], box[2], is_per)) && continue
                 empty = true
                 for k2 in ranges[i]
                     if sum(abs2, _wrapped_diff(pos[indices[k2]], mid, L, Li)) < clear_sq
@@ -329,6 +650,9 @@ end
     flag[i] = found
     return nothing
 end
+
+@inline _in_box(x::Space{D, T}, lo, hi, is_per) where {D, T} =
+    all(ntuple(d -> is_per[d] || (lo[d] <= x[d] <= hi[d]), Val(D)))
 
 # Copies the adapted particle set of the host copy `hg` back into the device grid `pg` (growing it as needed).
 function _upload_particles!(pg::ParticleGrid, hg::ParticleGrid)
@@ -399,6 +723,7 @@ function _detect_events(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ma
     max_gap_sq, min_gap_sq, clear_sq = (ad.max_gap * dx)^2, (ad.min_gap * dx)^2, (ad.clearance * dx)^2
     spacing_sq = _event_spacing(pg)^2
     events = _AdaptEvent{D, T}[]
+    geom, t_bnd = pg.geometry, pg.meta.boundary_time
 
     @inbounds for i in 1:N
         (isb[i] || touched[i]) && continue
@@ -413,18 +738,20 @@ function _detect_events(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ma
                 best_k, best_d2 = k, d2
             end
         end
-        if best_k != 0
-            mid = _wrap_point(pg, pos[i] + nb.distances[best_k] / 2)
+        mid = best_k == 0 ? pos[i] : _wrap_point(pg, pos[i] + nb.distances[best_k] / 2)
+        # (the midpoint of a pair inside a non-convex region can lie outside it: no particle is put there, it would be
+        # an interior particle without a volume, out of reach of the boundary conditions)
+        if best_k != 0 && _is_interior(geom, mid, t_bnd)
             ev = _AdaptEvent{D, T}(mid, [i, nb.indices[best_k]], [mid])
-        else
-            # Insertion: a far neighbour with an empty midpoint
+        elseif best_k == 0
+            # Insertion: a far interior neighbour with an empty midpoint inside the region (the gaps towards the
+            # ghosts are filled by `_seed_boundary!`)
             for k in nb.ranges[i]
                 j = nb.indices[k]
                 d2 = sum(abs2, nb.distances[k])
-                # Not towards a ghost (as for merges): the midpoint may lie outside the domain, and the new
-                # particle would be flagged interior there, out of reach of the boundary conditions
                 (j > i && !isb[j] && !touched[j] && d2 > max_gap_sq) || continue
                 mid = _wrap_point(pg, pos[i] + nb.distances[k] / 2)
+                _is_interior(geom, mid, t_bnd) || continue
                 empty = true
                 for k2 in nb.ranges[i]
                     if sum(abs2, _wrapped_diff(pos[nb.indices[k2]], mid, L, Li)) < clear_sq
@@ -462,7 +789,8 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
                        new_pos::Vector{Space{D, T}}, new_rho::Vector{Vector{State{M, T}}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = Vector{State{M, T}}(undef, length(pg.neighbor.indices));
                        record::Union{Nothing, Vector{Vector{Tuple{Int, State{M, T}, State{M, T}}}}} = nothing,
-                       removed_mask = nothing, point_values::Bool = false, states = _state_list(pg, ())) where {D, M, T}
+                       removed_mask = nothing, point_values::Bool = false, states = _state_list(pg, ()),
+                       strict::Bool = true) where {D, M, T}
     nb     = pg.neighbor
     pos    = pg.core.positions
     V      = pg.core.volumes
@@ -526,6 +854,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     # 3. Quadrature over the box center ± half (the region at `boundary_time`: moving pieces have been swept)
     t_bnd = pg.meta.boundary_time
     δV  = zeros(T, n_loc + n_add)
+    I_old = zeros(T, n_loc)                             # ∫ φ_old over the box: the share a survivor can lose at most
     δm  = [zeros(State{M, T}, n_loc + n_add) for _ in 1:nS]
     hq  = dx / ad.samples_per_dx
     nq  = ceil(Int, 2half / hq)
@@ -588,7 +917,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
                 (l == 0 || is_removed[l] || is_fixed[l]) && continue
                 wk = wf(sum(abs2, qd[k]))
                 dφ = wk * inv_new - wk * inv_old
-                s == 1 && (δV[l] += ω * dφ)
+                s == 1 && (δV[l] += ω * dφ; I_old[l] += ω * wk * inv_old)
                 δm[s][l] += (ω * dφ) * u_rec
             end
             @inbounds for a in 1:n_add
@@ -605,19 +934,51 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         (is_fixed[l] || is_other[l]) && continue           # (other events' removals: counting them once per
         V_before += V[loc_idx[l]]                          # overlapping event handed their volume out repeatedly)
     end
+    # A survivor's volume changes by its swept share δV, relative to the larger of its volume and its share of the box
+    # (∫ φ_old ≥ −δV): the same as V + δV for volumes that are the partition's (V ≥ ∫ φ_old over the box), and a
+    # positive volume for the others. Volumes that are not the remap's partition (an estimator of higher degree, the
+    # scheme's own of the content form) can be smaller than the share an event takes away; `max(V + δV, 1e-12 V)` then
+    # left a volume of 1e-12 V with the content of V + δV < 0, and the next event near it another factor (volumes of
+    # 1e-148 on the Sedov blast, states of content / volume, "Remap produced no volume" in the end). The swept
+    # content is scaled alike, and the residual correction below keeps both sums exact.
     Vn = zeros(T, n_loc + n_add)
+    fV = ones(T, n_loc)
     V_after = zero(T)
     @inbounds for l in 1:n_loc
         (is_removed[l] || is_fixed[l]) && continue
         j = loc_idx[l]
-        Vn[l] = max(V[j] + δV[l], T(1e-12) * V[j])
+        fV[l] = (V[j] > 0 && I_old[l] > V[j]) ? V[j] / I_old[l] : one(T)
+        Vn[l] = max(V[j] + fV[l] * δV[l], zero(T))
         V_after += Vn[l]
     end
     @inbounds for a in 1:n_add
         Vn[n_loc + a] = max(δV[n_loc + a], zero(T))
         V_after += Vn[n_loc + a]
     end
-    V_after > 0 || error("Remap produced no volume at $(ev.center); increase samples_per_dx.")
+    # `strict = false` (the adaptivity): an event that cannot be remapped is refused, nothing is written and `false` is
+    # returned. That is an event whose particles have no usable volumes (non-finite, or none at all: an interior
+    # particle outside the region that the estimator gave nothing), or whose new particle gets no share of the
+    # region (it would be a particle with the state 0/0). More quadrature points do not help there.
+    if !(V_after > 0 && isfinite(V_after) && isfinite(V_before))
+        strict && error("Remap produced no volume at $(ev.center); increase samples_per_dx.")
+        @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = 0; end
+        return false
+    end
+    if !strict
+        vmin = T(1e-6) * hq^D
+        ok = true
+        @inbounds for l in 1:n_loc
+            (is_removed[l] || is_fixed[l]) && continue
+            (Vn[l] > 0 && isfinite(Vn[l])) || (ok = false; break)
+        end
+        @inbounds for a in 1:n_add
+            Vn[n_loc + a] > vmin || (ok = false)
+        end
+        if !ok
+            @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = 0; end
+            return false
+        end
+    end
     εV = V_before - V_after
     mn = [zeros(State{M, T}, n_loc + n_add) for _ in 1:nS]
     for s in 1:nS
@@ -631,7 +992,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         @inbounds for l in 1:n_loc
             (is_removed[l] || is_fixed[l]) && continue
             j = loc_idx[l]
-            mn[s][l] = V[j] * U[j] + δm[s][l]
+            mn[s][l] = V[j] * U[j] + fV[l] * δm[s][l]
             m_after += mn[s][l]
         end
         @inbounds for a in 1:n_add
@@ -654,6 +1015,9 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     for l in 1:n_loc; (is_removed[l] || is_fixed[l]) || push!(aff, l); end
     for a in 1:n_add; push!(aff, n_loc + a); end
     V_aff = [Vn[l] for l in aff]
+    Un_s  = Vector{Vector{State{M, T}}}(undef, nS)
+    lo_s  = Vector{Vector{State{M, T}}}(undef, nS)
+    hi_s  = Vector{Vector{State{M, T}}}(undef, nS)
     for s in 1:nS
         U  = states[s]
         Un = [mn[s][l] / Vn[l] for l in aff]
@@ -678,8 +1042,17 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         else
             _dmp_repair!(Un, V_aff, lo_a, hi_a)
         end
+        Un_s[s], lo_s[s], hi_s[s] = Un, lo_a, hi_a
+    end
+    if !strict && !all(Un -> all(u -> all(isfinite, u), Un), Un_s)      # (non-finite old states in the local set)
+        @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = 0; end
+        return false
+    end
 
-        # 6. Write back (the volumes with the first state array)
+    # 6. Write back (the volumes with the first state array)
+    for s in 1:nS
+        U = states[s]
+        Un, lo_a, hi_a = Un_s[s], lo_s[s], hi_s[s]
         for (p, l) in enumerate(aff)
             if l <= n_loc
                 j = loc_idx[l]
@@ -694,7 +1067,7 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
         end
     end
     @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = 0; end
-    return nothing
+    return true
 end
 
 # The single-state forms (the grid's own state only), as before the state arrays were threaded through
