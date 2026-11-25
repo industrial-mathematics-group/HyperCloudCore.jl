@@ -556,6 +556,12 @@ function _reestimate_volumes!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, 
     Vh = hg.core.volumes
     @inbounds for i in 1:N
         ((!own_volumes || i in touched) && Vh[i] > 0 && isfinite(Vh[i])) || (Vh[i] = V_remap[i])
+        # A stepper that keeps the volumes uses them as they are (the pair-antisymmetric dissipation of the Lagrangian
+        # frame weights a pair with V_j / V_i), and an estimator of higher degree gives single particles next to a
+        # boundary or a hole volumes of 1e-3 of their neighbours' (MLS of degree 2, C6 at R = 2.5 dx: one such particle
+        # went to a density of −18 in the next step). The estimate is taken within a factor 8 of the remap's volume
+        # (the particle's share of the partition, the nominal volume of a seed).
+        (own_volumes && V_remap[i] > 0) && (Vh[i] = clamp(Vh[i], V_remap[i] / 8, 8 * V_remap[i]))
     end
     isb = hg.core.is_boundary
     inflow = zero(State{M, T})                                  # the seeds' change of content (of the first array)

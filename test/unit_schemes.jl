@@ -1484,6 +1484,13 @@ end
     end
 end
 
+# An estimator whose volumes are far too small (the check of the bound on estimates taken into kept volumes)
+struct TinyVolumes <: HyperCloudCore.VolumeEstimator end
+function HyperCloudCore.update_volumes!(pg::ParticleGrid, ::TinyVolumes)
+    for i in 1:pg.meta.N; pg.core.volumes[i] = 1e-6 * minimum(pg.meta.dx); end
+    return nothing
+end
+
 @testset "Particle adaptivity" begin
     ic   = x -> 1.0 + 0.5 * sin(π * x)
     kmax = 3
@@ -1898,6 +1905,16 @@ end
         rep  = adapt_particles!(pg, ParticleAdaptivity(Float64; volume_estimator = est), kmax; own_volumes = true)
         @test rep.inserted == 1 && abs(rep.mass_residual[1]) < 1e-12
         @test [pg.core.volumes[i] for i in far] == Vfar && [pg.rhos[i] for i in far] == Ufar
+        # an estimate far from the particle's share is not taken as it is into kept volumes (an estimator of higher degree
+        # gives single particles next to a hole 1e-3 of their neighbours' volume, and the Lagrangian frame's pair
+        # dissipation weights with the ratio): within a factor 8 of the remap's volume
+        pgt = set_ic!(make_pg_1d(80), ic)
+        punch_hole!(pgt, 10)
+        Vmin0 = minimum(view(pgt.core.volumes, 1:pgt.meta.N))
+        rep = adapt_particles!(pgt, ParticleAdaptivity(Float64; volume_estimator = TinyVolumes()), kmax; own_volumes = true)
+        @test rep.inserted == 1 && abs(rep.mass_residual[1]) < 1e-12
+        @test minimum(view(pgt.core.volumes, 1:pgt.meta.N)) > Vmin0 / 20     # (the content is kept: the states of the changed
+                                                                                # particles rise with such an estimator)
         # the stepper says which case it is: the content form of the Lagrangian movers with MUSCL
         muscl = MUSCL(Float64, 1, 1, 2, MinmodLimiter(:hard), RusanovFlux())
         ts_m  = GeneralRKTimeStepper(make_advection_1d(), muscl, MOOD(), RK2_SSP_Tableau(Float64))
