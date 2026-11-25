@@ -3,7 +3,7 @@
     build_adaptivity(adapt_conf, context) -> Union{ParticleAdaptivity, Nothing}
 
 `Adapt` namespace. `nothing` unless `:enabled` is `true`; then a [`ParticleAdaptivity`](@ref) with the
-optional keys `:max_gap` (1.6), `:min_gap` (0.5), `:clearance` (0.7), `:samples_per_dx` (2),
+optional keys `:max_gap` and `:clearance` (by the dimension: 1.6 and 0.7 up to 2-D), `:min_gap` (0.5), `:samples_per_dx` (2),
 `:exclude_reduced_order` (`true`), `:max_events` (unlimited) and `:max_rounds` (8), see [Particle insertion and merging](@ref).
 On a moving grid (`context[:Grid]`) the adaptivity re-estimates the volumes with
 `context[:VolumeEstimator]` (set by [`build_particle_grid`](@ref); `ShepardVolumes()` if absent, as in
@@ -20,9 +20,9 @@ function build_adaptivity(conf::Dict, context::Dict)
     # cloud with moving pieces keeps the remap's volumes (estimators integrate the region at t = 0 and are refused)
     moving = pg isa ParticleGrid && !(pg.mover isa NoGridMover)
     return ParticleAdaptivity(T;
-        max_gap               = get(conf, :max_gap, 1.6),
+        max_gap               = get(conf, :max_gap, nothing),      # (by the dimension, see `ParticleAdaptivity`)
         min_gap               = get(conf, :min_gap, 0.5),
-        clearance             = get(conf, :clearance, 0.7),
+        clearance             = get(conf, :clearance, nothing),
         samples_per_dx        = get(conf, :samples_per_dx, 2),
         exclude_reduced_order = get(conf, :exclude_reduced_order, true),
         max_events            = get(conf, :max_events, typemax(Int)),

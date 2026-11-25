@@ -431,7 +431,6 @@ function _sweep_round!(hg::ParticleGrid{D, M, T}, ad, events::Vector{_AdaptEvent
     end
     new_pos, new_vol = Space{D, T}[], T[]
     new_rho = [State{M, T}[] for _ in sts]
-    length(df) < length(hg.neighbor.indices) && resize!(df, length(hg.neighbor.indices))
     for ev in events
         _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; removed_mask = mask, point_values = true, states = sts)
     end
