@@ -136,7 +136,7 @@ On a device grid the events still run on the host, on a copy of the particle arr
 | 3-D blast, 100³ | A40 | 1.01 M | 610 ms | 4277 ms | 557 ms | 7.0 → 0.91 |
 | 3-D vortex, 100³ | A40 | 1.02 M | 592 ms | 3215 ms | 470 ms | 5.4 → 0.79 |
 
-The copies between the device and the host are then 10 to 30 ms of a call. What is left in 3-D is the quadrature of the remaps (about 200 ms at 100³, serial, the same code as on the host), the device search at the end (96 ms) and the pre-check (43 ms); in 2-D the passes over the whole cloud that every round makes on the host (the compaction, the list repair, the index maps), five rounds per call on C6. `HyperCloudCore._ADAPT_TIMING[] = true` collects the wall time of the sections of the calls in `HyperCloudCore._ADAPT_TIMES`.
+The copies between the device and the host are then 10 to 30 ms of a call. The quadrature of a remap and the limited reconstruction of its local set run in fixed chunks on the threads of the host (slabs of the quadrature lattice, added in their order, so the result does not depend on the number of threads); serial, they were about 200 ms of a call at 100³, now 50 to 65 ms (a call of the 3-D vortex: 342 ms, 0.58 time steps; of the blast: 408 ms, 0.67). What is left in 3-D is the device search at the end (96 ms), the pre-check (43 ms) and the host passes of the rounds; in 2-D the passes over the whole cloud that every round makes on the host (the compaction, the list repair, the index maps), five rounds per call on C6. `HyperCloudCore._ADAPT_TIMING[] = true` collects the wall time of the sections of the calls in `HyperCloudCore._ADAPT_TIMES`.
 
 ### What the remap does not do
 

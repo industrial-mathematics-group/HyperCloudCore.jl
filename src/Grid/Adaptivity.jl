@@ -1069,6 +1069,108 @@ function _detect_events(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ma
     return events
 end
 
+# Host-only work in `n` chunks, `body(c, args...)` for `c in 1:n`, on the threads of the host backend (the launch of
+# the kernels, `foreach_particle`: the chunk bodies may allocate and call the region's closures, which a device kernel
+# may not). Serial under a KernelAbstractions backend (its CPU device compiles kernels as a GPU does) and for one chunk.
+function _host_chunks(body::F, pg::ParticleGrid, n::Int, args::Tuple) where {F}
+    backend = _launch_backend(pg)
+    if n == 1 || backend isa KABackend
+        kargs = kernel_view(args)
+        for c in 1:n; body(c, kargs...); end
+    else
+        foreach_particle(body, backend, n, args)
+    end
+    return nothing
+end
+
+# Chunk `c` of `nC` of the local reconstruction of a remap (`_local_reconstruction!`)
+function _reconstruction_chunk!(c, nC, grads, lo, hi, U, loc_idx, n_loc, nb, dfs, scale, vd)
+    ls = ((c - 1) * n_loc ÷ nC + 1):(c * n_loc ÷ nC)
+    _local_reconstruction!(grads, lo, hi, U, loc_idx, ls, nb, dfs[c], scale, vd)
+    return nothing
+end
+
+# Slab `q` of the quadrature of a remap (`_remap_event!`, step 3): the points with the index `q` along the last axis,
+# summed into the slab's own arrays
+function _slab_sum(a::Vector{S}, n_w::Int, nq::Int) where {S}
+    out = a[1:n_w]
+    @inbounds for q in 2:nq, l in 1:n_w
+        out[l] += a[(q - 1) * n_w + l]
+    end
+    return out
+end
+function _remap_slab!(q, acc, scr, grid, loc, box, sts)
+    n_w   = acc[4]
+    slab  = ((q - 1) * n_w + 1):(q * n_w)
+    δV, I_old = view(acc[1], slab), view(acc[2], slab)
+    # (the state arrays as tuples: the loop over the points is compiled for their types, behind this barrier)
+    δm    = Tuple(view(a, slab) for a in acc[3])
+    qidx, qd, w_add    = scr[1][q], scr[2][q], scr[3][q]
+    pg, geom, t_bnd, wf, R_sq = grid
+    lmap, is_removed, is_fixed, loc_idx, n_loc = loc
+    center, half, hq, nq, ω, added = box
+    states, grads, lo, hi = Tuple(sts[1]), Tuple(sts[2]), Tuple(sts[3]), Tuple(sts[4])
+    _remap_slab_points!(q, δV, I_old, δm, qidx, qd, w_add, pg, geom, t_bnd, wf, R_sq, lmap, is_removed, is_fixed, loc_idx, n_loc,
+                        center, half, hq, nq, ω, added, states, grads, lo, hi)
+    return nothing
+end
+function _remap_slab_points!(q, δV::AbstractVector{T}, I_old::AbstractVector{T}, δm, qidx::Vector{Int}, qd::Vector{Space{D, T}}, w_add::Vector{T},
+                             pg, geom, t_bnd, wf, R_sq::T, lmap, is_removed, is_fixed, loc_idx, n_loc::Int,
+                             center::Space{D, T}, half::T, hq::T, nq::Int, ω::T, added, states, grads, lo, hi) where {D, T}
+    L, Li = pg.domain.L_wrap, pg.domain.invL_wrap
+    n_add = length(added)
+    for J in CartesianIndices(ntuple(_ -> nq, Val(D - 1)))
+        y_raw = Space{D, T}(ntuple(d -> center[d] - half + ((d == D ? q : J[d]) - T(0.5)) * hq, Val(D)))
+        y = _wrap_point(pg, y_raw)
+        _is_interior(geom, y, t_bnd) || continue
+        n = _collect_near!(pg, y, R_sq, qidx, qd)
+        n == 0 && continue
+
+        # S_old, nearest donor, S_new
+        # Ghost (fixed) particles are not part of the partition: like the volume estimators, the interior particles
+        # share the region among themselves (a ghost's share would leave the interior accounting)
+        S_old = zero(T); S_new = zero(T)
+        jstar, dstar = 0, T(Inf)
+        @inbounds for k in 1:n
+            l  = lmap[qidx[k]]
+            (l != 0 && is_fixed[l]) && continue
+            d2 = sum(abs2, qd[k])
+            wk = wf(d2)
+            S_old += wk
+            removed_k = l != 0 && is_removed[l]
+            removed_k || (S_new += wk)
+            if l != 0 && !removed_k && d2 < dstar; jstar, dstar = k, d2; end
+        end
+        # Removed particles may be the only ones nearby: use them as donors too
+        if jstar == 0
+            @inbounds for k in 1:n
+                d2 = sum(abs2, qd[k])
+                if lmap[qidx[k]] != 0 && d2 < dstar; jstar, dstar = k, d2; end
+            end
+        end
+        jstar == 0 && continue
+        @inbounds for a in 1:n_add
+            da = _wrapped_diff(added[a], y, L, Li)
+            d2 = sum(abs2, da)
+            w_add[a] = d2 <= R_sq ? wf(d2) : zero(T)
+            S_new += w_add[a]
+        end
+        (S_old > 0 && S_new > 0) || continue
+        inv_old, inv_new = inv(S_old), inv(S_new)
+        lstar = lmap[qidx[jstar]]
+
+        _swept_states!(true, δm, states, grads, lo, hi, δV, I_old, loc_idx, lstar, qd[jstar], qidx, qd, n,
+                       lmap, is_removed, is_fixed, wf, inv_old, inv_new, ω, w_add, n_loc)
+    end
+    return nothing
+end
+# `_swept_point!` for every state array (tuples: no dispatch at the points); the volumes with the first
+@inline _swept_states!(first::Bool, δm::Tuple{}, U::Tuple{}, grads::Tuple{}, lo::Tuple{}, hi::Tuple{}, δV, I_old, rest::Vararg{Any, N}) where {N} = nothing
+@inline function _swept_states!(first::Bool, δm::Tuple, U::Tuple, grads::Tuple, lo::Tuple, hi::Tuple, δV, I_old, rest::Vararg{Any, N}) where {N}
+    _swept_point!(δm[1], δV, I_old, first, U[1], grads[1], lo[1], hi[1], rest...)
+    return _swept_states!(false, Base.tail(δm), Base.tail(U), Base.tail(grads), Base.tail(lo), Base.tail(hi), δV, I_old, rest...)
+end
+
 # The reach `r_ev` of an event (its farthest particle from its centre) and the radius of its local set around the
 # centre (`_remap_event!`, step 1)
 function _event_reach(pg::ParticleGrid{D, M, T}, ev::_AdaptEvent{D, T}) where {D, M, T}
@@ -1133,71 +1235,39 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     isb      = pg.core.is_boundary
     is_fixed = [isb[loc_idx[l]] for l in 1:n_loc]
 
-    # 2. Limited linear reconstruction data of the old solution on the local set, for every state array
+    # 2. Limited linear reconstruction data of the old solution on the local set, for every state array: in chunks
+    #    of the local particles on the threads of the host (`_host_chunks`; a particle's data depend on nothing else)
     grads = [Vector{SVector{D, State{M, T}}}(undef, n_loc) for _ in 1:nS]
     lo    = [Vector{State{M, T}}(undef, n_loc) for _ in 1:nS]
     hi    = [Vector{State{M, T}}(undef, n_loc) for _ in 1:nS]
     scale = dx
+    nC    = clamp(n_loc ÷ 32, 1, 64)
+    dfs   = [State{M, T}[] for _ in 1:nC]               # scratch of one neighbour list per chunk
+    nC == 1 && (dfs[1] = df)
     for s in 1:nS                                       # (`states` is a list of arrays: the loops run behind a barrier)
-        _local_reconstruction!(grads[s], lo[s], hi[s], states[s], loc_idx, n_loc, nb, df, scale, Val(D))
+        _host_chunks(_reconstruction_chunk!, pg, nC, (nC, grads[s], lo[s], hi[s], states[s], loc_idx, n_loc, nb, dfs, scale, Val(D)))
     end
 
-    # 3. Quadrature over the box center ± half (the region at `boundary_time`: moving pieces have been swept)
+    # 3. Quadrature over the box center ± half (the region at `boundary_time`: moving pieces have been swept), in
+    #    slabs along the last axis on the threads of the host. Every slab sums into arrays of its own, which are added
+    #    in the order of the slabs: the result does not depend on the number of threads (it differs in the last bits
+    #    from one sum over all points, the form up to 0.9.10). The quadrature and the reconstruction were three
+    #    quarters of a remap, and the remaps of a call serial: 200 ms of a call at 100³ in 3-D.
     t_bnd = pg.meta.boundary_time
-    δV  = zeros(T, n_loc + n_add)
-    I_old = zeros(T, n_loc)                             # ∫ φ_old over the box: the share a survivor can lose at most
-    δm  = [zeros(State{M, T}, n_loc + n_add) for _ in 1:nS]
     hq  = dx / ad.samples_per_dx
     nq  = ceil(Int, 2half / hq)
     ω   = hq^D
-    qidx, qd = Int[], Space{D, T}[]
-    w_add = zeros(T, n_add)
-
-    for I in CartesianIndices(ntuple(_ -> nq, Val(D)))
-        y_raw = Space{D, T}(ntuple(d -> ev.center[d] - half + (I[d] - T(0.5)) * hq, Val(D)))
-        y = _wrap_point(pg, y_raw)
-        _is_interior(geom, y, t_bnd) || continue
-        n = _collect_near!(pg, y, R_sq, qidx, qd)
-        n == 0 && continue
-
-        # S_old, nearest donor, S_new
-        # Ghost (fixed) particles are not part of the partition: like the volume estimators, the interior particles
-        # share the region among themselves (a ghost's share would leave the interior accounting)
-        S_old = zero(T); S_new = zero(T)
-        jstar, dstar = 0, T(Inf)
-        @inbounds for k in 1:n
-            l  = lmap[qidx[k]]
-            (l != 0 && is_fixed[l]) && continue
-            d2 = sum(abs2, qd[k])
-            wk = wf(d2)
-            S_old += wk
-            removed_k = l != 0 && is_removed[l]
-            removed_k || (S_new += wk)
-            if l != 0 && !removed_k && d2 < dstar; jstar, dstar = k, d2; end
-        end
-        # Removed particles may be the only ones nearby: use them as donors too
-        if jstar == 0
-            @inbounds for k in 1:n
-                d2 = sum(abs2, qd[k])
-                if lmap[qidx[k]] != 0 && d2 < dstar; jstar, dstar = k, d2; end
-            end
-        end
-        jstar == 0 && continue
-        @inbounds for a in 1:n_add
-            da = _wrapped_diff(ev.added[a], y, L, Li)
-            d2 = sum(abs2, da)
-            w_add[a] = d2 <= R_sq ? wf(d2) : zero(T)
-            S_new += w_add[a]
-        end
-        (S_old > 0 && S_new > 0) || continue
-        inv_old, inv_new = inv(S_old), inv(S_new)
-        lstar = lmap[qidx[jstar]]
-
-        for s in 1:nS
-            _swept_point!(δm[s], δV, I_old, s == 1, states[s], grads[s], lo[s], hi[s], loc_idx, lstar, qd[jstar], qidx, qd, n,
-                          lmap, is_removed, is_fixed, wf, inv_old, inv_new, ω, w_add, n_loc)
-        end
-    end
+    n_w = n_loc + n_add
+    δV_q    = zeros(T, n_w * nq)                        # (slab q: the entries (q - 1) n_w + 1 : q n_w)
+    I_old_q = zeros(T, n_w * nq)                        # ∫ φ_old over the box: the share a survivor can lose at most
+    δm_q    = [zeros(State{M, T}, n_w * nq) for _ in 1:nS]
+    scr     = ([Vector{Int}(undef, 128) for _ in 1:nq], [Vector{Space{D, T}}(undef, 128) for _ in 1:nq], [zeros(T, n_add) for _ in 1:nq])
+    _host_chunks(_remap_slab!, pg, nq,
+                 ((δV_q, I_old_q, δm_q, n_w), scr, (pg, geom, t_bnd, wf, R_sq), (lmap, is_removed, is_fixed, loc_idx, n_loc),
+                  (ev.center, half, hq, nq, ω, ev.added), (states, grads, lo, hi)))
+    δV, I_old = _slab_sum(δV_q, n_w, nq), _slab_sum(I_old_q, n_w, nq)
+    δm = [_slab_sum(δm_q[s], n_w, nq) for s in 1:nS]
+    qidx, qd = scr[1][1], scr[2][1]
 
     # 4. New volumes and contents; exact residual correction (the volumes from the first pass, the contents per array)
     V_before = zero(T)
@@ -1253,17 +1323,18 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     εV = V_before - V_after
     mn = [zeros(State{M, T}, n_loc + n_add) for _ in 1:nS]
     for s in 1:nS
-        U = states[s]
+        # (the states of the local set, gathered behind a barrier: `states[s]` is known by its abstract type only)
+        U_loc = _local_values(states[s], loc_idx, n_loc)
         m_before = zero(State{M, T}); m_after = zero(State{M, T})
         @inbounds for l in 1:n_loc
             (is_fixed[l] || is_other[l]) && continue
             j = loc_idx[l]
-            m_before += V[j] * U[j]
+            m_before += V[j] * U_loc[l]
         end
         @inbounds for l in 1:n_loc
             (is_removed[l] || is_fixed[l]) && continue
             j = loc_idx[l]
-            mn[s][l] = V[j] * U[j] + fV[l] * δm[s][l]
+            mn[s][l] = V[j] * U_loc[l] + fV[l] * δm[s][l]
             m_after += mn[s][l]
         end
         @inbounds for a in 1:n_add
@@ -1343,10 +1414,10 @@ end
 
 # The limited linear reconstruction data of one state array on the local set of an event (`_remap_event!`, step 2): the
 # gradient and the bounds of every local particle from its neighbours. `df` is a scratch of one neighbour list.
-function _local_reconstruction!(grads::Vector{SVector{D, State{M, T}}}, lo::Vector{State{M, T}}, hi::Vector{State{M, T}},
-                                U::AbstractVector{State{M, T}}, loc_idx, n_loc::Int, nb, df::Vector{State{M, T}}, scale::T,
+function _local_reconstruction!(grads::AbstractVector{SVector{D, State{M, T}}}, lo::AbstractVector{State{M, T}}, hi::AbstractVector{State{M, T}},
+                                U::AbstractVector{State{M, T}}, loc_idx, ls::AbstractUnitRange{Int}, nb, df::Vector{State{M, T}}, scale::T,
                                 ::Val{D}) where {D, M, T}
-    @inbounds for l in 1:n_loc
+    @inbounds for l in ls
         j  = loc_idx[l]
         sl = nb.ranges[j]
         mn, mx = U[j], U[j]
@@ -1366,10 +1437,12 @@ function _local_reconstruction!(grads::Vector{SVector{D, State{M, T}}}, lo::Vect
     return nothing
 end
 
+_local_values(U::AbstractVector{S}, loc_idx, n_loc::Int) where {S} = S[@inbounds(U[loc_idx[l]]) for l in 1:n_loc]
+
 # The swept contributions of one quadrature point to one state array (`_remap_event!`, step 3): Ũ(y), the limited
 # linear reconstruction of the nearest old particle `lstar` (at `d_star = x − y`), times the change of every shape
 # function at the point; the volumes with the first array (`first`)
-function _swept_point!(δm::Vector{State{M, T}}, δV::Vector{T}, I_old::Vector{T}, first::Bool, U::AbstractVector{State{M, T}},
+function _swept_point!(δm::AbstractVector{State{M, T}}, δV::AbstractVector{T}, I_old::AbstractVector{T}, first::Bool, U::AbstractVector{State{M, T}},
                        grads::Vector{SVector{D, State{M, T}}}, lo::Vector{State{M, T}}, hi::Vector{State{M, T}}, loc_idx,
                        lstar::Int, d_star::Space{D, T}, qidx, qd, n::Int, lmap, is_removed, is_fixed, wf, inv_old::T, inv_new::T,
                        ω::T, w_add::Vector{T}, n_loc::Int) where {D, M, T}
