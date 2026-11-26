@@ -1069,16 +1069,6 @@ function _detect_events(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ma
     return events
 end
 
-# -------------------------------------------------------------------------
-# The remap of one event (on the OLD topology)
-# -------------------------------------------------------------------------
-#
-# `record` (optional) collects `(index, lo, hi)` for every particle the remap wrote, with the local bounds of
-# its DMP repair: the old index of a survivor, `-a` for the `a`-th entry of `new_pos`.
-# `point_values` (the sweep of moving boundaries): the survivors' volumes follow the event, their states do not (they
-# are point values of a collocation scheme; the conservative update is a cell-average operation that perturbs them by
-# O(h) per event). The new particles take the reconstruction averaged over their share, clipped to the bounds of the
-# old states within R; nothing is redistributed, so the remap is not conservative in this mode.
 # The reach `r_ev` of an event (its farthest particle from its centre) and the radius of its local set around the
 # centre (`_remap_event!`, step 1)
 function _event_reach(pg::ParticleGrid{D, M, T}, ev::_AdaptEvent{D, T}) where {D, M, T}
@@ -1091,6 +1081,16 @@ end
 _local_set_radius(pg::ParticleGrid{D, M, T}, ev::_AdaptEvent{D, T}) where {D, M, T} =
     (pg.meta.R + _event_reach(pg, ev)) * sqrt(T(D)) + pg.meta.R + minimum(pg.meta.dx)
 
+# -------------------------------------------------------------------------
+# The remap of one event (on the OLD topology)
+# -------------------------------------------------------------------------
+#
+# `record` (optional) collects `(index, lo, hi)` for every particle the remap wrote, with the local bounds of
+# its DMP repair: the old index of a survivor, `-a` for the `a`-th entry of `new_pos`.
+# `point_values` (the sweep of moving boundaries): the survivors' volumes follow the event, their states do not (they
+# are point values of a collocation scheme; the conservative update is a cell-average operation that perturbs them by
+# O(h) per event). The new particles take the reconstruction averaged over their share, clipped to the bounds of the
+# old states within R; nothing is redistributed, so the remap is not conservative in this mode.
 function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev::_AdaptEvent{D, T},
                        new_pos::Vector{Space{D, T}}, new_rho::Vector{Vector{State{M, T}}}, new_vol::Vector{T},
                        df::Vector{State{M, T}} = State{M, T}[];
