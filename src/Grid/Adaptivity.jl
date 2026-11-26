@@ -99,6 +99,170 @@ _adapt_result(::Type{S}; inserted = 0, removed = 0, mass_residual = zero(S), esc
     (; inserted, removed, mass_residual, escaped, held, seeded, refused, escaped_content, seeded_content)
 
 # -------------------------------------------------------------------------
+# Timing of the sections of a call (diagnostics)
+# -------------------------------------------------------------------------
+# `_ADAPT_TIMING[] = true` accumulates the wall time of the sections of `adapt_particles!` in `_ADAPT_TIMES` (seconds
+# by section name), with the device work synchronised before every reading of the clock. `:total_before_rounds`,
+# `:total_rounds` and `:total_after_rounds` are the phases of the event work with their sections, `:gc` is the garbage
+# collection inside the calls; `:calls`, `:rounds` and `:candidates` are counts. Off by default: one branch per
+# section. (How the cost of a call on a GPU was found: the copy of the neighbour slots to the host, the host search of
+# all lists, the allocation of the host copy; see `_event_grid`.)
+const _ADAPT_TIMING = Ref(false)
+const _ADAPT_TIMES  = Dict{Symbol, Float64}()
+_device_sync(pg::ParticleGrid) = _device_sync(get_backend(), parent(pg.rhos))
+_device_sync(b::ExecutionBackend, ::AbstractArray) = nothing
+_device_sync(b::KABackend, x::AbstractArray) = x isa Array ? nothing : (KA.synchronize(b.backend); nothing)
+# (the time since `t0` under `name`: the totals of the phases of a call, `total_*`, which hold their sections)
+function _adapt_lap!(name::Symbol, t0::UInt64)
+    t = time_ns()
+    _ADAPT_TIMING[] && (_ADAPT_TIMES[name] = get(_ADAPT_TIMES, name, 0.0) + (t - t0) / 1e9)
+    return t
+end
+macro _adapt_time(name, pg, ex)
+    quote
+        if _ADAPT_TIMING[]
+            _device_sync($(esc(pg)))
+            local t0 = time_ns()
+            local r  = $(esc(ex))
+            _device_sync($(esc(pg)))
+            _ADAPT_TIMES[$(esc(name))] = get(_ADAPT_TIMES, $(esc(name)), 0.0) + (time_ns() - t0) / 1e9
+            r
+        else
+            $(esc(ex))
+        end
+    end
+end
+
+"""
+    _event_grid(pg) -> ParticleGrid
+
+The host grid the events of a device grid `pg` run on: a host copy of its particle arrays (positions, states, volumes,
+wall geometry: what `_upload_particles!` writes back) with scratch buffers and a cell list of its own (built here) and
+neighbour lists in the row-major layout, all empty: the events search the lists they read on the host
+(`_ensure_lists!`), which are those of a few particles around the candidates.
+
+The neighbour slots of the device are not copied. They are the largest part of a grid (about 20 entries per particle
+in 2-D and 60 in 3-D, each an index, a weight and a distance vector, padded to the longest list in the slot-major
+layout of the device, which then had to be converted to the row-major one in a serial loop): copying them was a third
+to a half of a call of the particle management on a GPU, and searching all of them on the host instead most of what
+was left (the host search of a cloud takes ten times as long as the device's). The host search gives the same lists,
+entry for entry (the same cell list and order); its weights are the host's exponentials, which may differ from the
+device's in the last bits. Neither the scratch buffers nor the cell list of the device are copied.
+
+The host grid is kept between the calls (`_EVENT_GRIDS`, by the metadata object of `pg`, weakly: it goes with the
+grid) and only filled again: allocating its arrays anew at every call (and the garbage collection that followed) cost
+as much as the events. It holds host memory of the size of the particle arrays and the neighbour lists of the grid.
+"""
+function _event_grid(pg::ParticleGrid{D, M, T}) where {D, M, T}
+    hg = get(_EVENT_GRIDS, pg.meta, nothing)
+    b  = pg.bins
+    if hg === nothing || hg.bins.coarse_dims != b.coarse_dims || hg.bins.mins != b.mins || hg.bins.coarse_size != b.coarse_size
+        hg = _new_event_grid(pg)
+        _EVENT_GRIDS[pg.meta] = hg
+    end
+    _fill_event_grid!(hg, pg)
+    return hg
+end
+const _EVENT_GRIDS = WeakKeyDict{Any, Any}()
+
+function _new_event_grid(pg::ParticleGrid{D, M, T}) where {D, M, T}
+    m   = pg.meta
+    cap = length(parent(pg.core.positions))
+    meta = GridMetadata{D, T}(m.N, m.N_interior, m.N_ghost, m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb, m.geometry_version,
+                              m.boundary_time, m.sweep_time)
+    vec(::Type{S}) where {S} = Growable(Vector{S}(undef, cap))
+    core = ParticleGridCore{D, T}(vec(Space{D, T}), vec(Bool), vec(T), vec(Int), vec(Int), vec(Space{D, T}), vec(T), vec(Space{D, T}))
+    nd = pg.neighbor
+    WF = typeof(nd.weight_func)
+    neighbor = NeighborData{D, T, WF}(nd.weight_func, Growable(fill(_empty_slots(RowMajorSlots), cap + 1)), Growable(Int[]), Growable(T[]),
+                                      Growable(Space{D, T}[]), Growable(zeros(Int, cap)), Growable(zeros(Int, cap)))
+    shared = SharedBuffers{D, M, T}(vec(State{M, T}), vec(Space{D, T}), vec(T), vec(T), Growable(zeros(Bool, cap)), Growable(zeros(Int, cap)))
+    b = pg.bins
+    N_OFF = length(eltype(b.bin_neighbors))
+    bins = GlobalBins{D, T, N_OFF}(b.mins, b.maxs, b.coarse_size, b.coarse_dims, zeros(Int, length(b.cell_start)),
+                                   zeros(Int, length(b.cell_count)), Growable(zeros(Int, cap)), Growable(zeros(Int, cap)),
+                                   adapt(ToStorage{Array}(), b.bin_neighbors))
+    return ParticleGrid(meta, pg.geometry, pg.domain, core, shared, neighbor, pg.reorder, bins, pg.mover,
+                        vec(State{M, T}), vec(State{M, T}))
+end
+
+# The arrays of a particle (what the events read and write, and what moves between the device and the host)
+_particle_arrays(g::ParticleGrid) = (g.core.positions, g.core.is_boundary, g.core.tags, g.core.particle_orders, g.core.volumes,
+                                     g.core.normals, g.core.wall_distances, g.core.wall_curvatures, g.rhos, g.curvatures)
+
+function _fill_event_grid!(hg::ParticleGrid, pg::ParticleGrid)
+    m, N = pg.meta, pg.meta.N
+    ensure_capacity!(hg, N)
+    for (dst, src) in zip(_particle_arrays(hg), _particle_arrays(pg))
+        copyto!(parent(dst), 1, parent(src), 1, N)
+    end
+    h = hg.meta
+    h.N, h.N_interior, h.N_ghost = N, m.N_interior, m.N_ghost
+    h.R, h.max_dx, h.dx, h.interp_range_factor, h.max_nb = m.R, m.max_dx, m.dx, m.interp_range_factor, m.max_nb
+    h.geometry_version, h.boundary_time, h.sweep_time = m.geometry_version, m.boundary_time, m.sweep_time
+    # no lists yet (an empty list is one to search, `_ensure_lists!`), the cell list of the positions as they are
+    ranges = hg.neighbor.ranges
+    fill!(view(ranges, 1:N), _empty_slots(RowMajorSlots))
+    ranges[N + 1] = _slot_sentinel(RowMajorSlots, 0, N)
+    build_global_bins!(hg)
+    return nothing
+end
+
+function _ensure_local_lists!(hg::ParticleGrid{D, M, T}, events) where {D, M, T}
+    idx, dvec = Int[], Space{D, T}[]
+    ids = Int[]
+    for ev in events
+        n = _collect_near!(hg, ev.center, _local_set_radius(hg, ev)^2, idx, dvec)
+        append!(ids, view(idx, 1:n))
+    end
+    return _ensure_lists!(hg, ids)
+end
+
+"""
+    _ensure_lists!(hg, ids)
+
+Searches the neighbour lists of the particles `ids` of the host grid `hg` that have none yet, into slots behind the
+ones in use, with the kernels of the full search on the current cell list (`_repair_neighbours!` does the same for the
+particles next to a change). The host grid of a device grid starts without lists (`_event_grid`); the events read
+the lists of the candidates (detection, seeds), of the escaped particles and of the local sets of the remaps, and
+`_repair_neighbours!` gives every particle next to a change its list, so a list is either complete or empty. (A
+particle without neighbours is searched again at every request: it is rare and costs nothing.)
+"""
+function _ensure_lists!(hg::ParticleGrid{D, M, T}, ids) where {D, M, T}
+    nd, N  = hg.neighbor, hg.meta.N
+    ranges = nd.ranges
+    list   = Int[]
+    @inbounds for i in ids
+        isempty(ranges[i]) && push!(list, i)
+    end
+    isempty(list) && return nothing
+    unique!(sort!(list))
+    backend = _launch_backend(hg)
+    pos, bins = hg.core.positions, hg.bins
+    R_sq = hg.meta.R^2
+    L, L_inv = hg.domain.L_wrap, hg.domain.invL_wrap
+    counts = nd.counts
+    foreach_particle(_count_listed!, backend, length(list),
+        (list, counts, pos, bins.bin_of, bins.cell_start, bins.cell_particles, bins.bin_neighbors, L, L_inv, R_sq))
+    at = first(ranges[N + 1]) - 1                         # slots in use
+    need = at
+    for i in list; need += counts[i]; end
+    ensure_capacity!(nd, need)
+    offsets = nd.offsets
+    @inbounds for i in list
+        ranges[i]  = (at + 1):(at + counts[i])
+        offsets[i] = 0
+        at += counts[i]
+        hg.meta.max_nb = max(hg.meta.max_nb, counts[i])
+    end
+    ranges[N + 1] = _slot_sentinel(RowMajorSlots, need, N)
+    foreach_particle(_write_listed!, backend, length(list),
+        (list, pos, bins.bin_of, bins.cell_start, bins.cell_particles, bins.bin_neighbors, L, L_inv, R_sq,
+         ranges, offsets, nd.indices, nd.weights, nd.distances, nd.weight_func))
+    return nothing
+end
+
+# -------------------------------------------------------------------------
 # Driver
 # -------------------------------------------------------------------------
 """
@@ -147,16 +311,31 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     (ad.volume_estimator !== nothing && has_moving_pieces(pg.geometry)) &&
         throw(ArgumentError("adapt_particles!: a volume estimator together with moving pieces is not supported (the " *
                             "estimators integrate the region at t = 0, the pieces have moved it); use volume_estimator = nothing"))
-    escaped = _escaped_particles(pg)
-    has_candidates = _has_adapt_candidates(pg, ad)        # (the flags stay in the grid's bit buffer)
+    gc0 = _ADAPT_TIMING[] ? Base.gc_num().total_time : zero(Int64)
+    _ADAPT_TIMING[] && (_ADAPT_TIMES[:calls] = get(_ADAPT_TIMES, :calls, 0.0) + 1)
+    escaped = @_adapt_time :escaped_check pg _escaped_particles(pg)
+    has_candidates = @_adapt_time :precheck pg _has_adapt_candidates(pg, ad)        # (the flags stay in the grid's bit buffer)
     (isempty(escaped) && !has_candidates) && return nothing_done
 
     on_host = parent(pg.rhos) isa Array
     (on_host || _host_states(states)) ||
         throw(ArgumentError("adapt_particles!: extra state arrays of a device grid must be host arrays (the events run on a host copy)"))
-    hg = on_host ? pg : device_grid(Array, pg)            # the event work is serial: on a host copy of a device grid
+    # the event work is serial: on a host copy of the particles of a device grid, with lists searched on the host
+    # (the copy is kept between the calls and not inferred here: the work is behind a function barrier)
+    hg = on_host ? pg : (@_adapt_time :to_host pg _event_grid(pg))
+    return _adapt_events!(pg, hg, ad, max_order, escaped, has_candidates, states, own_volumes, gc0)
+end
+
+function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, max_order::Int,
+                        escaped::Vector{Int}, has_candidates::Bool, states, own_volumes::Bool, gc0) where {D, M, T}
+    on_host = hg === pg
+    t_lap = time_ns()
     st_list = states isa _LazyStates ? states : _state_list(hg, states)
-    cand = on_host ? (has_candidates ? findall(view(hg.shared.bit_buffer, 1:hg.meta.N)) : Int[]) : _adapt_candidates(hg, ad)
+    # (the flags of the pre-check, from the bit buffer of `pg`)
+    cand = !has_candidates ? Int[] : on_host ? findall(view(hg.shared.bit_buffer, 1:hg.meta.N)) :
+           (@_adapt_time :host_candidates pg findall(Array(view(parent(pg.shared.bit_buffer), 1:pg.meta.N))))
+    on_host || (@_adapt_time :host_lists hg (_ensure_lists!(hg, cand); _ensure_lists!(hg, escaped)))
+    _ADAPT_TIMING[] && (_ADAPT_TIMES[:candidates] = get(_ADAPT_TIMES, :candidates, 0.0) + length(cand))
 
     # Particles that left the region: put back onto their wall, or removed with their content (an outflow). The
     # removal is applied with the first round below (one change of the particle set, one neighbour search); a particle
@@ -190,7 +369,7 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     dropped = length(escaped) - held
     mass0   = mass_before - lost
     # The seeds in the gaps next to the boundary, added with the first round as well
-    seed_pos, seed_pairs = _seed_candidates(hg, ad, max_order, cand, gone)
+    seed_pos, seed_pairs = @_adapt_time :seeds hg _seed_candidates(hg, ad, max_order, cand, gone)
     n_seeds = length(seed_pos)
     inflow  = zero(State{M, T})                           # the content the seeds bring (new volume: the gap they fill)
 
@@ -202,27 +381,34 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
     repaired = false                                      # the lists of `hg` are complete, their slot layout is not
     seeds   = Set{Int}()
     changed = ad.volume_estimator === nothing ? nothing : Dict{Int, Tuple{State{M, T}, State{M, T}}}[]
+    t_lap = _adapt_lap!(:total_before_rounds, t_lap)
     for round in 1:ad.max_rounds
+        _ADAPT_TIMING[] && (_ADAPT_TIMES[:rounds] = get(_ADAPT_TIMES, :rounds, 0.0) + 1)
         N       = hg.meta.N
         pending = round == 1 && (!isempty(gone) || !isempty(seed_pos))     # the boundary changes go with round 1
         events  = isempty(cand) ? _AdaptEvent{D, T}[] :
-                  _detect_events(hg, ad, max_order, cand; dead = (pending ? gone : Int[]),
-                                 seeds = (pending ? seed_pos : Space{D, T}[]))
+                  (@_adapt_time :detect hg _detect_events(hg, ad, max_order, cand; dead = (pending ? gone : Int[]),
+                                                           seeds = (pending ? seed_pos : Space{D, T}[])))
         (isempty(events) && !pending) && break
+        # (the lists of the local sets of the remaps, on the host grid of a device grid)
+        on_host || (@_adapt_time :host_lists hg _ensure_local_lists!(hg, events))
         all_states = _states_now(st_list, hg)
         n_seed_r   = pending ? length(seed_pos) : 0
         # Capacity first: the remaps below rewrite states and volumes in place, so a `CapacityError` (buffers frozen
         # by `reserve!`) thrown by `_apply_topology!` would leave the grid in a non-conservative intermediate state
         N_new = N + sum(ev -> length(ev.added) - length(ev.removed), events; init = 0) + n_seed_r
-        if N_new > N
-            ensure_capacity!(hg, N_new)
-            on_host || ensure_capacity!(pg, N_new)
+        @_adapt_time :capacity pg begin
+            if N_new > N
+                ensure_capacity!(hg, N_new)
+                on_host || ensure_capacity!(pg, N_new)
+            end
+            # ... and the neighbour slots the search after the topology change will need (in the layout of `pg`)
+            counted = pending ? vcat(events, [_AdaptEvent{D, T}(x, Int[], [x]) for x in seed_pos]) : events
+            total_nb, max_nb = _slots_after_events(hg, counted)
+            ensure_capacity!(pg.neighbor, _slot_capacity(eltype(pg.neighbor.ranges), total_nb, max_nb, N_new))
         end
-        # ... and the neighbour slots the search after the topology change will need (in the layout of `pg`)
-        counted = pending ? vcat(events, [_AdaptEvent{D, T}(x, Int[], [x]) for x in seed_pos]) : events
-        total_nb, max_nb = _slots_after_events(hg, counted)
-        ensure_capacity!(pg.neighbor, _slot_capacity(eltype(pg.neighbor.ranges), total_nb, max_nb, N_new))
 
+        t_bk = time_ns()
         # every particle this round removes, known to all its remaps (their local sets may overlap, `_event_spacing`)
         dead_mask = falses(N)
         for ev in events, r in ev.removed; dead_mask[r] = true; end
@@ -238,7 +424,8 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
         record = changed === nothing ? nothing : [Tuple{Int, State{M, T}, State{M, T}}[] for _ in all_states]
         fill!(view(hg.shared.int_buffer, 1:N), 0)         # the index map of the remaps, cleared once per round
         refused = 0
-        for ev in events
+        _adapt_lap!(:round_setup, t_bk)
+        @_adapt_time :remap hg for ev in events
             # (an event that cannot be remapped, e.g. next to a particle without a volume, is left out: nothing is written)
             if _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; record = record, states = all_states, strict = false,
                              clear_map = false, removed_mask = dead_mask)
@@ -248,6 +435,7 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
             end
         end
         n_refused += refused
+        t_bk = time_ns()
         n_rem_ev = count(view(remove_mask, 1:N))
         n_add_ev = length(new_pos)
         (n_rem_ev + n_add_ev) == 0 && !pending && break   # (every event refused: the next round would find them again)
@@ -262,13 +450,17 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
         n_removed += n_rem_ev
         n_added   += n_add_ev
         N_kept = N - n_rem
+        # the new index of every particle after this round's compaction (0: removed), once for all the bookkeeping
+        # below (every helper built its own: five passes over the cloud per round)
+        new_index = zeros(Int, N)
+        _index_after!(new_index, remove_mask, N)
         # the particles written so far, by their indices after this round's compaction
-        seeds = _compacted_ids(collect(seeds), remove_mask, N, N_kept)
+        seeds = _compacted_ids(seeds, new_index, N_kept)
         for k in 1:n_seed_r; push!(seeds, N_kept + n_add_ev + k); end
         if changed !== nothing
-            now = [_compacted_record(r, remove_mask, N, N_kept) for r in record]
+            now = [_compacted_record(r, new_index, N_kept) for r in record]
             isempty(changed) ? append!(changed, now) :
-                (changed .= [_merge_bounds!(_compacted_bounds(changed[s], remove_mask, N), now[s]) for s in eachindex(now)])
+                (changed .= [_merge_bounds!(_compacted_bounds(changed[s], new_index), now[s]) for s in eachindex(now)])
         end
         near = Int[]                                      # the neighbours of what is removed (the old lists)
         nbh  = hg.neighbor
@@ -276,42 +468,41 @@ function adapt_particles!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
             remove_mask[i] || continue
             for k in nbh.ranges[i]; push!(near, nbh.indices[k]); end
         end
-        cand_kept = _compacted_ids(vcat(cand, near), remove_mask, N, N_kept)
-        new_index = zeros(Int, N)
-        let c = 0
-            @inbounds for i in 1:N
-                remove_mask[i] || (c += 1; new_index[i] = c)
-            end
-        end
+        cand_kept = _compacted_ids(Iterators.flatten((cand, near)), new_index, N_kept)
         dirty = unique!([new_index[j] for j in near if new_index[j] != 0])
-        _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
+        _adapt_lap!(:round_records, t_bk)
+        @_adapt_time :compaction hg _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
         # The lists of the particles next to the change are written again, the others kept (`_repair_neighbours!`): a
         # full search per round was most of the cost of a call. Its slot layout is provisional: `repaired`.
-        if _repair_neighbours!(hg, new_index, dirty)
+        if (@_adapt_time :repair hg _repair_neighbours!(hg, new_index, dirty))
             repaired = true
         else
-            hg.neighbor(hg)
+            @_adapt_time :round_search hg hg.neighbor(hg)
             repaired = false
         end
-        cand = _next_candidates(hg, cand_kept, N_kept)
+        cand = @_adapt_time :next_candidates hg _next_candidates(hg, cand_kept, N_kept)
     end
+    t_lap = _adapt_lap!(:total_rounds, t_lap)
     (held + dropped + n_seeds + n_removed + n_added) == 0 && return _adapt_result(State{M, T}; refused = n_refused)
 
     all_states = _states_now(st_list, hg)
     if on_host
-        repaired && pg.neighbor(pg)                       # one full search per call: the layout the steps rely on
+        repaired && (@_adapt_time :final_search pg pg.neighbor(pg))   # one full search per call: the layout the steps rely on
     else
-        _upload_particles!(pg, hg)
-        pg.neighbor(pg)
+        @_adapt_time :to_device pg _upload_particles!(pg, hg)
+        @_adapt_time :final_search pg pg.neighbor(pg)
     end
     if changed !== nothing && (!isempty(changed) || !isempty(seeds))
         isempty(changed) && append!(changed, (Dict{Int, Tuple{State{M, T}, State{M, T}}}() for _ in all_states))
-        inflow += _reestimate_volumes!(pg, hg, ad.volume_estimator, changed; states = all_states, seeds = seeds,
-                                       own_volumes = own_volumes)
+        inflow += @_adapt_time :reestimate pg _reestimate_volumes!(pg, hg, ad.volume_estimator, changed; states = all_states,
+                                                                   seeds = seeds, own_volumes = own_volumes)
     end
+    mass_end = @_adapt_time :content pg interior_mass(pg)
+    _adapt_lap!(:total_after_rounds, t_lap)
+    _ADAPT_TIMING[] && (_ADAPT_TIMES[:gc] = get(_ADAPT_TIMES, :gc, 0.0) + (Base.gc_num().total_time - gc0) / 1e9)
 
     return _adapt_result(State{M, T}; inserted = n_added, removed = n_removed,
-                         mass_residual = interior_mass(pg) - mass0 - inflow, escaped = dropped, held = held,
+                         mass_residual = mass_end - mass0 - inflow, escaped = dropped, held = held,
                          seeded = n_seeds, refused = n_refused, escaped_content = lost, seeded_content = inflow)
 end
 
@@ -474,7 +665,7 @@ function _slots_after_events(pg::ParticleGrid{D, M, T}, events) where {D, M, T}
     # the current lists stands for the unchanged particles: an upper bound if a removed particle held it)
     lens   = view(nb.ranges, 1:N)
     total += sum(length, lens; init = 0)
-    max_nb = max(max_nb, maximum(length, lens; init = 0))
+    max_nb = max(max_nb, pg.meta.max_nb, maximum(length, lens; init = 0))   # (`max_nb`: a host grid with a part of its lists)
     for r in removed; total -= length(nb.ranges[r]); end
     for (i, d) in delta
         total += d
@@ -486,12 +677,7 @@ end
 # The particles the remaps wrote, with their DMP bounds, by index of the compacted cloud (survivors keep their
 # order, new particles follow): `index => (lo, hi)`. A survivor of one event that another event removes is
 # dropped; a particle written by two events gets the union of the bounds.
-function _compacted_record(record::Vector{Tuple{Int, State{M, T}, State{M, T}}}, remove_mask, N::Int, N_kept::Int) where {M, T}
-    new_index = zeros(Int, N)
-    c = 0
-    @inbounds for i in 1:N
-        remove_mask[i] || (c += 1; new_index[i] = c)
-    end
+function _compacted_record(record::Vector{Tuple{Int, State{M, T}, State{M, T}}}, new_index::Vector{Int}, N_kept::Int) where {M, T}
     out = Dict{Int, Tuple{State{M, T}, State{M, T}}}()
     for (j, lo, hi) in record
         k = j > 0 ? new_index[j] : N_kept - j
@@ -559,12 +745,7 @@ function _seed_candidates(hg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, 
 end
 
 # The bounds of an earlier round (`index => (lo, hi)`) by the indices after a compaction (removed particles dropped)
-function _compacted_bounds(b::Dict{Int, Tuple{State{M, T}, State{M, T}}}, remove_mask, N::Int) where {M, T}
-    new_index = zeros(Int, N)
-    c = 0
-    @inbounds for i in 1:N
-        remove_mask[i] || (c += 1; new_index[i] = c)
-    end
+function _compacted_bounds(b::Dict{Int, Tuple{State{M, T}, State{M, T}}}, new_index::Vector{Int}) where {M, T}
     out = Dict{Int, Tuple{State{M, T}, State{M, T}}}()
     for (i, v) in b
         k = new_index[i]
@@ -586,12 +767,15 @@ function _merge_bounds!(a::Dict{Int, Tuple{State{M, T}, State{M, T}}}, b::Dict{I
 end
 
 # The compacted indices of raw record indices (`j > 0`: an old particle, `-a`: the `a`-th new one), as `_compacted_record`
-function _compacted_ids(raw::Vector{Int}, remove_mask, N::Int, N_kept::Int)
-    new_index = zeros(Int, N)
+_index_after!(new_index::Vector{Int}, remove_mask::Growable, N::Int) = _index_after!(new_index, parent(remove_mask), N)
+function _index_after!(new_index::Vector{Int}, remove_mask::AbstractVector{Bool}, N::Int)
     c = 0
     @inbounds for i in 1:N
-        remove_mask[i] || (c += 1; new_index[i] = c)
+        new_index[i] = remove_mask[i] ? 0 : (c += 1)
     end
+    return new_index
+end
+function _compacted_ids(raw, new_index::Vector{Int}, N_kept::Int)
     out = Set{Int}()
     for j in raw
         k = j > 0 ? new_index[j] : N_kept - j
@@ -761,11 +945,7 @@ end
 function _upload_particles!(pg::ParticleGrid, hg::ParticleGrid)
     N = hg.meta.N
     ensure_capacity!(pg, N)
-    for (dst, src) in ((pg.core.positions, hg.core.positions), (pg.core.is_boundary, hg.core.is_boundary),
-                       (pg.core.tags, hg.core.tags), (pg.core.particle_orders, hg.core.particle_orders),
-                       (pg.core.volumes, hg.core.volumes), (pg.core.normals, hg.core.normals),
-                       (pg.core.wall_distances, hg.core.wall_distances), (pg.core.wall_curvatures, hg.core.wall_curvatures),
-                       (pg.rhos, hg.rhos), (pg.curvatures, hg.curvatures))
+    for (dst, src) in zip(_particle_arrays(pg), _particle_arrays(hg))
         copyto!(parent(dst), 1, parent(src), 1, N)
     end
     pg.meta.N          = N
@@ -889,6 +1069,18 @@ function _detect_events(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ma
     return events
 end
 
+# The reach `r_ev` of an event (its farthest particle from its centre) and the radius of its local set around the
+# centre (`_remap_event!`, step 1)
+function _event_reach(pg::ParticleGrid{D, M, T}, ev::_AdaptEvent{D, T}) where {D, M, T}
+    pos, L, Li = pg.core.positions, pg.domain.L_wrap, pg.domain.invL_wrap
+    r_ev = zero(T)
+    for r in ev.removed; r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(pos[r], ev.center, L, Li)))); end
+    for a in ev.added;   r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(a, ev.center, L, Li)))); end
+    return r_ev
+end
+_local_set_radius(pg::ParticleGrid{D, M, T}, ev::_AdaptEvent{D, T}) where {D, M, T} =
+    (pg.meta.R + _event_reach(pg, ev)) * sqrt(T(D)) + pg.meta.R + minimum(pg.meta.dx)
+
 # -------------------------------------------------------------------------
 # The remap of one event (on the OLD topology)
 # -------------------------------------------------------------------------
@@ -926,12 +1118,9 @@ function _remap_event!(pg::ParticleGrid{D, M, T}, ad::ParticleAdaptivity{T}, ev:
     #    removed or added particle, so the quadrature box has the half-width R + r_ev (r_ev: the event's farthest
     #    particle from its centre; 0 for the sweep's single-particle events, which were integrated over ± 2R: 8× the
     #    points and local sets of radius 12 h in 3-D) and the local set reaches R beyond the box's corners
-    r_ev = zero(T)
-    for r in ev.removed; r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(pos[r], ev.center, L, Li)))); end
-    for a in ev.added;   r_ev = max(r_ev, sqrt(sum(abs2, _wrapped_diff(a, ev.center, L, Li)))); end
-    half = R + r_ev
+    half = R + _event_reach(pg, ev)
     loc_idx, loc_d = Int[], Space{D, T}[]
-    n_loc = _collect_near!(pg, ev.center, (half * sqrt(T(D)) + R + dx)^2, loc_idx, loc_d)
+    n_loc = _collect_near!(pg, ev.center, _local_set_radius(pg, ev)^2, loc_idx, loc_d)
     @inbounds for l in 1:n_loc; lmap[loc_idx[l]] = l; end
     # `removed_mask` (the sweep of moving boundaries): particles other events of the same call remove, so that no
     # content is given to a particle that the compaction drops
@@ -1266,6 +1455,24 @@ end
 # -------------------------------------------------------------------------
 # Topology change: compaction of removed particles, append of new ones
 # -------------------------------------------------------------------------
+# The first `N` entries of `a` without those at `removed` (ascending), in place and in order
+_compact!(a::Growable, removed::Vector{Int}, N::Int) = _compact!(parent(a), removed, N)
+function _compact!(a::AbstractVector, removed::Vector{Int}, N::Int)
+    w = removed[1]
+    @inbounds for q in eachindex(removed)
+        lo = removed[q] + 1
+        hi = (q < length(removed) ? removed[q + 1] : N + 1) - 1
+        n  = hi - lo + 1
+        n > 0 || continue
+        if a isa Array
+            copyto!(a, w, a, lo, n)                       # (overlapping ranges of one array: a memmove)
+        else
+            for k in 0:(n - 1); a[w + k] = a[lo + k]; end
+        end
+        w += n
+    end
+    return nothing
+end
 function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector{Bool},
                           new_pos::Vector{Space{D, T}}, new_rho::Vector{Vector{State{M, T}}}, new_vol::Vector{T},
                           max_order::Int; states = _state_list(pg, ())) where {D, M, T}
@@ -1279,25 +1486,20 @@ function _apply_topology!(pg::ParticleGrid{D, M, T}, remove_mask::AbstractVector
         _grow_state!(st, N_new)
     end
 
-    w = 1
-    @inbounds for i in 1:N
-        remove_mask[i] && continue
-        if w != i
-            core.positions[w]       = core.positions[i]
-            core.is_boundary[w]     = core.is_boundary[i]
-            core.tags[w]            = core.tags[i]
-            core.particle_orders[w] = core.particle_orders[i]
-            core.volumes[w]         = core.volumes[i]
-            core.normals[w]         = core.normals[i]
-            core.wall_distances[w]  = core.wall_distances[i]
-            core.wall_curvatures[w] = core.wall_curvatures[i]
-            for st in states
-                st[w] = st[i]
-            end
-            pg.curvatures[w]        = pg.curvatures[i]
+    # The survivors move down in blocks (the runs between two removed particles), one array after the other: the
+    # loop over the particles with all arrays at once, the state arrays among them by their abstract type, was a
+    # tenth of a call on a large cloud
+    removed = findall(view(remove_mask, 1:N))
+    if !isempty(removed)
+        for a in (core.positions, core.is_boundary, core.tags, core.particle_orders, core.volumes, core.normals,
+                  core.wall_distances, core.wall_curvatures, pg.curvatures)
+            _compact!(a, removed, N)
         end
-        w += 1
+        for st in states
+            _compact!(st, removed, N)
+        end
     end
+    w = N - length(removed) + 1
     @inbounds for a in 1:n_add
         core.positions[w]       = new_pos[a]
         core.is_boundary[w]     = false

@@ -319,7 +319,9 @@ function _repair_neighbours!(pg::ParticleGrid{D, M, T}, new_index::Vector{Int}, 
     used = first(nd.ranges[N_old + 1]) - 1                # slots in use (the sentinel of the old particle set)
 
     # The particles whose lists are written again: the cell list first (it gives the neighbours of the new particles)
+    t_lap = time_ns()
     build_global_bins!(pg)
+    t_lap = _adapt_lap!(:repair_bins, t_lap)
     bins = pg.bins
     mark = pg.shared.bit_buffer
     fill!(view(mark, 1:N), false)
@@ -331,6 +333,7 @@ function _repair_neighbours!(pg::ParticleGrid{D, M, T}, new_index::Vector{Int}, 
         for k in 1:n; mark[idx[k]] = true; end
     end
     list = findall(view(mark, 1:N))
+    t_lap = _adapt_lap!(:repair_mark, t_lap)
 
     # Their counts and slots, behind the slots in use
     counts = nd.counts
@@ -341,6 +344,7 @@ function _repair_neighbours!(pg::ParticleGrid{D, M, T}, new_index::Vector{Int}, 
     (need > length(nd.indices) && nd.indices.fixed) && return false
     ensure_capacity!(nd, need)
 
+    t_lap = _adapt_lap!(:repair_count, t_lap)
     # The survivors' slot ranges follow the compaction (ascending: a particle never moves up), their entries are renumbered
     ranges = nd.ranges
     if N_kept < N_old
@@ -350,6 +354,7 @@ function _repair_neighbours!(pg::ParticleGrid{D, M, T}, new_index::Vector{Int}, 
         end
         foreach_particle(_renumber_slots!, backend, N_kept, (ranges, nd.indices, new_index, mark))
     end
+    t_lap = _adapt_lap!(:repair_renumber, t_lap)
     at = used
     offsets = nd.offsets
     @inbounds for i in list
@@ -363,6 +368,7 @@ function _repair_neighbours!(pg::ParticleGrid{D, M, T}, new_index::Vector{Int}, 
          ranges, offsets, nd.indices, nd.weights, nd.distances, nd.weight_func))
     for i in list; pg.meta.max_nb = max(pg.meta.max_nb, counts[i]); end
     pg.meta.geometry_version += 1
+    _adapt_lap!(:repair_write, t_lap)
     return true
 end
 

@@ -1998,6 +1998,58 @@ end
         end
     end
 
+    @testset "The events of a device grid: a host copy with lists around the candidates only" begin
+        # The path of a device grid, run on host arrays (the copy does not care where the arrays live): the host copy
+        # starts without neighbour lists, searches those the events read, and gives the cloud of the direct path
+        lists(g, ids) = [(collect(g.neighbor.indices[g.neighbor.ranges[i]]), collect(g.neighbor.weights[g.neighbor.ranges[i]]),
+                          collect(g.neighbor.distances[g.neighbor.ranges[i]])) for i in ids]
+        pg, _ = clustered_cloud_2d()
+        hg = HyperCloudCore._event_grid(pg)
+        N  = pg.meta.N
+        @test hg !== pg && hg.core.positions !== pg.core.positions && hg.meta.N == N
+        @test view(hg.core.positions, 1:N) == view(pg.core.positions, 1:N) && view(hg.rhos, 1:N) == view(pg.rhos, 1:N)
+        @test all(isempty, view(hg.neighbor.ranges, 1:N))
+        ids = [3, 17, 17, 400, 3, N]
+        HyperCloudCore._ensure_lists!(hg, ids)
+        @test lists(hg, unique(ids)) == lists(pg, unique(ids))                 # entry for entry those of the full search
+        @test count(!isempty, view(hg.neighbor.ranges, 1:N)) == length(unique(ids))
+        HyperCloudCore._ensure_lists!(hg, [17, 18])                            # a list that exists is kept
+        @test lists(hg, [3, 17, 18, 400, N]) == lists(pg, [3, 17, 18, 400, N])
+        @test HyperCloudCore._event_grid(pg) === hg                            # kept between the calls, and filled again
+        @test all(isempty, view(hg.neighbor.ranges, 1:N))
+
+        for est in (nothing, ShepardVolumes()), own in (false, true)
+            (est === nothing && own) && continue
+            ad_e = ParticleAdaptivity(Float64; exclude_reduced_order = false, volume_estimator = est)
+            pg1, _ = clustered_cloud_2d()
+            pg2, _ = clustered_cloud_2d()
+            x1 = [State{1, Float64}(2 + cos(π * x[2])) for x in view(pg1.core.positions, 1:pg1.meta.N)]
+            x2 = copy(x1)
+            for call in 1:2                                                    # (the second call: a few events are left)
+                rep1 = adapt_particles!(pg1, ad_e, kmax; states = (x1,), own_volumes = own)
+                esc  = HyperCloudCore._escaped_particles(pg2)
+                has  = HyperCloudCore._has_adapt_candidates(pg2, ad_e)
+                rep2 = has ? HyperCloudCore._adapt_events!(pg2, HyperCloudCore._event_grid(pg2), ad_e, kmax, esc, has, (x2,), own, 0) : rep1
+                n = pg1.meta.N
+                @test (rep2.inserted, rep2.removed, rep2.refused) == (rep1.inserted, rep1.removed, rep1.refused)
+                @test pg2.meta.N == n && abs(rep2.mass_residual[1]) < 1e-13
+                @test view(pg2.core.positions, 1:n) == view(pg1.core.positions, 1:n)
+                @test maximum(abs(a[1] - b[1]) for (a, b) in zip(view(pg2.rhos, 1:n), view(pg1.rhos, 1:n))) < 1e-13
+                @test maximum(abs.(view(pg2.core.volumes, 1:n) .- view(pg1.core.volumes, 1:n))) < 1e-13
+                @test maximum(abs(a[1] - b[1]) for (a, b) in zip(view(x2, 1:n), view(x1, 1:n))) < 1e-13
+                @test lists(pg2, 1:n) == lists(pg1, 1:n)
+            end
+        end
+
+        # the compaction by blocks: the entries that stay, in order
+        a = collect(1:12)
+        HyperCloudCore._compact!(a, [1, 2, 6, 11, 12], 12)
+        @test a[1:7] == [3, 4, 5, 7, 8, 9, 10]
+        g = Growable(collect(1.0:6.0))
+        HyperCloudCore._compact!(g, [4], 6)
+        @test g[1:5] == [1.0, 2.0, 3.0, 5.0, 6.0]
+    end
+
     @testset "The cloud warning reports the closest pair of the particles that have neighbours" begin
         # a particle without neighbours used to be reported as the closest pair, at -1 / dx spacings
         pg = make_pg_1d(40; mover = LagrangianMover())

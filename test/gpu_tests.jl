@@ -167,9 +167,28 @@ const device_backend = ROCBackend()
             rep_ref = adapt_particles!(pg_m, ad, kmax)
             set_backend!(device_backend)
             rep = adapt_particles!(dg_m, ad, kmax)
-            @test (rep.inserted, rep.removed) == (rep_ref.inserted, rep_ref.removed) == (1, 2)
+            # (the merge, and in a later round of the same call the insertion into the gap the moved particle left)
+            @test (rep.inserted, rep.removed) == (rep_ref.inserted, rep_ref.removed) == (2, 2)
             @test dg_m.meta.N == pg_m.meta.N && maximum(abs.(rep.mass_residual)) < 1e-12
             @test Array(dg_m.rhos)[1:dg_m.meta.N] == pg_m.rhos[1:pg_m.meta.N]
+
+            # a second change of the same grid: the host copy of the first call is filled again (it is kept between
+            # the calls), with lists around the new candidates only
+            n   = pg_m.meta.N
+            pos = Array(dg_m.core.positions)[1:n]
+            pos[8] = pos[7] + Space{1, Float64}(0.2 * 2 / 40)
+            copyto!(parent(dg_m.core.positions), 1, DeviceArray(pos), 1, n)
+            dg_m.neighbor(dg_m)
+            rep = adapt_particles!(dg_m, ad, kmax)
+            set_backend!(PolyesterBackend())
+            pg_m.core.positions[8] = pg_m.core.positions[7] + Space{1, Float64}(0.2 * 2 / 40)
+            pg_m.neighbor(pg_m)
+            rep_ref = adapt_particles!(pg_m, ad, kmax)
+            set_backend!(device_backend)
+            @test (rep.inserted, rep.removed) == (rep_ref.inserted, rep_ref.removed) && rep.removed >= 2
+            @test dg_m.meta.N == pg_m.meta.N && maximum(abs.(rep.mass_residual)) < 1e-12
+            @test Array(dg_m.core.positions)[1:dg_m.meta.N] == pg_m.core.positions[1:pg_m.meta.N]
+            @test maximum(abs(a[1] - b[1]) for (a, b) in zip(Array(dg_m.rhos)[1:dg_m.meta.N], view(pg_m.rhos, 1:pg_m.meta.N))) < 1e-12
         end
 
         @testset "host buffers are rejected" begin

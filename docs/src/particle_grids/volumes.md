@@ -125,6 +125,19 @@ A call on a well-spaced cloud inside its region costs two kernels (the interior 
 
 The management is then 16 to 32 % of the run time (21 to 48 % before). One full neighbour search costs about a tenth of a time step; where the active region is smaller than the event spacing (the blast) a round serves one or two events, and a call ran to the limit of eight rounds, each with a search. (Before the measures of 0.9.10 a call cost about 10 time steps on C6 at 100²: 42 % the estimator's sweep over the region, 20 % the allocation of a scratch over all neighbour slots of the grid, 20 % detection over all particles.)
 
+On a device grid the events still run on the host, on a copy of the particle arrays (positions, states, volumes, wall geometry) that is kept between the calls. The neighbour slots stay on the device: the host searches the lists the events read, those of the candidates the device pre-check flagged, of the escaped particles and of the local sets of the remaps (a few hundred to a few thousand particles of a million), and repairs them between the rounds as on the host. The particle arrays are copied back and the device searches once. Up to 0.9.10 a call copied the whole grid with its neighbour slots to the host (in the slot-major layout of the device, converted in a serial loop), allocated that copy anew every time and searched all lists on the host. Measured in single precision (`RK2MUSCL2` with the VK limiter unless stated, $R = 2.5\,\Delta x$, 16 host threads), per call of the management:
+
+| case | GPU | particles | time step | call, 0.9.10 | call | in time steps |
+|:--|:--|:--|:--|:--|:--|:--|
+| 2-D Riemann C6, 800² | V100 | 702 k | 64 ms | 1950 ms | 227 ms | 30 → 3.5 |
+| 2-D Kelvin–Helmholtz, 512² | V100 | 290 k | 32 ms | 656 ms | 42 ms | 18 → 1.3 |
+| 2-D Sedov, 400², `RK2MUSCL1` | V100 | 179 k | 16 ms | 484 ms | 63 ms | 35 → 3.9 |
+| 3-D blast, 64³ | V100 | 266 k | 194 ms | 1705 ms | 212 ms | 8.8 → 1.1 |
+| 3-D blast, 100³ | A40 | 1.01 M | 610 ms | 4277 ms | 557 ms | 7.0 → 0.91 |
+| 3-D vortex, 100³ | A40 | 1.02 M | 592 ms | 3215 ms | 470 ms | 5.4 → 0.79 |
+
+The copies between the device and the host are then 10 to 30 ms of a call. What is left in 3-D is the quadrature of the remaps (about 200 ms at 100³, serial, the same code as on the host), the device search at the end (96 ms) and the pre-check (43 ms); in 2-D the passes over the whole cloud that every round makes on the host (the compaction, the list repair, the index maps), five rounds per call on C6. `HyperCloudCore._ADAPT_TIMING[] = true` collects the wall time of the sections of the calls in `HyperCloudCore._ADAPT_TIMES`.
+
 ### What the remap does not do
 
 - It does not change states outside the event's $3R$–$4R$ neighbourhood, so far-field solutions are untouched (with `volume_estimator`, far-field *volumes* change by the estimator's global renormalisation, typically $O(1/N)$; not with `own_volumes`).
