@@ -2050,6 +2050,26 @@ end
         @test g[1:5] == [1.0, 2.0, 3.0, 5.0, 6.0]
     end
 
+    @testset "The remaps in chunks on the host threads: the same cloud however they are launched" begin
+        # the quadrature slabs and the reconstruction chunks of a remap on Polyester, on Julia's threads and one after
+        # the other (the launch under a KernelAbstractions backend): bit for bit the same cloud
+        backend0 = get_backend()
+        clouds = map((PolyesterBackend(), ThreadsBackend(), KABackend(HyperCloudCore.KA.CPU()))) do b
+            set_backend!(PolyesterBackend())
+            pg, n_pairs = clustered_cloud_2d()
+            set_backend!(b)
+            rep = adapt_particles!(pg, ParticleAdaptivity(Float64; exclude_reduced_order = false), kmax)
+            @test rep.removed >= 2n_pairs && abs(rep.mass_residual[1]) < 1e-13
+            (collect(view(pg.core.positions, 1:pg.meta.N)), collect(view(pg.rhos, 1:pg.meta.N)), collect(view(pg.core.volumes, 1:pg.meta.N)))
+        end
+        set_backend!(backend0)
+        @test clouds[1] == clouds[2] == clouds[3]
+        @test HyperCloudCore._slab_sum([1.0, 2.0, 10.0, 20.0, 100.0, 200.0], 2, 3) == [111.0, 222.0]
+        seen = zeros(Int, 7)
+        HyperCloudCore._host_chunks((c, s) -> (s[c] += c; nothing), clustered_cloud_2d()[1], 7, (seen,))
+        @test seen == 1:7
+    end
+
     @testset "The cloud warning reports the closest pair of the particles that have neighbours" begin
         # a particle without neighbours used to be reported as the closest pair, at -1 / dx spacings
         pg = make_pg_1d(40; mover = LagrangianMover())
