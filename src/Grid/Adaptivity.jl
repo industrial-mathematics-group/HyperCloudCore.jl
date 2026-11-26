@@ -102,8 +102,11 @@ _adapt_result(::Type{S}; inserted = 0, removed = 0, mass_residual = zero(S), esc
 # Timing of the sections of a call (diagnostics)
 # -------------------------------------------------------------------------
 # `_ADAPT_TIMING[] = true` accumulates the wall time of the sections of `adapt_particles!` in `_ADAPT_TIMES` (seconds
-# by section name; `:gc` is the garbage collection inside the calls, `:calls` their number), with the device work
-# synchronised before every reading of the clock. Off by default: one branch per section.
+# by section name), with the device work synchronised before every reading of the clock. `:total_before_rounds`,
+# `:total_rounds` and `:total_after_rounds` are the phases of the event work with their sections, `:gc` is the garbage
+# collection inside the calls; `:calls`, `:rounds` and `:candidates` are counts. Off by default: one branch per
+# section. (How the cost of a call on a GPU was found: the copy of the neighbour slots to the host, the host search of
+# all lists, the allocation of the host copy; see `_event_grid`.)
 const _ADAPT_TIMING = Ref(false)
 const _ADAPT_TIMES  = Dict{Symbol, Float64}()
 _device_sync(pg::ParticleGrid) = _device_sync(get_backend(), parent(pg.rhos))
@@ -405,6 +408,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
             ensure_capacity!(pg.neighbor, _slot_capacity(eltype(pg.neighbor.ranges), total_nb, max_nb, N_new))
         end
 
+        t_bk = time_ns()
         # every particle this round removes, known to all its remaps (their local sets may overlap, `_event_spacing`)
         dead_mask = falses(N)
         for ev in events, r in ev.removed; dead_mask[r] = true; end
@@ -420,6 +424,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
         record = changed === nothing ? nothing : [Tuple{Int, State{M, T}, State{M, T}}[] for _ in all_states]
         fill!(view(hg.shared.int_buffer, 1:N), 0)         # the index map of the remaps, cleared once per round
         refused = 0
+        _adapt_lap!(:round_setup, t_bk)
         @_adapt_time :remap hg for ev in events
             # (an event that cannot be remapped, e.g. next to a particle without a volume, is left out: nothing is written)
             if _remap_event!(hg, ad, ev, new_pos, new_rho, new_vol, df; record = record, states = all_states, strict = false,
@@ -430,6 +435,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
             end
         end
         n_refused += refused
+        t_bk = time_ns()
         n_rem_ev = count(view(remove_mask, 1:N))
         n_add_ev = length(new_pos)
         (n_rem_ev + n_add_ev) == 0 && !pending && break   # (every event refused: the next round would find them again)
@@ -464,6 +470,7 @@ function _adapt_events!(pg::ParticleGrid{D, M, T}, hg::ParticleGrid{D, M, T}, ad
         end
         cand_kept = _compacted_ids(Iterators.flatten((cand, near)), new_index, N_kept)
         dirty = unique!([new_index[j] for j in near if new_index[j] != 0])
+        _adapt_lap!(:round_records, t_bk)
         @_adapt_time :compaction hg _apply_topology!(hg, remove_mask, new_pos, new_rho, new_vol, max_order; states = all_states)
         # The lists of the particles next to the change are written again, the others kept (`_repair_neighbours!`): a
         # full search per round was most of the cost of a call. Its slot layout is provisional: `repaired`.
